@@ -344,9 +344,7 @@ class WeatherBenchDataset(Dataset):
                 self.data[i] = data.repeat(self.time_size, axis=0)
 
         self.data = np.concatenate(self.data, axis=1)
-        print("self.data.shape", self.data.shape)
         self.mean = np.concatenate(self.mean, axis=1)
-        print("self.mean.shape", self.mean.shape)
         self.std = np.concatenate(self.std, axis=1)
 
         self.valid_idx = np.array(
@@ -425,14 +423,16 @@ def load_data(batch_size,
               data_split='5_625',
               data_name='t2m',
               train_time=['1979', '2015'],
-              val_time=['2016', '2016'],
-              test_time=['2017', '2018'],
+              val_time=None,
+              test_time=None,
               idx_in=[*range(0, 12)],
               idx_out=[*range(12, 24)],
               step=1,
               levels=['50'],
               distributed=False, use_augment=False, use_prefetcher=False, drop_last=False,
               **kwargs):
+
+    dataloader_train, dataloader_vali, dataloader_test = None, None, None
 
     assert data_split in ['5_625', '2_8125', '1_40625']
     for suffix in [f'weather_{data_split.replace("_", ".")}deg', f'weather', f'{data_split.replace("_", ".")}deg']:
@@ -444,22 +444,6 @@ def load_data(batch_size,
                                     idx_in=idx_in,
                                     idx_out=idx_out,
                                     step=step, levels=levels, use_augment=use_augment)
-    vali_set = WeatherBenchDataset(weather_dataroot,
-                                    data_name=data_name, data_split=data_split,
-                                    training_time=val_time,
-                                    idx_in=idx_in,
-                                    idx_out=idx_out,
-                                    step=step, levels=levels, use_augment=False,
-                                    mean=train_set.mean,
-                                    std=train_set.std)
-    test_set = WeatherBenchDataset(weather_dataroot,
-                                    data_name, data_split=data_split,
-                                    training_time=test_time,
-                                    idx_in=idx_in,
-                                    idx_out=idx_out,
-                                    step=step, levels=levels, use_augment=False,
-                                    mean=train_set.mean,
-                                    std=train_set.std)
 
     dataloader_train = create_loader(train_set,
                                      batch_size=batch_size,
@@ -467,18 +451,40 @@ def load_data(batch_size,
                                      pin_memory=True, drop_last=True,
                                      num_workers=num_workers,
                                      distributed=distributed, use_prefetcher=use_prefetcher)
-    dataloader_vali = create_loader(vali_set, # validation_set,
-                                    batch_size=val_batch_size,
-                                    shuffle=False, is_training=False,
-                                    pin_memory=True, drop_last=drop_last,
-                                    num_workers=num_workers,
-                                    distributed=distributed, use_prefetcher=use_prefetcher)
-    dataloader_test = create_loader(test_set,
-                                    batch_size=val_batch_size,
-                                    shuffle=False, is_training=False,
-                                    pin_memory=True, drop_last=drop_last,
-                                    num_workers=num_workers,
-                                    distributed=distributed, use_prefetcher=use_prefetcher)
+    
+    if val_time is not None:
+    
+        vali_set = WeatherBenchDataset(weather_dataroot,
+                                        data_name=data_name, data_split=data_split,
+                                        training_time=val_time,
+                                        idx_in=idx_in,
+                                        idx_out=idx_out,
+                                        step=step, levels=levels, use_augment=False,
+                                        mean=train_set.mean,
+                                        std=train_set.std)
+        dataloader_vali = create_loader(vali_set, # validation_set,
+                                        batch_size=val_batch_size,
+                                        shuffle=False, is_training=False,
+                                        pin_memory=True, drop_last=drop_last,
+                                        num_workers=num_workers,
+                                        distributed=distributed, use_prefetcher=use_prefetcher)
+        
+    if test_time is not None:
+        test_set = WeatherBenchDataset(weather_dataroot,
+                                        data_name, data_split=data_split,
+                                        training_time=test_time,
+                                        idx_in=idx_in,
+                                        idx_out=idx_out,
+                                        step=step, levels=levels, use_augment=False,
+                                        mean=train_set.mean,
+                                        std=train_set.std)
+
+        dataloader_test = create_loader(test_set,
+                                        batch_size=val_batch_size,
+                                        shuffle=False, is_training=False,
+                                        pin_memory=True, drop_last=drop_last,
+                                        num_workers=num_workers,
+                                        distributed=distributed, use_prefetcher=use_prefetcher)
 
     return dataloader_train, dataloader_vali, dataloader_test, train_set.mean, train_set.std
 

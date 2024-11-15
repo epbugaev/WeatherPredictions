@@ -1,4 +1,9 @@
 # Byte-compiled / optimized / DLL files
+convolution.ipynb
+logs
+notebooks/
+example_data/
+checkpoints/
 *.ipynb_checkpoints
 pics/
 __pycache__/

@@ -268,13 +268,14 @@ class PDE_kernel(nn.Module):
         return q
     ################################################################
 
-
+    # Смотреть сюда
     def forward(self, x, zquvtw):
         # x [B, D, H, W]
         skip = x
 
         ################################################################
         zquvtw_old = 0.9*self.variable_norm(x) + 0.1*zquvtw
+        # zquvtw_old = zquvtw
         z_old, t_old, q_old, u_old, v_old= zquvtw_old.chunk(5, dim=1)
 
         w_old = self.get_w(u_old, v_old)
@@ -569,7 +570,6 @@ class HybridBlock(nn.Module):
             weight_AI = 0.5*torch.ones_like(x)+self.router_weight
             weight_Physics = 0.5*torch.ones_like(x)-self.router_weight
             x = weight_AI*feat_att + weight_Physics*feat_pde
-            print("all")
             # x = weight_AI*feat_att
             x = self.router_MLP(x)
             return x, zquvtw
@@ -801,7 +801,7 @@ class GFT(nn.Module):
         block_seconds = [l*second_per_block for l in block_seconds]
         return block_seconds
 
-
+    # Смотреть сюда
     def x_to_zquvtw(self, x):
         zquvtw = x[:,4:] # B, 65, 128, 256
         _, _, self.H, self.W = zquvtw.shape
@@ -820,20 +820,26 @@ class GFT(nn.Module):
         return x_t_emb
     
     
-    def forward(self, x):
+    def forward(self, x, zquvtw=None):
         
         GFT.layer_weights.clear()
         GFT.gft_name = ""
         
         output = []
-        zquvtw = self.x_to_zquvtw(x)
+        zquvtw_list = []
+        if zquvtw is None:
+            zquvtw = self.x_to_zquvtw(x)
+        else:
+            zquvtw = zquvtw[:,4:]
+            zquvtw = zquvtw.permute(0, 2, 3, 1) # B, 32, 64, 65
+        zquvtw_list.append(zquvtw)
         for idx, layer in enumerate(self.encoder):
             GFT.gft_name = f"{idx}_encoder"
             x = layer(x)
         for layer_idx, layer in enumerate(self.body):
             GFT.gft_name = f"{layer_idx}_body"
             x, zquvtw = layer(x, zquvtw)
-
+            zquvtw_list.append(zquvtw)
             if layer_idx in self.out_layer:
                 
                 x_t_emb = self.cat_t_emb(x, layer_idx)
@@ -843,9 +849,9 @@ class GFT(nn.Module):
                 output.append(x_t_emb)
 
         if len(output) == 1:
-            return output[0]
+            return output[0], zquvtw_list
         else:
-            return torch.stack(output, dim=1)
+            return torch.stack(output, dim=1), zquvtw_list
 
 
 
