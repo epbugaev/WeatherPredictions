@@ -95,6 +95,42 @@ def get_warmup_scheduler(optimizer, warmup_epochs, steps_per_epoch, last_epoch=-
     
     return LambdaLR(optimizer, lr_lambda, last_epoch)
 
+def validate(model, dataloader, criterion, device, epoch, rank):
+    """Функция валидации модели"""
+    model.eval()
+    total_loss = 0
+    val_losses_df = pd.DataFrame(columns=['epoch', 'batch', 'loss'])
+    
+    with torch.no_grad():
+        for batch_idx, (inputs, targets) in enumerate(dataloader):
+            inputs = inputs.to(device)
+            targets = targets.to(device)
+            
+            with autocast():
+                outputs = model(inputs)
+                loss = criterion(outputs, targets)
+            
+            # Собираем статистику со всех процессов
+            loss_item = loss.item()
+            dist.all_reduce(torch.tensor([loss_item]).to(device))
+            total_loss += loss_item
+            
+            # Сохраняем статистику
+            if rank == 0:
+                val_losses_df = val_losses_df.append({
+                    'epoch': epoch,
+                    'batch': batch_idx,
+                    'loss': loss_item,
+                }, ignore_index=True)
+    
+    avg_loss = total_loss / len(dataloader)
+    
+    # Сохраняем CSV с результатами валидации
+    if rank == 0:
+        val_losses_df.to_csv(f'validation_losses_epoch_{epoch}.csv', index=False)
+    
+    return avg_loss
+
 def train(rank, world_size, args_for_train):
     # logger = setup_logging(rank)
     setup(rank, world_size)
@@ -177,7 +213,7 @@ def train(rank, world_size, args_for_train):
     
     cosine_scheduler = CosineAnnealingLR(
         optimizer,
-        T_max=train_epochs * steps_per_epoch,
+        T_max=args_for_train.train_epochs * steps_per_epoch,
         eta_min=0
     )
     
@@ -220,13 +256,18 @@ def train(rank, world_size, args_for_train):
             loss_item = loss.item()
             dist.all_reduce(torch.tensor([loss_item]).to(device))
             total_loss += loss_item
-            
+
+            epoch_time = time.time() - epoch_start_time
+            avg_loss = total_loss / len(dataloader_train)
+
             # Сохраняем статистику
             if rank == 0:
                 losses_df = losses_df.append({
                     'epoch': epoch,
                     'batch': batch_idx,
                     'loss': loss_item,
+                    'avg_loss': avg_loss,
+                    'epoch_time': epoch_time,
                     'lr': optimizer.param_groups[0]['lr']
                 }, ignore_index=True)
             
@@ -241,9 +282,6 @@ def train(rank, world_size, args_for_train):
         # Сохраняем CSV после каждой эпохи
         if rank == 0:
             losses_df.to_csv(f'training_losses.csv', index=False)
-        
-        epoch_time = time.time() - epoch_start_time
-        avg_loss = total_loss / len(dataloader_train)
         
         # Сохранение чекпоинта каждые 5 эпох
         if rank == 0 and epoch % 5 == 0:
@@ -260,6 +298,21 @@ def train(rank, world_size, args_for_train):
             os.makedirs('checkpoints', exist_ok=True)
             torch.save(checkpoint, checkpoint_path)
             print(f'Сохранен чекпоинт: {checkpoint_path}')
+        
+        if dataloader_vali is not None:
+            # Добавляем валидацию каждые 5 эпох
+            if epoch % 5 == 0:
+                val_loss = validate(model, dataloader_vali, criterion, device, epoch, rank)
+                if rank == 0:
+                    print(f'Epoch {epoch}, Validation Loss: {val_loss:.6f}')
+                
+                    # Добавляем результаты валидации в основной DataFrame
+                    losses_df = losses_df.append({
+                        'epoch': epoch,
+                        'batch': 'validation',
+                        'loss': val_loss,
+                        'lr': optimizer.param_groups[0]['lr']
+                    }, ignore_index=True)
     
     cleanup()
 
