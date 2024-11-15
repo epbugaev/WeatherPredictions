@@ -17,6 +17,51 @@ from Models.WeatherGFT import GFT
 from utils.dataloader import load_data
 # from utils.dataloader_ddp import load_data
 
+import argparse
+
+parser = argparse.ArgumentParser(description='Training script')
+parser.add_argument('--warmup_epochs', type=int, default=5, help='Number of warmup epochs')
+parser.add_argument('--train_epochs', type=int, default=50, help='Number of training epochs')
+parser.add_argument('--batch_size', type=int, default=8, help='Batch size')
+parser.add_argument('--data_root', type=str, default='/home/fratnikov/weather_bench/', help='Data root')
+
+parser.add_argument('--num_workers', type=int, default=10, help='Number of workers')
+parser.add_argument('--data_split', type=str, default='1_40625', help='Data split')
+parser.add_argument('--data_name', type=str, default='mv_gft', help='Data name')
+parser.add_argument('--train_time', type=list, default=['1980', '2015'], help='Train time')
+parser.add_argument('--val_time', type=list, default=None, help='Validation time')
+parser.add_argument('--test_time', type=list, default=None, help='Test time')
+parser.add_argument('--idx_in', type=list, default=[0], help='Index in')
+parser.add_argument('--idx_out', type=list, default=[1, 3, 6], help='Index out')
+parser.add_argument('--step', type=int, default=1, help='Step')
+parser.add_argument('--levels', type=str, default='all', help='Levels')
+parser.add_argument('--distributed', type=bool, default=True, help='Distributed')
+parser.add_argument('--use_augment', type=bool, default=False, help='Use augment')
+parser.add_argument('--use_prefetcher', type=bool, default=False, help='Use prefetcher')
+
+parser.add_argument('--encoder_layers', type=list, default=[2, 2, 2], help='Encoder layers')
+parser.add_argument('--edcoder_heads', type=list, default=[3, 6, 6], help='Encoder heads')
+parser.add_argument('--encoder_scaling_factors', type=list, default=[0.5, 0.5, 1], help='Encoder scaling factors')
+parser.add_argument('--encoder_dim_factors', type=list, default=[-1, 2, 2], help='Encoder dim factors')
+parser.add_argument('--body_layers', type=list, default=[4, 4, 4, 4, 4, 4], help='Body layers')
+parser.add_argument('--body_heads', type=list, default=[8, 8, 8, 8, 8, 8], help='Body heads')
+parser.add_argument('--body_scaling_factors', type=list, default=[1, 1, 1, 1, 1, 1], help='Body scaling factors')
+parser.add_argument('--body_dim_factors', type=list, default=[1, 1, 1, 1, 1, 1], help='Body dim factors')
+parser.add_argument('--decoder_layers', type=list, default=[2, 2, 2], help='Decoder layers')
+parser.add_argument('--decoder_heads', type=list, default=[6, 6, 3], help='Decoder heads')
+parser.add_argument('--decoder_scaling_factors', type=list, default=[1, 2, 1], help='Decoder scaling factors')
+parser.add_argument('--decoder_dim_factors', type=list, default=[1, 0.5, 1], help='Decoder dim factors')
+parser.add_argument('--channels', type=int, default=69, help='Channels')
+parser.add_argument('--head_dim', type=int, default=128, help='Head dim')
+parser.add_argument('--window_size', type=list, default=[4,8], help='Window size')
+parser.add_argument('--relative_pos_embedding', type=bool, default=False, help='Relative pos embedding')
+parser.add_argument('--out_kernel', type=list, default=[2,2], help='Out kernel')
+parser.add_argument('--pde_block_depth', type=int, default=3, help='PDE block depth')
+parser.add_argument('--block_dt', type=int, default=300, help='Block dt')
+parser.add_argument('--inverse_time', type=bool, default=False, help='Inverse time')
+
+args_for_train = parser.parse_args()
+
 
 
 def setup_logging(rank):
@@ -50,59 +95,57 @@ def get_warmup_scheduler(optimizer, warmup_epochs, steps_per_epoch, last_epoch=-
     
     return LambdaLR(optimizer, lr_lambda, last_epoch)
 
-def train(rank, world_size, warmup_epochs=5, train_epochs=50):
+def train(rank, world_size, args_for_train):
     # logger = setup_logging(rank)
     setup(rank, world_size)
 
 
-    batch_size = 8
-    data_root = '/home/fratnikov/weather_bench/'
+    batch_size = args_for_train.batch_size
+    data_root = args_for_train.data_root
 
     dataloader_train, dataloader_vali, dataloader_test, mean, std = load_data(batch_size=batch_size,
                                                                         val_batch_size=batch_size,
                                                                         data_root=data_root,
-                                                                        num_workers=10,
-                                                                        data_split='1_40625',
-                                                                        # data_split='5_625',
-                                                                        data_name='mv_gft',
-                                                                        # train_time=['2015', '2018'],
-                                                                        train_time=['2015', '2015'],
-                                                                        # val_time=['2018', '2018'],
-                                                                        # test_time=['2018', '2018'],
-                                                                        # val_time=None,
-                                                                        test_time=None,
-                                                                        idx_in=[0],
-                                                                        idx_out=[1, 3, 6],
-                                                                        step=1,
-                                                                        levels='all', 
-                                                                        distributed=True, use_augment=False,
-                                                                        use_prefetcher=False, drop_last=False)
+                                                                        num_workers=args_for_train.num_workers,
+                                                                        data_split=args_for_train.data_split,
+                                                                        data_name=args_for_train.data_name,
+                                                                        train_time=args_for_train.train_time,
+                                                                        val_time=args_for_train.val_time,
+                                                                        test_time=args_for_train.test_time,
+                                                                        idx_in=args_for_train.idx_in,
+                                                                        idx_out=args_for_train.idx_out,
+                                                                        step=args_for_train.step,
+                                                                        levels=args_for_train.levels,
+                                                                        distributed=args_for_train.distributed, 
+                                                                        use_augment=args_for_train.use_augment,
+                                                                        use_prefetcher=args_for_train.use_prefetcher, 
+                                                                        drop_last=args_for_train.drop_last)
     
-    model = GFT(hidden_dim=256,
-            encoder_layers=[2, 2, 2],
-            edcoder_heads=[3, 6, 6],
-            encoder_scaling_factors=[0.5, 0.5, 1], # [128, 256] --> [64, 128] --> [32, 64] --> [32, 64], that is, patch size = 4 (128/32)
-            encoder_dim_factors=[-1, 2, 2],
+    model = GFT(hidden_dim=args_for_train.hidden_dim,
+            encoder_layers=args_for_train.encoder_layers,
+            edcoder_heads=args_for_train.edcoder_heads,
+            encoder_scaling_factors=args_for_train.encoder_scaling_factors,
+            encoder_dim_factors=args_for_train.encoder_dim_factors,
 
-            body_layers=[4, 4, 4, 4, 4, 4], # A total of 4x6=24 HybridBlock, corresponding to 6 hours (24x15min) of time evolution
-            body_heads=[8, 8, 8, 8, 8, 8],
-            body_scaling_factors=[1, 1, 1, 1, 1, 1],
-            body_dim_factors=[1, 1, 1, 1, 1, 1],
+            body_layers=args_for_train.body_layers,
+            body_heads=args_for_train.body_heads,
+            body_scaling_factors=args_for_train.body_scaling_factors,
+            body_dim_factors=args_for_train.body_dim_factors,
 
-            decoder_layers=[2, 2, 2],
-            decoder_heads=[6, 6, 3],
-            decoder_scaling_factors=[1, 2, 1],
-            decoder_dim_factors=[1, 0.5, 1],
+            decoder_layers=args_for_train.decoder_layers,
+            decoder_heads=args_for_train.decoder_heads,
+            decoder_scaling_factors=args_for_train.decoder_scaling_factors,
+            decoder_dim_factors=args_for_train.decoder_dim_factors,
 
-            channels=69,
-            head_dim=128,
-            window_size=[4,8],
-            relative_pos_embedding=False,
-            out_kernel=[2,2],
+            channels=args_for_train.channels,
+            head_dim=args_for_train.head_dim,
+            window_size=args_for_train.window_size,
+            relative_pos_embedding=args_for_train.relative_pos_embedding,
+            out_kernel=args_for_train.out_kernel,
 
-            pde_block_depth=3, # 1 HybridBlock contains 3 PDE kernels, corresponding to 15 minutes (3x300s) of time evolution
-            block_dt=300, # One PDE kernel corresponds to 300s of time evolution
-            inverse_time=False)
+            pde_block_depth=args_for_train.pde_block_depth,
+            block_dt=args_for_train.block_dt,
+            inverse_time=args_for_train.inverse_time)
     
     print(f"Model created")
 
@@ -128,7 +171,7 @@ def train(rank, world_size, warmup_epochs=5, train_epochs=50):
     # Создаем два планировщика
     warmup_scheduler = get_warmup_scheduler(
         optimizer, 
-        warmup_epochs=warmup_epochs,
+        warmup_epochs=args_for_train.warmup_epochs,
         steps_per_epoch=steps_per_epoch
     )
     
@@ -146,7 +189,7 @@ def train(rank, world_size, warmup_epochs=5, train_epochs=50):
     print(f"Criterion set to L1Loss")
     
     global_step = 0
-    total_epochs = warmup_epochs + train_epochs
+    total_epochs = args_for_train.warmup_epochs + args_for_train.train_epochs
     
     for epoch in range(total_epochs):
         epoch_start_time = time.time()
@@ -188,7 +231,7 @@ def train(rank, world_size, warmup_epochs=5, train_epochs=50):
                 }, ignore_index=True)
             
             # Выбираем планировщик в зависимости от эпохи
-            if epoch < warmup_epochs:
+            if epoch < args_for_train.warmup_epochs:
                 warmup_scheduler.step()
             else:
                 cosine_scheduler.step()
@@ -225,7 +268,7 @@ if __name__ == "__main__":
     print(f"World size: {world_size}")
     torch.multiprocessing.spawn(
         train,
-        args=(world_size,),
+        args=(world_size,args_for_train),
         nprocs=world_size,
         join=True
     )
