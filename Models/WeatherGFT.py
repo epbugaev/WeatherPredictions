@@ -560,6 +560,8 @@ class HybridBlock(nn.Module):
         if self.use_pde:
             # AI & Physics
             feat_att = self.attention_block(x)
+            # feat_att = self.conv_block(x)
+
             feat_pde, zquvtw = self.pde_block(x, zquvtw)
             
             # Adaptive Router
