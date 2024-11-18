@@ -59,6 +59,7 @@ parser.add_argument('--out_kernel', type=list, default=[2,2], help='Out kernel')
 parser.add_argument('--pde_block_depth', type=int, default=3, help='PDE block depth')
 parser.add_argument('--block_dt', type=int, default=300, help='Block dt')
 parser.add_argument('--inverse_time', type=bool, default=False, help='Inverse time')
+parser.add_argument('--drop_last', type=bool, default=True, help='Drop last incomplete batch')
 
 args_for_train = parser.parse_args()
 
