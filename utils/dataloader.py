@@ -382,7 +382,7 @@ class WeatherBenchDataset(Dataset):
 
         mean = data.mean(axis=(0, 2, 3), keepdims=True)
         std = data.std(axis=(0, 2, 3), keepdims=True)
-
+        print("mean.shape, std.shape", mean.shape, std.shape)
         data = (data - mean) / std
 
         return data, mean, std

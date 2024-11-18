@@ -33,7 +33,7 @@ class PrefetchLoader:
                  mean=None,
                  std=None,
                  channels=3,
-                 fp16=False,
+                 fp16=True,
                  amp_dtype=torch.float16):
 
         self.fp16 = fp16
@@ -102,7 +102,7 @@ def create_loader_(dataset,
                   distributed=False,
                   pin_memory=False,
                   drop_last=False,
-                  fp16=False,
+                  fp16=True,
                   amp_dtype=torch.float16,
                   collate_fn=None,
                   persistent_workers=True,
@@ -185,7 +185,7 @@ def create_loader(dataset,
                   distributed=False,
                   pin_memory=False,
                   drop_last=False,
-                  fp16=False,
+                  fp16=True,
                   amp_dtype=torch.float16,
                   collate_fn=None,
                   persistent_workers=True,
@@ -338,7 +338,7 @@ class WeatherBenchDataset(Dataset):
             self.data.append(data)
             self.mean.append(mean)
             self.std.append(std)
-        print(self.mean[0].shape)
+
         for i, data in enumerate(self.data):
             if data.shape[0] != self.time_size:
                 self.data[i] = data.repeat(self.time_size, axis=0)
@@ -379,7 +379,6 @@ class WeatherBenchDataset(Dataset):
             data = dataset.get(data_keys_map[data_name]).values
         else:
             data = dataset.get(data_name).values
-
         mean = data.mean(axis=(0, 2, 3), keepdims=True)
         std = data.std(axis=(0, 2, 3), keepdims=True)
 

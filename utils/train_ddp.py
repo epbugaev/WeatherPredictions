@@ -22,13 +22,14 @@ import argparse
 parser = argparse.ArgumentParser(description='Training script')
 parser.add_argument('--warmup_epochs', type=int, default=5, help='Number of warmup epochs')
 parser.add_argument('--train_epochs', type=int, default=50, help='Number of training epochs')
-parser.add_argument('--batch_size', type=int, default=8, help='Batch size')
+parser.add_argument('--batch_size', type=int, default=4, help='Batch size')
 parser.add_argument('--data_root', type=str, default='/home/fratnikov/weather_bench/', help='Data root')
 
 parser.add_argument('--num_workers', type=int, default=10, help='Number of workers')
-parser.add_argument('--data_split', type=str, default='1_40625', help='Data split')
+# parser.add_argument('--data_split', type=str, default='1_40625', help='Data split')
+parser.add_argument('--data_split', type=str, default='5_625', help='Data split')
 parser.add_argument('--data_name', type=str, default='mv_gft', help='Data name')
-parser.add_argument('--train_time', type=list, default=['1980', '2015'], help='Train time')
+parser.add_argument('--train_time', type=list, default=['2015', '2015'], help='Train time')
 parser.add_argument('--val_time', type=list, default=None, help='Validation time')
 parser.add_argument('--test_time', type=list, default=None, help='Test time')
 parser.add_argument('--idx_in', type=list, default=[0], help='Index in')
@@ -39,6 +40,7 @@ parser.add_argument('--distributed', type=bool, default=True, help='Distributed'
 parser.add_argument('--use_augment', type=bool, default=False, help='Use augment')
 parser.add_argument('--use_prefetcher', type=bool, default=False, help='Use prefetcher')
 
+parser.add_argument('--hidden_dim', type=int, default=256, help='Hidden dimension size')
 parser.add_argument('--encoder_layers', type=list, default=[2, 2, 2], help='Encoder layers')
 parser.add_argument('--edcoder_heads', type=list, default=[3, 6, 6], help='Encoder heads')
 parser.add_argument('--encoder_scaling_factors', type=list, default=[0.5, 0.5, 1], help='Encoder scaling factors')
@@ -118,11 +120,11 @@ def validate(model, dataloader, criterion, device, epoch, rank):
             
             # Сохраняем статистику
             if rank == 0:
-                val_losses_df = val_losses_df.append({
+                val_losses_df = pd.concat([val_losses_df, pd.DataFrame([{
                     'epoch': epoch,
                     'batch': batch_idx,
                     'loss': loss_item,
-                }, ignore_index=True)
+                }])], ignore_index=True)
     
     avg_loss = total_loss / len(dataloader)
     
@@ -135,6 +137,34 @@ def validate(model, dataloader, criterion, device, epoch, rank):
 def train(rank, world_size, args_for_train):
     # logger = setup_logging(rank)
     setup(rank, world_size)
+    
+    model = GFT(hidden_dim=args_for_train.hidden_dim,
+        encoder_layers=args_for_train.encoder_layers,
+        edcoder_heads=args_for_train.edcoder_heads,
+        encoder_scaling_factors=args_for_train.encoder_scaling_factors,
+        encoder_dim_factors=args_for_train.encoder_dim_factors,
+
+        body_layers=args_for_train.body_layers,
+        body_heads=args_for_train.body_heads,
+        body_scaling_factors=args_for_train.body_scaling_factors,
+        body_dim_factors=args_for_train.body_dim_factors,
+
+        decoder_layers=args_for_train.decoder_layers,
+        decoder_heads=args_for_train.decoder_heads,
+        decoder_scaling_factors=args_for_train.decoder_scaling_factors,
+        decoder_dim_factors=args_for_train.decoder_dim_factors,
+
+        channels=args_for_train.channels,
+        head_dim=args_for_train.head_dim,
+        window_size=args_for_train.window_size,
+        relative_pos_embedding=args_for_train.relative_pos_embedding,
+        out_kernel=args_for_train.out_kernel,
+
+        pde_block_depth=args_for_train.pde_block_depth,
+        block_dt=args_for_train.block_dt,
+        inverse_time=args_for_train.inverse_time)
+    
+    print(f"Model created")
 
 
     batch_size = args_for_train.batch_size
@@ -158,54 +188,29 @@ def train(rank, world_size, args_for_train):
                                                                         use_prefetcher=args_for_train.use_prefetcher, 
                                                                         drop_last=args_for_train.drop_last)
     
-    model = GFT(hidden_dim=args_for_train.hidden_dim,
-            encoder_layers=args_for_train.encoder_layers,
-            edcoder_heads=args_for_train.edcoder_heads,
-            encoder_scaling_factors=args_for_train.encoder_scaling_factors,
-            encoder_dim_factors=args_for_train.encoder_dim_factors,
 
-            body_layers=args_for_train.body_layers,
-            body_heads=args_for_train.body_heads,
-            body_scaling_factors=args_for_train.body_scaling_factors,
-            body_dim_factors=args_for_train.body_dim_factors,
+    print(f"Dataloaders created")
+    x_train, y_train = next(iter(dataloader_train))
+    print(f"x_train: {x_train.shape}, y_train: {y_train.shape}")
 
-            decoder_layers=args_for_train.decoder_layers,
-            decoder_heads=args_for_train.decoder_heads,
-            decoder_scaling_factors=args_for_train.decoder_scaling_factors,
-            decoder_dim_factors=args_for_train.decoder_dim_factors,
 
-            channels=args_for_train.channels,
-            head_dim=args_for_train.head_dim,
-            window_size=args_for_train.window_size,
-            relative_pos_embedding=args_for_train.relative_pos_embedding,
-            out_kernel=args_for_train.out_kernel,
-
-            pde_block_depth=args_for_train.pde_block_depth,
-            block_dt=args_for_train.block_dt,
-            inverse_time=args_for_train.inverse_time)
-    
-    print(f"Model created")
-
-    # Инициализация DataFrame для сохранения лоссов
     if rank == 0:
         losses_df = pd.DataFrame(columns=['epoch', 'batch', 'loss', 'lr'])
     
     # Перемещаем модель на GPU
-    device = torch.device(f"cuda:{rank}")
-    model = model.to(device)
-    print(f"Model moved to device: {device}")
+    # device = torch.device(f"cuda:{rank}")
+    device_id = rank % torch.cuda.device_count()
+    model = model.to(device_id)
+    print(f"Model moved to device: {device_id}")
     
     # Оборачиваем модель в DDP
-    model = DDP(model, device_ids=[rank])
+    model = DDP(model, device_ids=[device_id])
     print(f"Model wrapped in DDP")
     
-    # Оптимизатор и планировщики
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
     
-    # Вычисляем количество шагов на эпоху для планировщика
     steps_per_epoch = len(dataloader_train)
     
-    # Создаем два планировщика
     warmup_scheduler = get_warmup_scheduler(
         optimizer, 
         warmup_epochs=args_for_train.warmup_epochs,
@@ -234,20 +239,32 @@ def train(rank, world_size, args_for_train):
         total_loss = 0
         print(f"Epoch {epoch} started")
         
+        avg_loss = float('inf')
+        
         for batch_idx, (inputs, targets) in enumerate(dataloader_train):
-            inputs = inputs.to(device)
-            targets = targets.to(device)
+            inputs = inputs.to(device_id).squeeze(1)
+            targets = targets.to(device_id)
+
+
+            if torch.isnan(inputs).any() or torch.isnan(targets).any():
+                print(f"NaN detected in input data! Batch {batch_idx}")
+                continue
+
             print(f"Inputs and targets moved to device")
             optimizer.zero_grad()
             print(f"Optimizer zero grad")
-            # Используем autocast для FP16
-            with autocast():
+
+            with autocast(dtype=torch.float32):
                 outputs = model(inputs)
+
+                if torch.isnan(outputs).any():
+                    print(f"NaN detected in model outputs! Batch {batch_idx}")
+                    continue
+
                 print(f"Outputs computed")
                 loss = criterion(outputs, targets)
                 print(f"Loss computed")
             
-            # Обратное распространение с FP16
             print(f"Loss: {loss.item()}")
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -255,22 +272,23 @@ def train(rank, world_size, args_for_train):
             
             # Собираем статистику со всех процессов
             loss_item = loss.item()
-            dist.all_reduce(torch.tensor([loss_item]).to(device))
+            dist.all_reduce(torch.tensor([loss_item]).to(device_id))
             total_loss += loss_item
 
+            # Вычисляем среднюю потерю после каждого батча
+            avg_loss = total_loss / (batch_idx + 1)  # Изменено с len(dataloader_train)
             epoch_time = time.time() - epoch_start_time
-            avg_loss = total_loss / len(dataloader_train)
 
             # Сохраняем статистику
             if rank == 0:
-                losses_df = losses_df.append({
+                losses_df = pd.concat([losses_df, pd.DataFrame([{
                     'epoch': epoch,
                     'batch': batch_idx,
                     'loss': loss_item,
                     'avg_loss': avg_loss,
                     'epoch_time': epoch_time,
                     'lr': optimizer.param_groups[0]['lr']
-                }, ignore_index=True)
+                }])], ignore_index=True)
             
             # Выбираем планировщик в зависимости от эпохи
             if epoch < args_for_train.warmup_epochs:
@@ -279,8 +297,7 @@ def train(rank, world_size, args_for_train):
                 cosine_scheduler.step()
             
             global_step += 1
-        
-        # Сохраняем CSV после каждой эпохи
+                # Сохраняем CSV после каждой эпохи
         if rank == 0:
             losses_df.to_csv(f'training_losses.csv', index=False)
         
@@ -303,17 +320,18 @@ def train(rank, world_size, args_for_train):
         if dataloader_vali is not None:
             # Добавляем валидацию каждые 5 эпох
             if epoch % 5 == 0:
-                val_loss = validate(model, dataloader_vali, criterion, device, epoch, rank)
+                val_loss = validate(model, dataloader_vali, criterion, device_id, epoch, rank)
                 if rank == 0:
                     print(f'Epoch {epoch}, Validation Loss: {val_loss:.6f}')
                 
                     # Добавляем результаты валидации в основной DataFrame
-                    losses_df = losses_df.append({
-                        'epoch': epoch,
-                        'batch': 'validation',
-                        'loss': val_loss,
-                        'lr': optimizer.param_groups[0]['lr']
-                    }, ignore_index=True)
+                    if rank == 0:
+                        losses_df = pd.concat([losses_df, pd.DataFrame([{
+                            'epoch': epoch,
+                            'batch': 'validation',
+                            'loss': val_loss,
+                            'lr': optimizer.param_groups[0]['lr']
+                        }])], ignore_index=True)
     
     cleanup()
 

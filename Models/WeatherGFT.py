@@ -268,14 +268,13 @@ class PDE_kernel(nn.Module):
         return q
     ################################################################
 
-    # Смотреть сюда
+
     def forward(self, x, zquvtw):
         # x [B, D, H, W]
         skip = x
 
         ################################################################
         zquvtw_old = 0.9*self.variable_norm(x) + 0.1*zquvtw
-        # zquvtw_old = zquvtw
         z_old, t_old, q_old, u_old, v_old= zquvtw_old.chunk(5, dim=1)
 
         w_old = self.get_w(u_old, v_old)
@@ -383,86 +382,6 @@ def get_relative_distances(window_size):
     return distances
 
 
-class GRN(nn.Module):
-    """ GRN (Global Response Normalization) layer
-    """
-    def __init__(self, dim):
-        super().__init__()
-        self.gamma = nn.Parameter(torch.zeros(1, 1, 1, dim))
-        self.beta = nn.Parameter(torch.zeros(1, 1, 1, dim))
-
-    def forward(self, x):
-        Gx = torch.norm(x, p=2, dim=(1,2), keepdim=True)
-        Nx = Gx / (Gx.mean(dim=-1, keepdim=True) + 1e-6)
-        return self.gamma * (x * Nx) + self.beta + x
-
-
-class ConvNeXtV2Block(nn.Module):
-    """ ConvNeXtV2 Block.
-    
-    Args:
-        dim (int): Number of input channels.
-    """
-    def __init__(self, dim):
-        super().__init__()
-        self.dwconv = nn.Conv2d(dim, dim, kernel_size=7, padding=3, groups=dim) # depthwise conv
-        self.norm = nn.LayerNorm(dim, eps=1e-6)
-        self.pwconv1 = nn.Linear(dim, 4 * dim) # pointwise/1x1 convs, implemented with linear layers
-        self.act = nn.GELU()
-        self.grn = GRN(4 * dim)
-        self.pwconv2 = nn.Linear(4 * dim, dim)
-
-    def forward(self, x):
-        input = x
-        x = self.dwconv(x)
-        x = x.permute(0, 2, 3, 1) # (N, C, H, W) -> (N, H, W, C)
-        x = self.norm(x)
-        x = self.pwconv1(x)
-        x = self.act(x)
-        x = self.grn(x)
-        x = self.pwconv2(x)
-        x = x.permute(0, 3, 1, 2) # (N, H, W, C) -> (N, C, H, W)
-
-        x = input + x
-        return x
-
-
-class WindowConvModule(nn.Module):
-    """ ConvNeXtV2 Block to adjust for errors in physical variable 
-    calculation in PDE kernels. 
-    
-    Args:
-        dim (int): Number of input channels.
-        shifted (bool): whether this block is shifted (Shifted Windows). 
-        windows_size (int): size of windows (Shifted Windows).
-    """
-    def __init__(self, dim, shifted, window_size):
-        super().__init__()
-        self.window_size = window_size
-        self.shifted = shifted
-
-        if self.shifted:
-            displacement = [window_size[0] // 2, window_size[1] // 2]
-            displacement_ = [-window_size[0] // 2, -window_size[1] // 2]
-            self.cyclic_shift = CyclicShift(displacement_)
-            self.cyclic_back_shift = CyclicShift(displacement)
-
-        self.conv_block = ConvNeXtV2Block(dim=dim)
-
-    def forward(self, x):
-        if self.shifted:
-            x = self.cyclic_shift(x)
-
-        x = x.permute(0, 3, 1, 2).contiguous() # Switch to [BS, Channels, H, W]
-
-        x = self.conv_block(x)
-        
-        out = x.permute(0, 2, 3, 1).contiguous() #[1, 180, 360, 96], switching back to [BS, H, W, Channels]
-        if self.shifted:
-            out = self.cyclic_back_shift(out)
-        return out
-
-
 class WindowAttention(nn.Module):
     def __init__(self, dim, heads, head_dim, shifted, window_size, relative_pos_embedding):
         super().__init__()
@@ -546,10 +465,6 @@ class HybridBlock(nn.Module):
                                                                      shifted=shifted,
                                                                      window_size=window_size,
                                                                      relative_pos_embedding=relative_pos_embedding)))
-        self.conv_block = Residual(PreNorm(dim, WindowConvModule(dim=dim,
-                                                                     shifted=shifted,
-                                                                     window_size=window_size)))
-
         self.use_pde = use_pde
         if use_pde:
             self.pde_block = PDE_block(dim, zquvtw_channel, depth, block_dt, inverse_time)
@@ -561,8 +476,6 @@ class HybridBlock(nn.Module):
         if self.use_pde:
             # AI & Physics
             feat_att = self.attention_block(x)
-            # feat_att = self.conv_block(x)
-
             feat_pde, zquvtw = self.pde_block(x, zquvtw)
             
             # Adaptive Router
@@ -575,8 +488,6 @@ class HybridBlock(nn.Module):
             return x, zquvtw
         else:
             x = self.attention_block(x)
-            # x = self.conv_block(x)
-
             x = self.router_MLP(x)
             return x
 
@@ -801,7 +712,7 @@ class GFT(nn.Module):
         block_seconds = [l*second_per_block for l in block_seconds]
         return block_seconds
 
-    # Смотреть сюда
+
     def x_to_zquvtw(self, x):
         zquvtw = x[:,4:] # B, 65, 128, 256
         _, _, self.H, self.W = zquvtw.shape
@@ -820,26 +731,21 @@ class GFT(nn.Module):
         return x_t_emb
     
     
-    def forward(self, x, zquvtw=None):
+    def forward(self, x):
+        x = x.squeeze(1)
         
         GFT.layer_weights.clear()
         GFT.gft_name = ""
         
         output = []
-        zquvtw_list = []
-        if zquvtw is None:
-            zquvtw = self.x_to_zquvtw(x)
-        else:
-            zquvtw = zquvtw[:,4:]
-            zquvtw = zquvtw.permute(0, 2, 3, 1) # B, 32, 64, 65
-        zquvtw_list.append(zquvtw)
+        zquvtw = self.x_to_zquvtw(x)
         for idx, layer in enumerate(self.encoder):
             GFT.gft_name = f"{idx}_encoder"
             x = layer(x)
         for layer_idx, layer in enumerate(self.body):
             GFT.gft_name = f"{layer_idx}_body"
             x, zquvtw = layer(x, zquvtw)
-            zquvtw_list.append(zquvtw)
+
             if layer_idx in self.out_layer:
                 
                 x_t_emb = self.cat_t_emb(x, layer_idx)
@@ -849,9 +755,9 @@ class GFT(nn.Module):
                 output.append(x_t_emb)
 
         if len(output) == 1:
-            return output[0], zquvtw_list
+            return output[0]
         else:
-            return torch.stack(output, dim=1), zquvtw_list
+            return torch.stack(output, dim=1)
 
 
 
@@ -861,7 +767,7 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
     import matplotlib.colors as colors
     import numpy as np
-    from thop import profile
+    # from thop import profile
 
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     print(device)

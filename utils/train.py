@@ -8,182 +8,188 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 import os
 import wandb
 
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from Models.WeatherGFT import GFT
+from utils.dataloader import load_data
+# from utils.dataloader_ddp import load_data
+
+import time
+
+import argparse
+
+parser = argparse.ArgumentParser(description='Training script')
+parser.add_argument('--warmup_epochs', type=int, default=5, help='Number of warmup epochs')
+parser.add_argument('--train_epochs', type=int, default=50, help='Number of training epochs')
+parser.add_argument('--batch_size', type=int, default=4, help='Batch size')
+parser.add_argument('--data_root', type=str, default='/home/fratnikov/weather_bench/', help='Data root')
+
+parser.add_argument('--num_workers', type=int, default=10, help='Number of workers')
+parser.add_argument('--data_split', type=str, default='1_40625', help='Data split')
+# parser.add_argument('--data_split', type=str, default='5_625', help='Data split')
+parser.add_argument('--data_name', type=str, default='mv_gft', help='Data name')
+parser.add_argument('--train_time', type=list, default=['2015', '2015'], help='Train time')
+parser.add_argument('--val_time', type=list, default=None, help='Validation time')
+parser.add_argument('--test_time', type=list, default=None, help='Test time')
+parser.add_argument('--idx_in', type=list, default=[0], help='Index in')
+parser.add_argument('--idx_out', type=list, default=[1, 3, 6], help='Index out')
+parser.add_argument('--step', type=int, default=1, help='Step')
+parser.add_argument('--levels', type=str, default='all', help='Levels')
+parser.add_argument('--distributed', type=bool, default=False, help='Distributed')
+parser.add_argument('--use_augment', type=bool, default=False, help='Use augment')
+parser.add_argument('--use_prefetcher', type=bool, default=False, help='Use prefetcher')
+
+parser.add_argument('--hidden_dim', type=int, default=256, help='Hidden dimension size')
+parser.add_argument('--encoder_layers', type=list, default=[2, 2, 2], help='Encoder layers')
+parser.add_argument('--edcoder_heads', type=list, default=[3, 6, 6], help='Encoder heads')
+parser.add_argument('--encoder_scaling_factors', type=list, default=[0.5, 0.5, 1], help='Encoder scaling factors')
+parser.add_argument('--encoder_dim_factors', type=list, default=[-1, 2, 2], help='Encoder dim factors')
+parser.add_argument('--body_layers', type=list, default=[4, 4, 4, 4, 4, 4], help='Body layers')
+parser.add_argument('--body_heads', type=list, default=[8, 8, 8, 8, 8, 8], help='Body heads')
+parser.add_argument('--body_scaling_factors', type=list, default=[1, 1, 1, 1, 1, 1], help='Body scaling factors')
+parser.add_argument('--body_dim_factors', type=list, default=[1, 1, 1, 1, 1, 1], help='Body dim factors')
+parser.add_argument('--decoder_layers', type=list, default=[2, 2, 2], help='Decoder layers')
+parser.add_argument('--decoder_heads', type=list, default=[6, 6, 3], help='Decoder heads')
+parser.add_argument('--decoder_scaling_factors', type=list, default=[1, 2, 1], help='Decoder scaling factors')
+parser.add_argument('--decoder_dim_factors', type=list, default=[1, 0.5, 1], help='Decoder dim factors')
+parser.add_argument('--channels', type=int, default=69, help='Channels')
+parser.add_argument('--head_dim', type=int, default=128, help='Head dim')
+parser.add_argument('--window_size', type=list, default=[4,8], help='Window size')
+parser.add_argument('--relative_pos_embedding', type=bool, default=False, help='Relative pos embedding')
+parser.add_argument('--out_kernel', type=list, default=[2,2], help='Out kernel')
+parser.add_argument('--pde_block_depth', type=int, default=3, help='PDE block depth')
+parser.add_argument('--block_dt', type=int, default=300, help='Block dt')
+parser.add_argument('--inverse_time', type=bool, default=False, help='Inverse time')
+parser.add_argument('--drop_last', type=bool, default=True, help='Drop last incomplete batch')
+
+args_for_train = parser.parse_args()
 
 
-def setup_ddp(rank, world_size):
-    try:
-        if not torch.cuda.is_available():
-            raise RuntimeError("CUDA is not available")
-        os.environ['MASTER_ADDR'] = 'localhost'
-        os.environ['MASTER_PORT'] = '12355'
-        dist.init_process_group("nccl", rank=rank, world_size=world_size)
-        torch.cuda.set_device(rank)
-    except Exception as e:
-        print(f"Failed to initialize DDP: {e}")
-        raise
 
+def train(device, model, optimizer, scheduler, dataloader_train, 
+          loss_function, save_model_interval=5, model_save_dir='checkpoints/', epochs=3, 
+          name_experiment='model_test', start_epoch = 0):
+    train_regression_list = []
 
-def get_warmup_scheduler(optimizer, warmup_steps, learning_rate):
-    class WarmupScheduler:
-        def __init__(self, optimizer, warmup_steps, initial_lr):
-            self.optimizer = optimizer
-            self.warmup_steps = warmup_steps
-            self.initial_lr = initial_lr
-            self.current_step = 0
+    grad_list = []
 
-        def step(self):
-            self.current_step += 1
-            if self.current_step <= self.warmup_steps:
-                lr = self.initial_lr * (self.current_step / self.warmup_steps)
-                for param_group in self.optimizer.param_groups:
-                    param_group['lr'] = lr
-
-        def state_dict(self):
-            return {
-                'current_step': self.current_step,
-            }
-
-        def load_state_dict(self, state_dict):
-            self.current_step = state_dict['current_step']
-
-    return WarmupScheduler(optimizer, warmup_steps, learning_rate)
-
-
-def validate(model, val_dataset, criterion, device, config):
-    val_sampler = DistributedSampler(val_dataset)
-    val_loader = torch.utils.data.DataLoader(
-        val_dataset, 
-        batch_size=config.batch_size,
-        sampler=val_sampler,
-        num_workers=config.num_workers
-    )
-    
-    model.eval()
-    total_loss = 0
-    total_samples = 0
-    
-    with torch.no_grad():
-        for inputs, targets in val_loader:
-            inputs = inputs.to(device)
-            targets = targets.to(device)
-            outputs = model(inputs)
-            loss = criterion(outputs, targets)
-            total_loss += loss.item() * inputs.size(0)
-            total_samples += inputs.size(0)
-    
-    # Синхронизация метрик между процессами
-    total_loss = torch.tensor(total_loss).to(device)
-    total_samples = torch.tensor(total_samples).to(device)
-    
-    dist.all_reduce(total_loss, op=dist.ReduceOp.SUM)
-    dist.all_reduce(total_samples, op=dist.ReduceOp.SUM)
-    
-    avg_loss = total_loss.item() / total_samples.item()
-    return avg_loss
-
-def train_ddp(rank, world_size, model, train_dataset, val_dataset, config):
-    setup_ddp(rank, world_size)
-    
-    train_sampler = DistributedSampler(train_dataset)
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset,
-        batch_size=config.batch_size,
-        sampler=train_sampler,
-        num_workers=config.num_workers,
-        pin_memory=True
-    )
-    
-    model = model.to(rank)
-    model = DDP(model, device_ids=[rank])
-    
-    criterion = nn.MSELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
-    
-    # Добавляем scaler для fp16
-    scaler = GradScaler()
-    
-    # Настраиваем warmup и cosine annealing
-    warmup_steps = config.warmup_epochs * len(train_loader)
-    warmup_scheduler = get_warmup_scheduler(optimizer, warmup_steps, config.learning_rate)
-    
-    # Косинусный scheduler начнет работать после warmup
-    cosine_scheduler = CosineAnnealingLR(
-        optimizer, 
-        T_max=(config.epochs - config.warmup_epochs) * len(train_loader),
-        eta_min=1e-7
-    )
-    
-    # Инициализируем wandb только для основного процесса
-    if rank == 0:
-        wandb.init(
-            project="weather-predictions",
-            config={
-                "batch_size": config.batch_size,
-                "epochs": config.epochs,
-                "learning_rate": config.learning_rate,
-                "warmup_epochs": config.warmup_epochs,
-            }
-        )
-    
-    for epoch in range(config.epochs):
+    for epoch_number in range(start_epoch, epochs):
+        time_start = time.time()
+        train_regression_full = 0
         model.train()
-        train_sampler.set_epoch(epoch)
-        epoch_loss = 0.0
-        
-        for batch_idx, (inputs, targets) in enumerate(train_loader):
-            inputs = inputs.to(rank)
-            targets = targets.to(rank)
-            
+        total_grad = 0
+        for batch_idx, (x_train, y_train) in enumerate(dataloader_train):
+            x_train = x_train.to(device).squeeze(1)
+            y_train = y_train.to(device)
+            print(f"x_train: {x_train.shape}, y_train: {y_train.shape}")
+            if torch.isnan(x_train).any() or torch.isnan(y_train).any():
+                print(f"NaN detected in input data! Batch {batch_idx}")
+                continue
             optimizer.zero_grad()
+
+            loss = loss_function(model(x_train), y_train)
+            print(f"Loss: {loss.item()}")
+            loss.backward()
+            optimizer.step()
+
+            train_regression_full += loss.item()
+
+            scheduler.step()
+            for tag, value in model.named_parameters():
+                if value.grad is not None:
+                    grad = value.grad.norm()
+                    total_grad += grad
+
+        grad_list.append(total_grad.cpu().item())
+        grad_by_batch = total_grad.cpu().item() / len(dataloader_train)
+
+        train_regression_full = train_regression_full / len(dataloader_train)
+        train_regression_list.append(train_regression_full)
+
+        # Save model weights at specified intervals
+        if epoch_number % save_model_interval == 0:
+            if not os.path.exists(model_save_dir):
+                os.makedirs(model_save_dir)
+
+            model_path = os.path.join(model_save_dir, f"{name_experiment}_{epoch_number}.pth")
+            state_dict_path = os.path.join(model_save_dir, f"state_dict_{name_experiment}_{epoch_number}.pth")
             
-            # Используем fp16
-            with autocast():
-                outputs = model(inputs)
-                loss = criterion(outputs, targets)
+            torch.save(model.state_dict(), model_path)
+            torch.save({
+                'model': model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+            }, state_dict_path)
             
-            # Обратное распространение с fp16
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-            
-            # Обновляем learning rate
-            if epoch < config.warmup_epochs:
-                warmup_scheduler.step()
-            else:
-                cosine_scheduler.step()
-            
-            epoch_loss += loss.item()
-            
-            if rank == 0 and batch_idx % config.log_interval == 0:
-                current_lr = optimizer.param_groups[0]['lr']
-                print(f'Epoch: {epoch}, Batch: {batch_idx}, Loss: {loss.item():.4f}, LR: {current_lr:.6f}')
-                wandb.log({
-                    "batch_loss": loss.item(),
-                    "learning_rate": current_lr,
-                    "epoch": epoch,
-                    "batch": batch_idx,
-                })
-        
-        if rank == 0:
-            avg_train_loss = epoch_loss / len(train_loader)
-            val_loss = validate(model, val_dataset, criterion, rank, config)
-            wandb.log({
-                "epoch": epoch,
-                "train_loss": avg_train_loss,
-                "val_loss": val_loss,
-            })
-    
-    if rank == 0:
-        wandb.finish()
-    
-    dist.destroy_process_group()
+        end_time = time.time()
+
+        print(f"Epoch : {epoch_number}\n",
+              f"Time : {round((end_time - time_start), 5)}\n",
+              f"Train Pred loss : {round((float(train_regression_full)), 5)}\n",
+              f"Grad : {round((float(total_grad)), 5)}\n",
+              f"grad_by_batch : {round((float(grad_by_batch)), 5)}\n",
+              )
+
+    return train_regression_list
 
 
-# Обновляем конфигурацию
-class Config:
-    batch_size = 32
-    epochs = 50 
-    learning_rate = 5e-4
-    num_workers = 4
-    log_interval = 10
-    warmup_epochs = 5  # Добавлен параметр warmup
+if __name__ == "__main__":
+
+    model = GFT(hidden_dim=args_for_train.hidden_dim,
+        encoder_layers=args_for_train.encoder_layers,
+        edcoder_heads=args_for_train.edcoder_heads,
+        encoder_scaling_factors=args_for_train.encoder_scaling_factors,
+        encoder_dim_factors=args_for_train.encoder_dim_factors,
+
+        body_layers=args_for_train.body_layers,
+        body_heads=args_for_train.body_heads,
+        body_scaling_factors=args_for_train.body_scaling_factors,
+        body_dim_factors=args_for_train.body_dim_factors,
+
+        decoder_layers=args_for_train.decoder_layers,
+        decoder_heads=args_for_train.decoder_heads,
+        decoder_scaling_factors=args_for_train.decoder_scaling_factors,
+        decoder_dim_factors=args_for_train.decoder_dim_factors,
+
+        channels=args_for_train.channels,
+        head_dim=args_for_train.head_dim,
+        window_size=args_for_train.window_size,
+        relative_pos_embedding=args_for_train.relative_pos_embedding,
+        out_kernel=args_for_train.out_kernel,
+
+        pde_block_depth=args_for_train.pde_block_depth,
+        block_dt=args_for_train.block_dt,
+        inverse_time=args_for_train.inverse_time)
+    
+    print(f"Model created")
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = model.to(device)
+
+    batch_size = args_for_train.batch_size
+    data_root = args_for_train.data_root
+
+    dataloader_train, dataloader_vali, dataloader_test, mean, std = load_data(batch_size=batch_size,
+                                                                        val_batch_size=batch_size,
+                                                                        data_root=data_root,
+                                                                        num_workers=args_for_train.num_workers,
+                                                                        data_split=args_for_train.data_split,
+                                                                        data_name=args_for_train.data_name,
+                                                                        train_time=args_for_train.train_time,
+                                                                        val_time=args_for_train.val_time,
+                                                                        test_time=args_for_train.test_time,
+                                                                        idx_in=args_for_train.idx_in,
+                                                                        idx_out=args_for_train.idx_out,
+                                                                        step=args_for_train.step,
+                                                                        levels=args_for_train.levels,
+                                                                        distributed=args_for_train.distributed, 
+                                                                        use_augment=args_for_train.use_augment,
+                                                                        use_prefetcher=args_for_train.use_prefetcher, 
+                                                                        drop_last=args_for_train.drop_last)
+    
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    scheduler = CosineAnnealingLR(optimizer, T_max=args_for_train.train_epochs, eta_min=1e-5)
+    loss_function = nn.L1Loss()
+
+    train(device, model, optimizer, scheduler, dataloader_train, loss_function, 
+          save_model_interval=5, model_save_dir='checkpoints/', epochs=3, 
+          name_experiment='model_test', start_epoch = 0)
