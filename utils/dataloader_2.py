@@ -93,7 +93,7 @@ class PrefetchLoader:
         return self.loader.dataset
 
 
-def create_loader_(dataset,
+def create_loader(dataset,
                   batch_size,
                   shuffle=True,
                   is_training=False,
@@ -118,8 +118,6 @@ def create_loader_(dataset,
             else:
                 sampler = torch.utils.data.distributed.DistributedSampler(dataset)
         else:
-            # This will add extra duplicate entries to result in equal num
-            # of samples per-process, will slightly alter validation results
             sampler = OrderedDistributedSampler(dataset)
     else:
         assert num_aug_repeats==0, "RepeatAugment is not supported in non-distributed or IterableDataset"
@@ -173,60 +171,6 @@ def worker_init(worker_id, worker_seeding='all'):
         if worker_seeding == 'all':
             np.random.seed(worker_info.seed % (2 ** 32 - 1))
 
-
-def create_loader(dataset,
-                  batch_size,
-                  shuffle=True,
-                  is_training=False,
-                  mean=None,
-                  std=None,
-                  num_workers=1,
-                  num_aug_repeats=0,
-                  input_channels=1,
-                  use_prefetcher=False,
-                  distributed=False,
-                  pin_memory=False,
-                  drop_last=False,
-                  fp16=True,
-                  collate_fn=None,
-                  persistent_workers=True,
-                  worker_seeding='all'):
-    sampler = None
-    if distributed and not isinstance(dataset, torch.utils.data.IterableDataset):
-        if is_training:
-            if num_aug_repeats:
-                sampler = RepeatAugSampler(dataset, num_repeats=num_aug_repeats)
-            else:
-                sampler = torch.utils.data.distributed.DistributedSampler(dataset)
-        else:
-            # This will add extra duplicate entries to result in equal num
-            # of samples per-process, will slightly alter validation results
-            sampler = OrderedDistributedSampler(dataset)
-    else:
-        assert num_aug_repeats==0, "RepeatAugment is not supported in non-distributed or IterableDataset"
-
-    if collate_fn is None:
-        collate_fn = torch.utils.data.dataloader.default_collate
-    loader_class = torch.utils.data.DataLoader
-
-    loader_args = dict(
-        batch_size=batch_size,
-        shuffle=shuffle and (not isinstance(dataset, torch.utils.data.IterableDataset)) and sampler is None and is_training,
-        num_workers=num_workers,
-        sampler=sampler,
-        collate_fn=collate_fn,
-        pin_memory=pin_memory,
-        drop_last=drop_last,
-        worker_init_fn=partial(worker_init, worker_seeding=worker_seeding),
-        persistent_workers=persistent_workers
-    )
-    try:
-        loader = loader_class(dataset, **loader_args)
-    except TypeError:
-        loader_args.pop('persistent_workers')  # only in Pytorch 1.7+
-        loader = loader_class(dataset, **loader_args)
-
-    return loader
 
 def latlon2xyz(lat, lon):
     if type(lat) == torch.Tensor:

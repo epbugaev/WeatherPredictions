@@ -14,8 +14,8 @@ import math
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from Models.WeatherGFT import GFT
-from utils.dataloader import load_data
-# from utils.dataloader_ddp import load_data
+# from utils.dataloader import load_data
+from utils.dataloader_ddp import load_data
 
 import argparse
 
@@ -25,9 +25,9 @@ parser.add_argument('--train_epochs', type=int, default=50, help='Number of trai
 parser.add_argument('--batch_size', type=int, default=4, help='Batch size')
 parser.add_argument('--data_root', type=str, default='/home/fratnikov/weather_bench/', help='Data root')
 
-parser.add_argument('--num_workers', type=int, default=10, help='Number of workers')
-# parser.add_argument('--data_split', type=str, default='1_40625', help='Data split')
-parser.add_argument('--data_split', type=str, default='5_625', help='Data split')
+parser.add_argument('--num_workers', type=int, default=8, help='Number of workers')
+parser.add_argument('--data_split', type=str, default='1_40625', help='Data split')
+# parser.add_argument('--data_split', type=str, default='5_625', help='Data split')
 parser.add_argument('--data_name', type=str, default='mv_gft', help='Data name')
 parser.add_argument('--train_time', type=list, default=['2015', '2015'], help='Train time')
 parser.add_argument('--val_time', type=list, default=None, help='Validation time')
@@ -249,98 +249,105 @@ def train(rank, world_size, args_for_train):
             if torch.isnan(inputs).any() or torch.isnan(targets).any():
                 print(f"NaN detected in input data! Batch {batch_idx}")
                 continue
+            print(f"Batch {batch_idx}")
+            print(f"Inputs: {inputs.shape}, targets: {targets.shape}")
 
-            print(f"Inputs and targets moved to device")
-            optimizer.zero_grad()
-            print(f"Optimizer zero grad")
+    #         print(f"Inputs and targets moved to device")
+    #         optimizer.zero_grad()
+    #         print(f"Optimizer zero grad")
 
-            with autocast(dtype=torch.float32):
-                outputs = model(inputs)
+    #         with autocast(dtype=torch.float32):
+    #             outputs = model(inputs)
 
-                if torch.isnan(outputs).any():
-                    print(f"NaN detected in model outputs! Batch {batch_idx}")
-                    continue
+    #             if torch.isnan(outputs).any():
+    #                 print(f"NaN detected in model outputs! Batch {batch_idx}")
+    #                 continue
 
-                print(f"Outputs computed")
-                loss = criterion(outputs, targets)
-                print(f"Loss computed")
+    #             print(f"Outputs computed")
+    #             loss = criterion(outputs, targets)
+
             
-            print(f"Loss: {loss.item()}")
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+    #         print(f"Loss: {loss.item()}")
+    #         scaler.scale(loss).backward()
+    #         scaler.step(optimizer)
+    #         scaler.update()
             
-            # Собираем статистику со всех процессов
-            loss_item = loss.item()
-            dist.all_reduce(torch.tensor([loss_item]).to(device_id))
-            total_loss += loss_item
+    #         # Собираем статистику со всех процессов
+    #         loss_item = loss.item()
+    #         dist.all_reduce(torch.tensor([loss_item]).to(device_id))
+    #         total_loss += loss_item
 
-            # Вычисляем среднюю потерю после каждого батча
-            avg_loss = total_loss / (batch_idx + 1)  # Изменено с len(dataloader_train)
-            epoch_time = time.time() - epoch_start_time
+    #         # Вычисляем среднюю потерю после каждого батча
+    #         avg_loss = total_loss / (batch_idx + 1)  # Изменено с len(dataloader_train)
+    #         epoch_time = time.time() - epoch_start_time
 
-            # Сохраняем статистику
-            if rank == 0:
-                losses_df = pd.concat([losses_df, pd.DataFrame([{
-                    'epoch': epoch,
-                    'batch': batch_idx,
-                    'loss': loss_item,
-                    'avg_loss': avg_loss,
-                    'epoch_time': epoch_time,
-                    'lr': optimizer.param_groups[0]['lr']
-                }])], ignore_index=True)
+    #         # Сохраняем статистику
+    #         if rank == 0:
+    #             losses_df = pd.concat([losses_df, pd.DataFrame([{
+    #                 'epoch': epoch,
+    #                 'batch': batch_idx,
+    #                 'loss': loss_item,
+    #                 'avg_loss': avg_loss,
+    #                 'epoch_time': epoch_time,
+    #                 'lr': optimizer.param_groups[0]['lr']
+    #             }])], ignore_index=True)
             
-            # Выбираем планировщик в зависимости от эпохи
-            if epoch < args_for_train.warmup_epochs:
-                warmup_scheduler.step()
-            else:
-                cosine_scheduler.step()
+    #         # Выбираем планировщик в зависимости от эпохи
+    #         if epoch < args_for_train.warmup_epochs:
+    #             warmup_scheduler.step()
+    #         else:
+    #             cosine_scheduler.step()
             
-            global_step += 1
-                # Сохраняем CSV после каждой эпохи
-        if rank == 0:
-            losses_df.to_csv(f'training_losses.csv', index=False)
+    #         global_step += 1
+    #             # Сохраняем CSV после каждой эпохи
+    #     if rank == 0:
+    #         losses_df.to_csv(f'training_losses.csv', index=False)
         
-        # Сохранение чекпоинта каждые 5 эпох
-        if rank == 0 and epoch % 5 == 0:
-            checkpoint = {
-                'epoch': epoch,
-                'model_state_dict': model.module.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'warmup_scheduler_state_dict': warmup_scheduler.state_dict(),
-                'cosine_scheduler_state_dict': cosine_scheduler.state_dict(),
-                'scaler_state_dict': scaler.state_dict(),
-                'loss': avg_loss,
-            }
-            checkpoint_path = f'checkpoints/checkpoint_epoch_{epoch}.pt'
-            os.makedirs('checkpoints', exist_ok=True)
-            torch.save(checkpoint, checkpoint_path)
-            print(f'Сохранен чекпоинт: {checkpoint_path}')
+    #     # Сохранение чекпоинта каждые 5 эпох
+    #     if rank == 0 and epoch % 5 == 0:
+    #         checkpoint = {
+    #             'epoch': epoch,
+    #             'model_state_dict': model.module.state_dict(),
+    #             'optimizer_state_dict': optimizer.state_dict(),
+    #             'warmup_scheduler_state_dict': warmup_scheduler.state_dict(),
+    #             'cosine_scheduler_state_dict': cosine_scheduler.state_dict(),
+    #             'scaler_state_dict': scaler.state_dict(),
+    #             'loss': avg_loss,
+    #         }
+    #         checkpoint_path = f'checkpoints/checkpoint_epoch_{epoch}.pt'
+    #         os.makedirs('checkpoints', exist_ok=True)
+    #         torch.save(checkpoint, checkpoint_path)
+    #         print(f'Сохранен чекпоинт: {checkpoint_path}')
         
-        if dataloader_vali is not None:
-            # Добавляем валидацию каждые 5 эпох
-            if epoch % 5 == 0:
-                val_loss = validate(model, dataloader_vali, criterion, device_id, epoch, rank)
-                if rank == 0:
-                    print(f'Epoch {epoch}, Validation Loss: {val_loss:.6f}')
+    #     if dataloader_vali is not None:
+    #         # Добавляем валидацию каждые 5 эпох
+    #         if epoch % 5 == 0:
+    #             val_loss = validate(model, dataloader_vali, criterion, device_id, epoch, rank)
+    #             if rank == 0:
+    #                 print(f'Epoch {epoch}, Validation Loss: {val_loss:.6f}')
                 
-                    # Добавляем результаты валидации в основной DataFrame
-                    if rank == 0:
-                        losses_df = pd.concat([losses_df, pd.DataFrame([{
-                            'epoch': epoch,
-                            'batch': 'validation',
-                            'loss': val_loss,
-                            'lr': optimizer.param_groups[0]['lr']
-                        }])], ignore_index=True)
+    #                 # Добавляем результаты валидации в основной DataFrame
+    #                 if rank == 0:
+    #                     losses_df = pd.concat([losses_df, pd.DataFrame([{
+    #                         'epoch': epoch,
+    #                         'batch': 'validation',
+    #                         'loss': val_loss,
+    #                         'lr': optimizer.param_groups[0]['lr']
+    #                     }])], ignore_index=True)
     
-    cleanup()
+    # cleanup()
 
 if __name__ == "__main__":
     world_size = torch.cuda.device_count()
     print(f"World size: {world_size}")
-    torch.multiprocessing.spawn(
+    try:
+        torch.multiprocessing.spawn(
         train,
         args=(world_size,args_for_train),
         nprocs=world_size,
         join=True
     )
+    except Exception as e:
+        print(f"Error in multiprocessing: {e}")
+        # Корректное завершение процессов
+        cleanup()   
