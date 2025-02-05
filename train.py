@@ -24,7 +24,7 @@ from lightning.pytorch.loggers import CometLogger
 
 def train_model(devices, num_nodes):    
     torch_model = GFT(hidden_dim=256,
-                    physics_part_coef=0.9,
+                    physics_part_coef=None, # None means using learnable matrix C x H x W
                     encoder_layers=[2, 2, 2], # original: [3, 3, 3]
                     edcoder_heads=[2, 4, 4], # original: [3, 6, 6]
                     encoder_scaling_factors=[0.5, 0.5, 1], # [128, 256] --> [64, 128] --> [32, 64] --> [32, 64], that is, patch size = 4 (128/32)
@@ -72,7 +72,7 @@ def train_model(devices, num_nodes):
     lit_model = MutiOut(torch_model, lr=lr, eta_min=eta_min, max_epoch=max_epoch, steps_per_epoch=steps_per_epoch,
                         loss_type="MAE", metrics=metrics, muti_out_nums=6)
 
-    EXP_NAME = "physics_imp_is_0dot9 fixed"
+    EXP_NAME = "learnable_physics_importance_matrix"
 
     save_path = os.path.join('/home/epbugaev/checkpoints/', EXP_NAME, datetime.datetime.now().strftime("%Y-%m-%d-%H:%M") + ''.join(random.choices(string.ascii_lowercase + string.digits, k=5)))
     checkpoint_callback = ModelCheckpoint(dirpath=save_path,

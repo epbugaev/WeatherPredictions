@@ -111,13 +111,17 @@ def d_z(input_tensor):
 
 
 class PDE_kernel(nn.Module):
-    def __init__(self, in_dim, variable_dim=13, block_dt=300, inverse_time=False):
+    def __init__(self, in_dim, physics_part_coef, variable_dim=13, block_dt=300, inverse_time=False):
         super().__init__()
         self.in_dim = in_dim
         self.variable_dim = variable_dim
 
         self.variable_norm = nn.Conv2d(in_channels=in_dim, out_channels=variable_dim*5, kernel_size=3, stride=1, padding=1)
-
+        if physics_part_coef is not None:
+            self.physics_part_coef = physics_part_coef
+        else: # Activate learnable matrix for these coefs: shape C x W x H
+            self.physics_part_coef = nn.Parameter(0.5 * torch.ones(1, variable_dim*5, 32, 64), requires_grad=True) # 32 and 64 is for H/W grid
+        
         self.f = 7.29e-5
         self.L = 2.5e6
         self.R = 8.314
@@ -274,7 +278,10 @@ class PDE_kernel(nn.Module):
         skip = x
 
         ################################################################
-        zquvtw_old = 0.9*self.variable_norm(x) + 0.1*zquvtw
+        # Заменить self.physics part coef (nn.Parameters)
+        # print(zquvtw.shape, self.physics_part_coef)
+
+        zquvtw_old = (1 - self.physics_part_coef)*self.variable_norm(x) + self.physics_part_coef*zquvtw
         z_old, t_old, q_old, u_old, v_old= zquvtw_old.chunk(5, dim=1)
 
         w_old = self.get_w(u_old, v_old)
@@ -302,11 +309,11 @@ class PDE_kernel(nn.Module):
 
 
 class PDE_block(nn.Module):
-    def __init__(self, in_dim, variable_dim, depth=3, block_dt=300, inverse_time=False):
+    def __init__(self, in_dim, variable_dim, physics_part_coef, depth=3, block_dt=300, inverse_time=False):
         super().__init__()
         self.PDE_kernels = nn.ModuleList([])
         for _ in range(depth):
-            self.PDE_kernels.append(PDE_kernel(in_dim, variable_dim, block_dt, inverse_time))
+            self.PDE_kernels.append(PDE_kernel(in_dim, variable_dim=variable_dim, block_dt=block_dt, inverse_time=inverse_time, physics_part_coef=physics_part_coef))
     
     def forward(self, x, zquvtw):
         # x [B, H, W, D]
@@ -457,7 +464,7 @@ class WindowAttention(nn.Module):
 
 
 class HybridBlock(nn.Module):
-    def __init__(self, dim, heads, head_dim, mlp_dim, shifted, window_size, relative_pos_embedding, use_pde, zquvtw_channel, depth, block_dt, inverse_time):
+    def __init__(self, dim, heads, head_dim, mlp_dim, shifted, window_size, relative_pos_embedding, use_pde, zquvtw_channel, depth, block_dt, inverse_time, physics_part_coef):
         super().__init__()
         self.attention_block = Residual(PreNorm(dim, WindowAttention(dim=dim,
                                                                      heads=heads,
@@ -467,7 +474,7 @@ class HybridBlock(nn.Module):
                                                                      relative_pos_embedding=relative_pos_embedding)))
         self.use_pde = use_pde
         if use_pde:
-            self.pde_block = PDE_block(dim, zquvtw_channel, depth, block_dt, inverse_time)
+            self.pde_block = PDE_block(dim, zquvtw_channel, depth=depth, block_dt=block_dt, inverse_time=inverse_time, physics_part_coef=physics_part_coef)
             self.router_weight = nn.Parameter(torch.zeros(1, 1, 1, dim), requires_grad=True)
 
         self.router_MLP = Residual(PreNorm(dim, MLP(dim, hidden_dim=mlp_dim)))
@@ -534,7 +541,7 @@ class PatchExpanding(nn.Module):
 
 class StageModule(nn.Module):
     def __init__(self, in_channels, hidden_dimension, layers, scaling_factors, num_heads, head_dim, window_size,
-                 relative_pos_embedding, use_pde=False, zquvtw_channel=None, depth=3, block_dt=300, inverse_time=False):
+                 relative_pos_embedding, physics_part_coef, use_pde=False, zquvtw_channel=None, depth=3, block_dt=300, inverse_time=False):
         super().__init__()
         self.use_pde = use_pde
         assert layers % 2 == 0, 'Stage layers need to be divisible by 2 for regular and shifted block.'
@@ -552,9 +559,11 @@ class StageModule(nn.Module):
         for _ in range(layers // 2):
             self.layers.append(nn.ModuleList([
                 HybridBlock(dim=hidden_dimension, heads=num_heads, head_dim=head_dim, mlp_dim=hidden_dimension * 4,
+                            physics_part_coef=physics_part_coef,
                             shifted=False, window_size=window_size, relative_pos_embedding=relative_pos_embedding, 
                             use_pde=use_pde, zquvtw_channel=zquvtw_channel, depth=depth, block_dt=block_dt, inverse_time=inverse_time),
                 HybridBlock(dim=hidden_dimension, heads=num_heads, head_dim=head_dim, mlp_dim=hidden_dimension * 4,
+                            physics_part_coef=physics_part_coef,
                             shifted=True, window_size=window_size, relative_pos_embedding=relative_pos_embedding, 
                             use_pde=use_pde, zquvtw_channel=zquvtw_channel, depth=depth, block_dt=block_dt, inverse_time=inverse_time),
             ]))
@@ -617,6 +626,7 @@ class GFT(nn.Module):
     
     def __init__(self, 
                 hidden_dim=256,
+                physics_part_coef=None,
                 encoder_layers=[2, 2, 2],
                 edcoder_heads=[3, 6, 6],
                 encoder_scaling_factors=[0.5, 0.5, 1],
@@ -668,6 +678,7 @@ class GFT(nn.Module):
         self.encoder = nn.ModuleList()
         for i_layer in range(len(encoder_layers)):
             layer = StageModule(in_channels=encoder_dim_list[i_layer], hidden_dimension=encoder_dim_list[i_layer+1], layers=encoder_layers[i_layer],
+                                physics_part_coef=physics_part_coef, 
                                 scaling_factors=encoder_scaling_factors[i_layer], num_heads=edcoder_heads[i_layer], head_dim=head_dim,
                                 window_size=window_size, relative_pos_embedding=relative_pos_embedding)
             self.encoder.append(layer)
@@ -676,11 +687,13 @@ class GFT(nn.Module):
         for i_layer in range(len(body_layers)):
             if use_checkpoint:
                 layer = checkpoint_wrapper(StageModule(in_channels=body_dim_list[i_layer], hidden_dimension=body_dim_list[i_layer+1], layers=body_layers[i_layer],
+                                            physics_part_coef=physics_part_coef, 
                                             scaling_factors=body_scaling_factors[i_layer], num_heads=body_heads[i_layer], head_dim=head_dim,
                                             window_size=window_size, relative_pos_embedding=relative_pos_embedding, 
                                             use_pde=True, zquvtw_channel=13, depth=pde_block_depth, block_dt=block_dt, inverse_time=inverse_time))
             else:
                 layer = StageModule(in_channels=body_dim_list[i_layer], hidden_dimension=body_dim_list[i_layer+1], layers=body_layers[i_layer],
+                                    physics_part_coef=physics_part_coef,
                                     scaling_factors=body_scaling_factors[i_layer], num_heads=body_heads[i_layer], head_dim=head_dim,
                                     window_size=window_size, relative_pos_embedding=relative_pos_embedding, 
                                     use_pde=True, zquvtw_channel=13, depth=pde_block_depth, block_dt=block_dt, inverse_time=inverse_time)
@@ -698,6 +711,7 @@ class GFT(nn.Module):
         self.decoder = nn.ModuleList()
         for i_layer in range(len(decoder_layers)):
             layer = StageModule(in_channels=decoder_dim_list[i_layer], hidden_dimension=decoder_dim_list[i_layer+1], layers=decoder_layers[i_layer],
+                                  physics_part_coef=physics_part_coef,
                                   scaling_factors=decoder_scaling_factors[i_layer], num_heads=decoder_heads[i_layer], head_dim=head_dim,
                                   window_size=window_size, relative_pos_embedding=relative_pos_embedding)
             self.decoder.append(layer)
@@ -731,6 +745,44 @@ class GFT(nn.Module):
         return x_t_emb
     
     
+    def get_learnable_physics_importance(self):
+        """
+        Function that returns learned physics_importance coefs from all layers that contain PDE_kernels.
+        Use only if physics_importance_coef was not specified. 
+
+        Returns:
+            List[Tensor[Layer, C, H, W]]: List of learned physics importance coefficients 
+            from the layers with PDE_kernels.
+
+        """
+        total_coefs = []
+
+        for layer in self.encoder: 
+            if isinstance(layer, StageModule):
+                for inner_layer_pack in layer.layers:
+                    for hybrid_block in inner_layer_pack:
+                        if hybrid_block.use_pde:
+                            for pde_kernel in hybrid_block.pde_block.PDE_kernels:
+                                total_coefs.append(pde_kernel.physics_part_coef.data)
+
+        for layer in self.body: 
+            if isinstance(layer, StageModule):
+                for inner_layer_pack in layer.layers:
+                    for hybrid_block in inner_layer_pack:
+                        if hybrid_block.use_pde:
+                            for pde_kernel in hybrid_block.pde_block.PDE_kernels:
+                                total_coefs.append(pde_kernel.physics_part_coef.data)
+
+        for layer in self.decoder: 
+            if isinstance(layer, StageModule):
+                for inner_layer_pack in layer.layers:
+                    for hybrid_block in inner_layer_pack:
+                        if hybrid_block.use_pde:
+                            for pde_kernel in hybrid_block.pde_block.PDE_kernels:
+                                total_coefs.append(pde_kernel.physics_part_coef.data)
+
+        return torch.squeeze(torch.stack(total_coefs, dim=0))
+
     def forward(self, x):
         x = x.squeeze(1)
         
@@ -773,6 +825,7 @@ if __name__ == "__main__":
     print(device)
 
     model = GFT(hidden_dim=256,
+                physics_part_coef=0.1,
                 encoder_layers=[2, 2, 2],
                 edcoder_heads=[3, 6, 6],
                 encoder_scaling_factors=[0.5, 0.5, 1], # [128, 256] --> [64, 128] --> [32, 64] --> [32, 64], that is, patch size = 4 (128/32)
