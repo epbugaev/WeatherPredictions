@@ -15,7 +15,7 @@ import string
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from Data.weatherbench_128 import WeatherBench128
-from Models.WeatherGFT import GFT
+from Models.PredFormerGFT import PredFormerGFT
 
 from LitModels.mutiout import MutiOut
 from utils.metrics import Metrics
@@ -23,7 +23,7 @@ from utils.metrics import Metrics
 from lightning.pytorch.loggers import CometLogger
 
 def train_model(devices, num_nodes):    
-    torch_model = GFT(hidden_dim=256,
+    torch_model = PredFormerGFT(hidden_dim=256,
                     physics_part_coef=None, # None means using learnable matrix C x H x W
                     encoder_layers=[2, 2, 2], # original: [3, 3, 3]
                     edcoder_heads=[2, 4, 4], # original: [3, 6, 6]
@@ -72,7 +72,7 @@ def train_model(devices, num_nodes):
     lit_model = MutiOut(torch_model, lr=lr, eta_min=eta_min, max_epoch=max_epoch, steps_per_epoch=steps_per_epoch,
                         loss_type="MAE", metrics=metrics, muti_out_nums=6)
 
-    EXP_NAME = "learnable_physics_importance_matrix"
+    EXP_NAME = "test (delete later)"
 
     save_path = os.path.join('/home/epbugaev/checkpoints/', EXP_NAME, datetime.datetime.now().strftime("%Y-%m-%d-%H:%M") + ''.join(random.choices(string.ascii_lowercase + string.digits, k=5)))
     checkpoint_callback = ModelCheckpoint(dirpath=save_path,
@@ -90,7 +90,7 @@ def train_model(devices, num_nodes):
                         log_every_n_steps=5,
                         precision=32, # "16-mixed"
                         max_epochs=max_epoch, 
-                        logger=CometLogger(project_name="WeatherPredictions", experiment_name=EXP_NAME),
+                        logger=CometLogger(project_name="WeatherPredictions", experiment_name=EXP_NAME, offline=True),
                         accelerator="gpu", devices=devices, num_nodes=num_nodes, strategy="ddp",
                         callbacks=[checkpoint_callback, early_stopping_callback])
 
