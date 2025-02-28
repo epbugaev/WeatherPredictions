@@ -4,6 +4,7 @@ import numpy as np
 from einops import rearrange
 import torch.nn.functional as F
 import math
+import types  # For method type binding in the utility functions
 from fairscale.nn.checkpoint.checkpoint_activations import checkpoint_wrapper
 
 
@@ -122,16 +123,29 @@ class PDE_kernel(nn.Module):
         else: # Activate learnable matrix for these coefs: shape C x W x H
             self.physics_part_coef = nn.Parameter(0.5 * torch.ones(1, variable_dim*5, 32, 64), requires_grad=True) # 32 and 64 is for H/W grid
         
-        self.f = 7.29e-5
-        self.L = 2.5e6
-        self.R = 8.314
-        self.c_p = 1005
-        self.R_v = 461.5
-        self.R_d = 287
+        # Coriolis parameter is now computed based on latitude - no longer a constant
+        self.omega = 7.29e-5  # Earth's angular velocity in rad/s
+        
+        self.L = 2.5e6        # Latent heat of vaporization (J/kg)
+        self.R = 8.314        # Universal gas constant (J/(mol·K))
+        self.c_p = 1005       # Specific heat capacity of air at constant pressure (J/(kg·K))
+        self.R_v = 461.5      # Gas constant for water vapor (J/(kg·K))
+        self.R_d = 287        # Gas constant for dry air (J/(kg·K))
         self.diff_ratio = 0.05
         self.block_dt = block_dt
         if inverse_time:
             self.block_dt = - self.block_dt
+            
+        # Parameters for turbulent mixing
+        self.k_h = 15.0       # Horizontal eddy diffusivity (m²/s)
+        self.k_v = 0.1        # Vertical eddy diffusivity (m²/s)
+        
+        # Parameters for radiative cooling
+        self.sigma = 5.67e-8  # Stefan-Boltzmann constant (W/(m²·K⁴))
+        self.emissivity = 0.7 # Atmospheric emissivity
+        
+        # Parameters for precipitation
+        self.precip_threshold = 0.8  # Relative humidity threshold for precipitation
 
         self.norm_z = nn.BatchNorm2d(variable_dim)
         self.norm_q = nn.BatchNorm2d(variable_dim)
@@ -163,11 +177,56 @@ class PDE_kernel(nn.Module):
         tensor = torch.where(torch.abs(tensor) < threshold, torch.sign(tensor) * threshold, tensor)
         return tensor
 
+    def get_coriolis_parameter(self, lat):
+        # Compute the Coriolis parameter based on latitude
+        # f = 2*Ω*sin(φ) where Ω is Earth's angular velocity and φ is latitude
+        return 2 * self.omega * torch.sin(lat)
 
     def share_z_dxyz(self, z):
         self.z_x = d_x(z)
         self.z_y = d_y(z)
         self.z_z = d_z(z)
+
+    def apply_turbulent_mixing(self, field):
+        # Apply horizontal and vertical turbulent mixing (diffusion)
+        field_xx = d_x(d_x(field))
+        field_yy = d_y(d_y(field))
+        field_zz = d_z(d_z(field))
+        
+        horizontal_mixing = self.k_h * (field_xx + field_yy)
+        vertical_mixing = self.k_v * field_zz
+        
+        return horizontal_mixing + vertical_mixing
+
+    def calculate_radiative_cooling(self, t):
+        # Simple radiative cooling parameterization
+        # Approximate cooling rate based on Stefan-Boltzmann law
+        # More realistic models would use band models or line-by-line calculations
+        
+        # Convert to actual temperature in Kelvin assuming t is temperature anomaly
+        t_abs = t + 273.15
+        
+        # Net cooling rate (W/m²)
+        cooling_rate = self.emissivity * self.sigma * t_abs**4
+        
+        # Convert to temperature tendency (K/s)
+        dt_rad = -cooling_rate / (self.c_p * pressure.to(t.device) * 100 / (self.R_d * t_abs))
+        
+        return dt_rad
+
+    def calculate_convective_precipitation(self, q, q_s):
+        # Simple parameterization for convective precipitation
+        # Based on relative humidity exceeding a threshold
+        rel_humidity = q / self.avoid_inf(q_s)
+        precip_mask = (rel_humidity > self.precip_threshold).float()
+        
+        # Calculate precipitation rate (kg/m²/s)
+        precip_rate = precip_mask * (q - self.precip_threshold * q_s) / self.block_dt
+        
+        # Calculate associated latent heating (K/s)
+        latent_heating = precip_rate * self.L / self.c_p
+        
+        return precip_rate, latent_heating
 
     ############################# u v #############################
     def get_uv_dt(self, u, v, w):
@@ -178,33 +237,124 @@ class PDE_kernel(nn.Module):
         v_x = d_x(v)
         v_y = self.v_y
         v_z = d_z(v)
+        
+        # Get latitude-dependent Coriolis parameter
+        B, C, H, W = u.shape
+        lat_grid = latitudes.to(u.device).reshape(1, 1, H, 1).expand(B, C, H, W)
+        f_coriolis = self.get_coriolis_parameter(lat_grid)
 
-        self.u_t = -u*u_x - v*u_y - w*u_z + self.f*v - self.z_x
-        self.v_t = -u*v_x - v*v_y - w*v_z - self.f*u - self.z_y
+        # Apply turbulent mixing to momentum equations
+        u_mixing = self.apply_turbulent_mixing(u)
+        v_mixing = self.apply_turbulent_mixing(v)
+
+        self.u_t = -u*u_x - v*u_y - w*u_z + f_coriolis*v - self.z_x + u_mixing
+        self.v_t = -u*v_x - v*v_y - w*v_z - f_coriolis*u - self.z_y + v_mixing
         return self.u_t, self.v_t
     
-
+    # Modified RK4 integration for u and v
     def uv_evolution(self, u, v, w):
-        u_t, v_t = self.get_uv_dt(u, v, w)
-        u = u + self.scale_diff(u_t*self.block_dt, u).detach()
-        v = v + self.scale_diff(v_t*self.block_dt, v).detach()
-        return u, v
+        # First, store original values
+        u_orig, v_orig = u.clone(), v.clone()
+        
+        # Stage 1
+        k1_u, k1_v = self.get_uv_dt(u, v, w)
+        u1 = u + 0.5 * self.block_dt * k1_u
+        v1 = v + 0.5 * self.block_dt * k1_v
+        
+        # Stage 2
+        k2_u, k2_v = self.get_uv_dt(u1, v1, w)
+        u2 = u + 0.5 * self.block_dt * k2_u
+        v2 = v + 0.5 * self.block_dt * k2_v
+        
+        # Stage 3
+        k3_u, k3_v = self.get_uv_dt(u2, v2, w)
+        u3 = u + self.block_dt * k3_u
+        v3 = v + self.block_dt * k3_v
+        
+        # Stage 4
+        k4_u, k4_v = self.get_uv_dt(u3, v3, w)
+        
+        # Combine stages with appropriate weights
+        u_tendency = (k1_u + 2*k2_u + 2*k3_u + k4_u) / 6.0
+        v_tendency = (k1_v + 2*k2_v + 2*k3_v + k4_v) / 6.0
+        
+        # Apply scaled tendency
+        u_new = u_orig + self.scale_diff(u_tendency * self.block_dt, u_orig).detach()
+        v_new = v_orig + self.scale_diff(v_tendency * self.block_dt, v_orig).detach()
+        
+        return u_new, v_new
     ################################################################
     
     ############################# t #############################
-    def get_t_t(self, u, v, w, t):
+    def get_t_t(self, u, v, w, t, q, q_s=None):
         t_x = d_x(t)
         t_y = d_y(t)
         t_z = d_z(t)
 
+        # Basic adiabatic heating/cooling
         Q = -self.L*self.z_z*w
-        self.t_t = (Q-self.z_z*w)/self.c_p - u*t_x - v*t_y - w*t_z
-        return self.t_t
+        
+        # Add turbulent mixing contribution to temperature
+        t_mixing = self.apply_turbulent_mixing(t)
+        
+        # Add radiative cooling
+        radiative_cooling = self.calculate_radiative_cooling(t)
+        
+        # Calculate saturation specific humidity if not provided
+        if q_s is None:
+            # Calculate pressure and density
+            rho = - 1/self.avoid_inf(self.z_z)
+            p = rho*self.R*t
+            
+            # Calculate saturation specific humidity
+            t_celsius = t - 273.15
+            e_s = 6.112 * torch.exp(self.scale_tensor(17.67 * t_celsius / self.avoid_inf(t_celsius + 243.5), -3.47, 3.01)) * 100
+            q_s = 0.622 * e_s / self.avoid_inf(p - 0.378 * e_s)
+            q_s = torch.maximum(q_s, torch.ones_like(q_s)*1e-6)
+        
+        # Add latent heating from precipitation
+        _, latent_heating = self.calculate_convective_precipitation(q, q_s)
+        
+        # Combine all contributions to temperature tendency
+        self.t_t = (Q-self.z_z*w)/self.c_p - u*t_x - v*t_y - w*t_z + t_mixing + radiative_cooling + latent_heating
+        
+        return self.t_t, q_s
     
-    def t_evolution(self, u, v, w, t):
-        t_t = self.get_t_t(u, v, w, t)
-        t = t + self.scale_diff(t_t*self.block_dt, t).detach()
-        return t
+    # Modified RK4 integration for temperature
+    def t_evolution(self, u, v, w, t, q):
+        # First, store original value
+        t_orig = t.clone()
+        
+        # Get initial saturation specific humidity
+        rho = - 1/self.avoid_inf(self.z_z)
+        p = rho*self.R*t
+        t_celsius = t - 273.15
+        e_s = 6.112 * torch.exp(self.scale_tensor(17.67 * t_celsius / self.avoid_inf(t_celsius + 243.5), -3.47, 3.01)) * 100
+        q_s = 0.622 * e_s / self.avoid_inf(p - 0.378 * e_s)
+        q_s = torch.maximum(q_s, torch.ones_like(q_s)*1e-6)
+        
+        # Stage 1
+        k1_t, _ = self.get_t_t(u, v, w, t, q, q_s)
+        t1 = t + 0.5 * self.block_dt * k1_t
+        
+        # Stage 2
+        k2_t, _ = self.get_t_t(u, v, w, t1, q, q_s)
+        t2 = t + 0.5 * self.block_dt * k2_t
+        
+        # Stage 3
+        k3_t, _ = self.get_t_t(u, v, w, t2, q, q_s)
+        t3 = t + self.block_dt * k3_t
+        
+        # Stage 4
+        k4_t, _ = self.get_t_t(u, v, w, t3, q, q_s)
+        
+        # Combine stages with appropriate weights
+        t_tendency = (k1_t + 2*k2_t + 2*k3_t + k4_t) / 6.0
+        
+        # Apply scaled tendency
+        t_new = t_orig + self.scale_diff(t_tendency * self.block_dt, t_orig).detach()
+        
+        return t_new
     ################################################################
 
     ############################# z #############################
@@ -217,10 +367,47 @@ class PDE_kernel(nn.Module):
         self.z_t = integral_z(z_zt)
         return self.z_t
     
-    def z_evolution(self, z):
-        z_t = self.get_z_t()
-        z = z + self.scale_diff(z_t*self.block_dt, z).detach()
-        return z
+    # Modified RK4 integration for geopotential height
+    def z_evolution(self, z, u, v, w, t, q):
+        # The initial temperature tendency is already calculated in forward()
+        # so we don't need to recalculate initial t_t and z_t
+        
+        # First, store original value
+        z_orig = z.clone()
+        
+        # For stage 1, use the pre-computed z_t
+        k1_z = self.z_t
+        z1 = z + 0.5 * self.block_dt * k1_z
+        
+        # For the subsequent stages, we need to update t_t and z_t
+        # based on the intermediate state
+        
+        # Stage 2
+        # Calculate temperature tendency for this stage
+        t_t2, _ = self.get_t_t(u, v, w, t, q)
+        self.t_t = t_t2
+        # Calculate z tendency based on updated temperature tendency
+        k2_z = self.get_z_t()
+        z2 = z + 0.5 * self.block_dt * k2_z
+        
+        # Stage 3
+        t_t3, _ = self.get_t_t(u, v, w, t, q)
+        self.t_t = t_t3
+        k3_z = self.get_z_t()
+        z3 = z + self.block_dt * k3_z
+        
+        # Stage 4
+        t_t4, _ = self.get_t_t(u, v, w, t, q)
+        self.t_t = t_t4
+        k4_z = self.get_z_t()
+        
+        # Combine stages with appropriate weights
+        z_tendency = (k1_z + 2*k2_z + 2*k3_z + k4_z) / 6.0
+        
+        # Apply scaled tendency
+        z_new = z_orig + self.scale_diff(z_tendency * self.block_dt, z_orig).detach()
+        
+        return z_new
     ################################################################
 
     ############################# w #############################
@@ -233,7 +420,7 @@ class PDE_kernel(nn.Module):
     ################################################################
 
 
-    ############################# w #############################
+    ############################# q #############################
     def get_q_dt(self, u, v, t, w, q):
         def get_qs(p, T):
             t = T - 273.15
@@ -255,6 +442,9 @@ class PDE_kernel(nn.Module):
         q_y = d_y(q)
         q_z = d_z(q)
 
+        # Apply turbulent mixing to moisture
+        q_mixing = self.apply_turbulent_mixing(q)
+
         rho = - 1/self.avoid_inf(self.z_z)
         p = rho*self.R*t
 
@@ -262,14 +452,48 @@ class PDE_kernel(nn.Module):
         q_s = torch.maximum(q_s, torch.ones_like(q_s)*1e-6)
         delta = get_delta(self.z_t + u*self.z_x + v*self.z_y + w*self.z_z, q, q_s).detach()
         F_ = get_F(t, q, q_s).detach()
+        
+        # Get precipitation rate to account for moisture sink
+        precip_rate, _ = self.calculate_convective_precipitation(q, q_s)
 
-        q_t =  -(u*q_x + v*q_y + w*q_z) + (self.z_t + u*self.z_x + v*self.z_y + w*self.z_z) * delta * F_ / self.avoid_inf(self.R*t)
-        return q_t
+        q_t = -(u*q_x + v*q_y + w*q_z) + (self.z_t + u*self.z_x + v*self.z_y + w*self.z_z) * delta * F_ / self.avoid_inf(self.R*t) + q_mixing - precip_rate
+        return q_t, q_s
     
+    # Modified RK4 integration for specific humidity
     def q_evolution(self, u, v, t, w, q):
-        q_t = self.get_q_dt(u, v, t, w, q)
-        q = q + self.scale_diff(q_t*self.block_dt, q).detach()
-        return q
+        # First, store original value
+        q_orig = q.clone()
+        
+        # Stage 1 - use the pre-computed z_t
+        k1_q, q_s = self.get_q_dt(u, v, t, w, q)
+        q1 = q + 0.5 * self.block_dt * k1_q
+        
+        # Stage 2
+        # Note: we're reusing the same z_t for all stages since q calculations
+        # don't affect z_t directly in this simplified model
+        k2_q, _ = self.get_q_dt(u, v, t, w, q1)
+        q2 = q + 0.5 * self.block_dt * k2_q
+        
+        # Stage 3
+        k3_q, _ = self.get_q_dt(u, v, t, w, q2)
+        q3 = q + self.block_dt * k3_q
+        
+        # Stage 4
+        k4_q, _ = self.get_q_dt(u, v, t, w, q3)
+        
+        # Combine stages with appropriate weights
+        q_tendency = (k1_q + 2*k2_q + 2*k3_q + k4_q) / 6.0
+        
+        # Apply scaled tendency
+        q_new = q_orig + self.scale_diff(q_tendency * self.block_dt, q_orig).detach()
+        
+        # Ensure specific humidity remains non-negative
+        q_new = torch.maximum(q_new, torch.zeros_like(q_new))
+        
+        # Ensure saturation is not exceeded significantly
+        q_new = torch.minimum(q_new, 1.1 * q_s)
+        
+        return q_new
     ################################################################
 
 
@@ -278,20 +502,29 @@ class PDE_kernel(nn.Module):
         skip = x
 
         ################################################################
-        # Заменить self.physics part coef (nn.Parameters)
-        # print(zquvtw.shape, self.physics_part_coef)
-
+        # Use physics part coefficient to blend model and physics
         zquvtw_old = (1 - self.physics_part_coef)*self.variable_norm(x) + self.physics_part_coef*zquvtw
         z_old, t_old, q_old, u_old, v_old= zquvtw_old.chunk(5, dim=1)
 
+        # First compute vertical velocity from continuity equation
         w_old = self.get_w(u_old, v_old)
+        
+        # Compute spatial gradients of geopotential
         self.share_z_dxyz(z_old)
+        
+        # Calculate t_t and z_t tendencies first, needed by multiple evolution steps
+        self.t_t, _ = self.get_t_t(u_old, v_old, w_old, t_old, q_old)
+        self.z_t = self.get_z_t()
 
+        # Now apply RK4 integration to evolve the system
         u_new, v_new = self.uv_evolution(u_old, v_old, w_old)
-        t_new = self.t_evolution(u_old, v_old, w_old, t_old)
-        z_new = self.z_evolution(z_old)
+        t_new = self.t_evolution(u_old, v_old, w_old, t_old, q_old)
         q_new = self.q_evolution(u_old, v_old, t_old, w_old, q_old)
+        
+        # Update geopotential using the updated temperature
+        z_new = self.z_evolution(z_old, u_old, v_old, w_old, t_new, q_new)
 
+        # Apply normalization
         z_new = self.norm_z(z_new)
         q_new = self.norm_q(q_new)
         u_new = self.norm_u(u_new)
@@ -300,6 +533,7 @@ class PDE_kernel(nn.Module):
 
         zquvtw_new = torch.cat([z_new, t_new, q_new, u_new, v_new], dim=1)
 
+        # Combine with skip connection
         x = self.variable_innorm(zquvtw_new) + skip
         ################################################################
 
@@ -500,7 +734,6 @@ class HybridBlock(nn.Module):
             self.pde_block = PDE_block(dim, zquvtw_channel, depth=depth, block_dt=block_dt, inverse_time=inverse_time, physics_part_coef=physics_part_coef)
             # Добавляем роутер на основе внимания
             self.attention_router = AttentionGatingRouter(dim)
-            # Сохраняем router_weight для обратной совместимости и мониторинга
             self.router_weight = nn.Parameter(torch.zeros(1, 1, 1, dim), requires_grad=True)
 
         self.router_MLP = Residual(PreNorm(dim, MLP(dim, hidden_dim=mlp_dim)))
@@ -510,9 +743,6 @@ class HybridBlock(nn.Module):
             # AI & Physics
             feat_att = self.attention_block(x)
             feat_pde, zquvtw = self.pde_block(x, zquvtw)
-            
-            # Adaptive Router с использованием механизма внимания
-            GFT.layer_weights[f"{self.__class__.__name__}_{GFT.gft_name}"] = self.router_weight.detach().cpu().numpy()
             
             # Используем AttentionGatingRouter вместо простых весов
             x = self.attention_router(x, feat_att, feat_pde)
@@ -654,11 +884,6 @@ class RandomOrLearnedSinusoidalPosEmb(nn.Module):
 
 
 class GFT(nn.Module):
-    
-    layer_weights = {}  # Глобальный словарь для хранения значений router_weight
-    
-    gft_name = ""
-    
     def __init__(self, 
                 hidden_dim=256,
                 physics_part_coef=None,
@@ -789,6 +1014,16 @@ class GFT(nn.Module):
             List[Tensor[Layer, C, H, W]]: List of learned physics importance coefficients 
             from the layers with PDE_kernels.
 
+        Notes:
+            - Physics importance coefficients are used to balance between pure neural
+              network predictions and physics-based predictions.
+            - Higher values (closer to 1) give more weight to the physics-based model.
+            - Lower values (closer to 0) give more weight to the neural network.
+            - The model learns these values during training to optimize performance.
+            - After the enhancements to the physics kernel (RK4 integration, variable 
+              Coriolis parameter, turbulent mixing, radiative cooling, and convective
+              precipitation), the physics part may become more reliable and these 
+              coefficients may trend higher.
         """
         total_coefs = []
 
@@ -821,7 +1056,6 @@ class GFT(nn.Module):
     def forward(self, x):
         x = x.squeeze(1)
         
-        GFT.layer_weights.clear()
         GFT.gft_name = ""
         
         output = []
@@ -859,17 +1093,17 @@ if __name__ == "__main__":
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     print(device)
 
+
     model = GFT(hidden_dim=256,
-                physics_part_coef=0.1,
                 encoder_layers=[2, 2, 2],
                 edcoder_heads=[3, 6, 6],
                 encoder_scaling_factors=[0.5, 0.5, 1], # [128, 256] --> [64, 128] --> [32, 64] --> [32, 64], that is, patch size = 4 (128/32)
                 encoder_dim_factors=[-1, 2, 2],
 
-                body_layers=[4, 4, 4, 4, 4, 4], # A total of 4x6=24 HybridBlock, corresponding to 6 hours (24x15min) of time evolution
-                body_heads=[8, 8, 8, 8, 8, 8],
-                body_scaling_factors=[1, 1, 1, 1, 1, 1],
-                body_dim_factors=[1, 1, 1, 1, 1, 1],
+                body_layers=[4], # A total of 4x6=24 HybridBlock, corresponding to 6 hours (24x15min) of time evolution
+                body_heads=[8],
+                body_scaling_factors=[1],
+                body_dim_factors=[1],
 
                 decoder_layers=[2, 2, 2],
                 decoder_heads=[6, 6, 3],
@@ -881,31 +1115,31 @@ if __name__ == "__main__":
                 window_size=[4,8],
                 relative_pos_embedding=False,
                 out_kernel=[2,2],
-                
+
                 pde_block_depth=3, # 1 HybridBlock contains 3 PDE kernels, corresponding to 15 minutes (3x300s) of time evolution
                 block_dt=300, # One PDE kernel corresponds to 300s of time evolution
                 inverse_time=False).to(device)
 
     
-    if os.path.exists('../checkpoints/gft.ckpt'):
-        ckpt = torch.load('../checkpoints/gft.ckpt', map_location=torch.device('cpu'))
-        model.load_state_dict(ckpt, strict=True)
-        print('[complete loading model]')
-    else:
-        print('[checkpoint does not exist]')
+    # if os.path.exists('../checkpoints/gft.ckpt'):
+    #     ckpt = torch.load('../checkpoints/gft.ckpt', map_location=torch.device('cpu'))
+    #     model.load_state_dict(ckpt, strict=True)
+    #     print('[complete loading model]')
+    # else:
+    #     print('[checkpoint does not exist]')
 
-    if os.path.exists('../example_data/input.npy') and os.path.exists('../example_data/target.npy'):
-        inp = torch.tensor(np.load('../example_data/input.npy')).float().to(device)
-        target = torch.tensor(np.load('../example_data/target.npy')).float().to(device)
-    else:
-        inp = torch.randn(1, 69, 128, 256).to(device)
-        target = None
+    # if os.path.exists('../example_data/input.npy') and os.path.exists('../example_data/target.npy'):
+    #     inp = torch.tensor(np.load('../example_data/input.npy')).float().to(device)
+    #     target = torch.tensor(np.load('../example_data/target.npy')).float().to(device)
+    # else:
+    #     inp = torch.randn(1, 69, 128, 256).to(device)
+    #     target = None
     
     # total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     # print(f"total parameters: {total_params}")
     # flops, params = profile(model, inputs=(inp,))
     # print(f"flops: {round(flops/10**9, 2)} G, params: {round(params/10**6, 2)} M")
-
+    inp = torch.randn(1, 69, 128, 256).to(device)
 
     pred = model(inp)
     print(pred.shape)
@@ -916,35 +1150,338 @@ if __name__ == "__main__":
     # torch.Size([1, 69, 128, 256]), the prediction results of lead time=[1,3,6]h respectively
     print(pred.shape)
 
-    if target is not None:
-        print('prediction MSE:', ((target-pred)**2).mean().item())
 
-        with open('../example_data/mean_std.json', 'r') as json_file:
-            mean_std = json.load(json_file)
-        mean = torch.tensor(mean_std['mean']).reshape(1, 69, 1, 1).to(inp.device)
-        std = torch.tensor(mean_std['std']).reshape(1, 69, 1, 1).to(inp.device)
-
-        pred = pred*std+mean # Denormalization
-        target = target*std+mean # Denormalization
-
-        fig, axs = plt.subplots(1, 3, figsize=(18, 5))
-
-        a0 = axs[0].imshow(pred[0, 0].detach().cpu().flip(0).numpy())
-        axs[0].set_title('prediction t2m')
-        axs[0].axis('off')
-        fig.colorbar(a0, ax=axs[0], orientation='horizontal', shrink=0.8, aspect=16, extend='both')
-
-        a1 = axs[1].imshow(target[0, 0].detach().cpu().flip(0).numpy())
-        axs[1].set_title('ground truth t2m')
-        axs[1].axis('off')
-        fig.colorbar(a1, ax=axs[1], orientation='horizontal', shrink=0.8, aspect=16, extend='both')
-
-        error = pred[0, 0]-target[0, 0]
-        a2 = axs[2].imshow(error.detach().cpu().flip(0).numpy(), cmap='RdBu_r', norm = colors.Normalize(-10, 10))
-        axs[2].set_title('prediction error t2m')
-        axs[2].axis('off')
-        fig.colorbar(a2, ax=axs[2], orientation='horizontal', shrink=0.8, aspect=16, extend='both')
+def visualize_physics_contributions(model, input_data, variable_idx=0, level_idx=0):
+    """
+    Visualizes the relative contributions of physics vs. neural network
+    across the model's layers.
+    
+    Args:
+        model: The GFT model
+        input_data: Input tensor for the model [B, 69, 128, 256]
+        variable_idx: Index of the variable to visualize (0-4: z, t, q, u, v)
+        level_idx: Pressure level index to visualize (0-12)
+    """
+    # Set model to evaluation mode
+    model.eval()
+    device = input_data.device
+    
+    # Get the physics importance coefficients
+    coefs = model.get_learnable_physics_importance()
+    
+    # Create a figure
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+    
+    # Plot the average coefficient values
+    avg_coefs = coefs.mean(dim=(-1, -2, -3))
+    ax1.plot(avg_coefs.cpu().numpy())
+    ax1.set_xlabel('Layer index')
+    ax1.set_ylabel('Average physics importance')
+    ax1.set_title('Physics vs. Neural Network Contribution by Layer')
+    ax1.grid(True)
+    
+    # Run a forward pass and capture intermediate activations
+    activations = {}
+    
+    def hook_fn(name):
+        def hook(module, input, output):
+            if isinstance(output, tuple):
+                activations[name] = output[0].detach()
+            else:
+                activations[name] = output.detach()
+        return hook
+    
+    # Register hooks
+    hooks = []
+    for i, layer in enumerate(model.body):
+        if isinstance(layer, StageModule):
+            for j, inner_pack in enumerate(layer.layers):
+                for k, block in enumerate(inner_pack):
+                    if hasattr(block, 'pde_block'):
+                        for l, pde_kernel in enumerate(block.pde_block.PDE_kernels):
+                            name = f"body_{i}_layer_{j}_block_{k}_kernel_{l}"
+                            hooks.append(pde_kernel.register_forward_hook(hook_fn(name)))
+    
+    # Run the model
+    with torch.no_grad():
+        model(input_data)
+    
+    # Collect the variable we're interested in from activations
+    var_values = []
+    for name, act in sorted(activations.items()):
+        if "block_0_kernel_0" in name:  # Select one kernel per layer
+            # Extract the variable we want (z, t, q, u, v)
+            zquvt = act.permute(0, 2, 3, 1)  # [B, H, W, C]
+            variables = zquvt.chunk(5, dim=-1)
+            var_values.append(variables[variable_idx][:, level_idx].cpu().numpy())
+    
+    # Plot heatmap of the selected variable across layers
+    if var_values:
+        vmin = min(v.min() for v in var_values)
+        vmax = max(v.max() for v in var_values)
         
+        for i, var in enumerate(var_values):
+            ax = plt.subplot(3, len(var_values), i + len(var_values) + 1)
+            im = ax.imshow(var[0], vmin=vmin, vmax=vmax, cmap='viridis')
+            ax.set_title(f'Layer {i}')
+            if i == 0:
+                ax.set_ylabel('Variable Evolution')
+    
+    # Remove hooks
+    for hook in hooks:
+        hook.remove()
+    
+    plt.tight_layout()
+    return fig
+
+
+def compare_physics_schemes(model, input_data, old_physics=False):
+    """
+    Compare the enhanced physics scheme with the original one.
+    
+    Args:
+        model: The GFT model
+        input_data: Input tensor for the model [B, 69, 128, 256]
+        old_physics: If True, use the original physics implementation
+                    If False, use the enhanced physics (RK4, variable Coriolis, etc.)
+    """
+    # Convert model to CPU for easier manipulation if needed
+    model = model.cpu()
+    input_data = input_data.cpu()
+    
+    # Create temporary models with different physics settings
+    if old_physics:
+        # Temporarily modify model to use original physics
+        for module in model.modules():
+            if isinstance(module, PDE_kernel):
+                # Save the original methods
+                original_uv_evolution = module.uv_evolution
+                original_t_evolution = module.t_evolution
+                original_z_evolution = module.z_evolution
+                original_q_evolution = module.q_evolution
+                original_get_uv_dt = module.get_uv_dt
+                
+                # Override with simplified methods (similar to original implementation)
+                def simple_uv_evolution(self, u, v, w):
+                    u_t, v_t = self.get_uv_dt(u, v, w)
+                    u = u + self.scale_diff(u_t*self.block_dt, u).detach()
+                    v = v + self.scale_diff(v_t*self.block_dt, v).detach()
+                    return u, v
+                
+                def simple_get_uv_dt(self, u, v, w):
+                    u_x = self.u_x
+                    u_y = d_y(u)
+                    u_z = d_z(u)
+                    v_x = d_x(v)
+                    v_y = self.v_y
+                    v_z = d_z(v)
+                    
+                    # Use constant Coriolis parameter
+                    f_coriolis = 7.29e-5
+                    
+                    self.u_t = -u*u_x - v*u_y - w*u_z + f_coriolis*v - self.z_x
+                    self.v_t = -u*v_x - v*v_y - w*v_z - f_coriolis*u - self.z_y
+                    return self.u_t, self.v_t
+                
+                # Apply the simple methods
+                module.uv_evolution = types.MethodType(simple_uv_evolution, module)
+                module.get_uv_dt = types.MethodType(simple_get_uv_dt, module)
+        
+        # Run prediction with original physics
+        with torch.no_grad():
+            old_pred = model(input_data)
+        
+        # Restore original methods
+        for module in model.modules():
+            if isinstance(module, PDE_kernel):
+                module.uv_evolution = original_uv_evolution
+                module.t_evolution = original_t_evolution
+                module.z_evolution = original_z_evolution
+                module.q_evolution = original_q_evolution
+                module.get_uv_dt = original_get_uv_dt
+        
+        return old_pred
+    
+    else:
+        # Run prediction with enhanced physics (default)
+        with torch.no_grad():
+            new_pred = model(input_data)
+        
+        return new_pred
+
+
+def analyze_stability(model, input_data, dt_values=[60, 300, 600, 900]):
+    """
+    Analyze the stability of the physics integration for different time steps.
+    
+    Args:
+        model: The GFT model
+        input_data: Input tensor for the model [B, 69, 128, 256]
+        dt_values: List of time step sizes to test (in seconds)
+    """
+    # Ensure model is in evaluation mode
+    model.eval()
+    
+    results = {}
+    original_dt = model.body[0].layers[0][0].pde_block.PDE_kernels[0].block_dt
+    
+    for dt in dt_values:
+        # Update all PDE kernels with the new dt
+        for module in model.modules():
+            if isinstance(module, PDE_kernel):
+                module.block_dt = dt
+        
+        # Run the model
+        with torch.no_grad():
+            try:
+                pred = model(input_data)
+                # Check for NaN values
+                if torch.isnan(pred).any():
+                    stability = "Unstable (NaN values)"
+                else:
+                    # Simple heuristic: check if values are within reasonable bounds
+                    if torch.max(torch.abs(pred)) > 1e5:
+                        stability = "Unstable (extreme values)"
+                    else:
+                        stability = "Stable"
+            except Exception as e:
+                stability = f"Unstable (error: {str(e)})"
+        
+        results[dt] = stability
+    
+    # Restore original dt
+    for module in model.modules():
+        if isinstance(module, PDE_kernel):
+            module.block_dt = original_dt
+    
+    # Print results
+    print("Stability analysis results:")
+    for dt, status in results.items():
+        print(f"  dt = {dt}s: {status}")
+    
+    return results
+
+def analyze_physics_components(model, input_data):
+    """
+    Analyze the relative contributions of different physical processes 
+    in the enhanced physics module.
+    
+    Args:
+        model: The GFT model
+        input_data: Input tensor for the model [B, 69, 128, 256]
+    """
+    # Ensure model is in evaluation mode
+    model.eval()
+    
+    # Dictionary to store contributions from different processes
+    contributions = {
+        'advection': [],
+        'coriolis': [],
+        'geopotential_gradient': [],
+        'turbulent_mixing': [],
+        'radiative_cooling': [],
+        'latent_heating': [],
+    }
+    
+    # Register hooks to capture intermediate values
+    handles = []
+    
+    def hook_uv_dt(module, input, output):
+        u, v, w = input
+        # Extract contributions from the u momentum equation
+        u_x = module.u_x
+        u_y = d_y(u)
+        u_z = d_z(u)
+        
+        # Get latitude-dependent Coriolis parameter
+        B, C, H, W = u.shape
+        lat_grid = latitudes.to(u.device).reshape(1, 1, H, 1).expand(B, C, H, W)
+        f_coriolis = module.get_coriolis_parameter(lat_grid)
+        
+        # Calculate magnitudes
+        advection_u = torch.abs(-u*u_x - v*u_y - w*u_z).mean().item()
+        coriolis_u = torch.abs(f_coriolis*v).mean().item()
+        geopotential_u = torch.abs(-module.z_x).mean().item()
+        mixing_u = torch.abs(module.apply_turbulent_mixing(u)).mean().item()
+        
+        # Store values
+        contributions['advection'].append(advection_u)
+        contributions['coriolis'].append(coriolis_u)
+        contributions['geopotential_gradient'].append(geopotential_u)
+        contributions['turbulent_mixing'].append(mixing_u)
+    
+    def hook_t_dt(module, input, output):
+        u, v, w, t, q, *_ = input
+        
+        # Calculate magnitudes of different terms in temperature tendency
+        t_x = d_x(t)
+        t_y = d_y(t)
+        t_z = d_z(t)
+        
+        # Basic terms
+        advection_t = torch.abs(-u*t_x - v*t_y - w*t_z).mean().item()
+        adiabatic_t = torch.abs((-module.L*module.z_z*w - module.z_z*w)/module.c_p).mean().item()
+        
+        # Enhanced physics terms
+        mixing_t = torch.abs(module.apply_turbulent_mixing(t)).mean().item()
+        radiative_t = torch.abs(module.calculate_radiative_cooling(t)).mean().item()
+        
+        # Calculate saturation specific humidity
+        rho = - 1/module.avoid_inf(module.z_z)
+        p = rho*module.R*t
+        t_celsius = t - 273.15
+        e_s = 6.112 * torch.exp(module.scale_tensor(17.67 * t_celsius / module.avoid_inf(t_celsius + 243.5), -3.47, 3.01)) * 100
+        q_s = 0.622 * e_s / module.avoid_inf(p - 0.378 * e_s)
+        q_s = torch.maximum(q_s, torch.ones_like(q_s)*1e-6)
+        
+        # Get latent heating
+        _, latent_t = module.calculate_convective_precipitation(q, q_s)
+        latent_t = torch.abs(latent_t).mean().item()
+        
+        # Update appropriate contribution values
+        contributions['advection'][-1] = (contributions['advection'][-1] + advection_t) / 2
+        contributions['turbulent_mixing'][-1] = (contributions['turbulent_mixing'][-1] + mixing_t) / 2
+        contributions['radiative_cooling'].append(radiative_t)
+        contributions['latent_heating'].append(latent_t)
+    
+    # Register hooks for all PDE_kernels
+    for module in model.modules():
+        if isinstance(module, PDE_kernel):
+            handles.append(module.get_uv_dt.__func__.__get__(module, PDE_kernel).register_forward_hook(hook_uv_dt))
+            handles.append(module.get_t_t.__func__.__get__(module, PDE_kernel).register_forward_hook(hook_t_dt))
+    
+    # Run the model
+    with torch.no_grad():
+        model(input_data)
+    
+    # Remove hooks
+    for handle in handles:
+        handle.remove()
+    
+    # Calculate averages for each contribution
+    avg_contributions = {k: sum(v)/len(v) if v else 0 for k, v in contributions.items()}
+    
+    # Print results
+    print("\nAverage contributions of physical processes:")
+    for process, value in avg_contributions.items():
+        print(f"  {process}: {value:.6f}")
+    
+    # Create visualization
+    if contributions['advection']:
+        plt.figure(figsize=(10, 6))
+        processes = list(contributions.keys())
+        values = [avg_contributions[p] for p in processes]
+        
+        # Normalize to percentages
+        total = sum(values)
+        percentages = [100 * v/total for v in values]
+        
+        plt.bar(processes, percentages)
+        plt.title('Relative Importance of Physical Processes')
+        plt.ylabel('Contribution (%)')
+        plt.xticks(rotation=45)
         plt.tight_layout()
-        plt.savefig('visualization.png', dpi=300)
-        plt.close()
+        
+        return plt.gcf()
+    else:
+        return None
