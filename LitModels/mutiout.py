@@ -33,9 +33,12 @@ class MutiOut(BaseModel):
         log_dict = {"train_loss": loss, "lr": lr_now}
 
         learnable_coef = self.model.get_learnable_physics_importance()
-        log_dict['average_physics_coef'] = torch.mean(learnable_coef)
-        log_dict['coef_z_500'] = torch.mean(learnable_coef[:, 7, :, :]) # 7 is pressure 500, first 13 are for z, [layers, C, H, W]
-        log_dict['coef_t_500'] = torch.mean(learnable_coef[:, 13 + 7, :, :]) # 7 is pressure 500, second 13 are for t, [layers, C, H, W]
+        if isinstance(learnable_coef, float):
+            log_dict['average_physics_coef'] = learnable_coef
+        else:
+            log_dict['average_physics_coef'] = torch.mean(learnable_coef)
+            log_dict['coef_z_500'] = torch.mean(learnable_coef[:, 7, :, :]) # 7 is pressure 500, first 13 are for z, [layers, C, H, W]
+            log_dict['coef_t_500'] = torch.mean(learnable_coef[:, 13 + 7, :, :]) # 7 is pressure 500, second 13 are for t, [layers, C, H, W]
 
         self.log_dict(log_dict, prog_bar=True)
         return loss
@@ -52,8 +55,11 @@ class MutiOut(BaseModel):
         log_dict = {"val_loss": val_loss, "RMSE_z500_first": rmse_first[11], "RMSE_z500_last": rmse_last[11]}
 
         learnable_coef = self.model.get_learnable_physics_importance()
-        log_dict['average_physics_coef'] = torch.mean(learnable_coef)
-        log_dict['coef_z_500'] = torch.mean(learnable_coef[:, 7, :, :]) # 7 is pressure 500, first 13 are for z, [layers, C, H, W]
-        log_dict['coef_t_500'] = torch.mean(learnable_coef[:, 13 + 7, :, :]) # 7 is pressure 500, second 13 are for t, [layers, C, H, W]
+        if isinstance(learnable_coef, float):
+            log_dict['average_physics_coef'] = learnable_coef
+        else:
+            log_dict['average_physics_coef'] = torch.mean(learnable_coef)
+            log_dict['coef_z_500'] = torch.mean(learnable_coef[:, 7, :, :]) # 7 is pressure 500, first 13 are for z, [layers, C, H, W]
+            log_dict['coef_t_500'] = torch.mean(learnable_coef[:, 13 + 7, :, :]) # 7 is pressure 500, second 13 are for t, [layers, C, H, W]
         
         self.log_dict(log_dict, prog_bar=True)
