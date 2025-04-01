@@ -510,7 +510,7 @@ class HybridBlock(nn.Module):
             feat_att = self.attention_block(x_history)
             feat_pde, zquvtw = self.pde_block(x, zquvtw)
             # Adaptive Router
-            PredFormerGFT.layer_weights[f"{self.__class__.__name__}_{PredFormerGFT.gft_name}"] = self.router_weight.detach().cpu().numpy()
+            PredFormerGFTSingle.layer_weights[f"{self.__class__.__name__}_{PredFormerGFTSingle.gft_name}"] = self.router_weight.detach().cpu().numpy()
             weight_AI = 0.5*torch.ones_like(x)+self.router_weight
             weight_Physics = 0.5*torch.ones_like(x)-self.router_weight
             x = weight_AI*feat_att + weight_Physics*feat_pde
@@ -620,12 +620,13 @@ class StageModule(nn.Module):
             x = self.patch_partition(x) 
             x_history = update_history(x_history, x)
 
-            for regular_block, shifted_block in self.layers:
-                x, zquvtw = regular_block(x, zquvtw, torch.stack(x_history).transpose(0, 1).to(x.device))
-                x_history = update_history(x_history, x)
+            for j in range(2):
+                for regular_block, shifted_block in self.layers:
+                    x, zquvtw = regular_block(x, zquvtw, torch.stack(x_history).transpose(0, 1).to(x.device))
+                    x_history = update_history(x_history, x)
 
-                x, zquvtw = shifted_block(x, zquvtw, torch.stack(x_history).transpose(0, 1).to(x.device))
-                x_history = update_history(x_history, x)
+                    x, zquvtw = shifted_block(x, zquvtw, torch.stack(x_history).transpose(0, 1).to(x.device))
+                    x_history = update_history(x_history, x)
             
             x = x.permute(0, 3, 1, 2) # [B, D, H, W]
             return x, zquvtw, x_history
@@ -656,7 +657,7 @@ class RandomOrLearnedSinusoidalPosEmb(nn.Module):
         return fouriered
 
 
-class PredFormerGFT(nn.Module):
+class PredFormerGFTSingle(nn.Module):
     
     layer_weights = {}  # Глобальный словарь для хранения значений router_weight
     
@@ -721,21 +722,14 @@ class PredFormerGFT(nn.Module):
                                 window_size=window_size, relative_pos_embedding=relative_pos_embedding)
             self.encoder.append(layer)
         
-        self.body = nn.ModuleList()
-        for i_layer in range(len(body_layers)):
-            if use_checkpoint:
-                layer = checkpoint_wrapper(StageModule(in_channels=body_dim_list[i_layer], hidden_dimension=body_dim_list[i_layer+1], layers=body_layers[i_layer],
-                                            physics_part_coef=physics_part_coef, 
-                                            scaling_factors=body_scaling_factors[i_layer], num_heads=body_heads[i_layer], head_dim=head_dim,
-                                            window_size=window_size, relative_pos_embedding=relative_pos_embedding, 
-                                            use_pde=True, zquvtw_channel=13, depth=pde_block_depth, block_dt=block_dt, inverse_time=inverse_time))
-            else:
-                layer = StageModule(in_channels=body_dim_list[i_layer], hidden_dimension=body_dim_list[i_layer+1], layers=body_layers[i_layer],
-                                    physics_part_coef=physics_part_coef,
-                                    scaling_factors=body_scaling_factors[i_layer], num_heads=body_heads[i_layer], head_dim=head_dim,
-                                    window_size=window_size, relative_pos_embedding=relative_pos_embedding, 
-                                    use_pde=True, zquvtw_channel=13, depth=pde_block_depth, block_dt=block_dt, inverse_time=inverse_time)
-            self.body.append(layer)
+        self.body = StageModule(in_channels=body_dim_list[0], hidden_dimension=body_dim_list[0], layers=body_layers[0],
+                                        physics_part_coef=physics_part_coef, 
+                                        scaling_factors=body_scaling_factors[0], num_heads=body_heads[0], head_dim=head_dim,
+                                        window_size=window_size, relative_pos_embedding=relative_pos_embedding, 
+                                        use_pde=True, zquvtw_channel=13, depth=pde_block_depth, block_dt=block_dt, inverse_time=inverse_time)
+        self.use_checkpoint = use_checkpoint
+        if use_checkpoint:
+            self.body = checkpoint_wrapper(self.body)
         
         self.time_mlp = nn.Sequential(
             RandomOrLearnedSinusoidalPosEmb(16, True),
@@ -755,7 +749,8 @@ class PredFormerGFT(nn.Module):
             self.decoder.append(layer)
 
         self.decoder.append(nn.ConvTranspose2d(in_channels=decoder_dim_list[-1], out_channels=channels, kernel_size=out_kernel, stride=min(out_kernel)))
-
+        self.physics_part_coef = physics_part_coef
+        
 
     def get_block_seconds(self, block_nums, second_per_block=900):
         block_seconds = [block_nums[0]]
@@ -793,6 +788,9 @@ class PredFormerGFT(nn.Module):
             from the layers with PDE_kernels.
 
         """
+        if isinstance(self.physics_part_coef, float):
+            return self.physics_part_coef
+
         total_coefs = []
 
         for layer in self.encoder: 
@@ -803,13 +801,13 @@ class PredFormerGFT(nn.Module):
                             for pde_kernel in hybrid_block.pde_block.PDE_kernels:
                                 total_coefs.append(pde_kernel.physics_part_coef.data)
 
-        for layer in self.body: 
-            if isinstance(layer, StageModule):
-                for inner_layer_pack in layer.layers:
-                    for hybrid_block in inner_layer_pack:
-                        if hybrid_block.use_pde:
-                            for pde_kernel in hybrid_block.pde_block.PDE_kernels:
-                                total_coefs.append(pde_kernel.physics_part_coef.data)
+        layer = self.body
+        if isinstance(layer, StageModule):
+            for inner_layer_pack in layer.layers:
+                for hybrid_block in inner_layer_pack:
+                    if hybrid_block.use_pde:
+                        for pde_kernel in hybrid_block.pde_block.PDE_kernels:
+                            total_coefs.append(pde_kernel.physics_part_coef.data)
 
         for layer in self.decoder: 
             if isinstance(layer, StageModule):
@@ -824,24 +822,27 @@ class PredFormerGFT(nn.Module):
     def forward(self, x):
         x = x.squeeze(1)
         
-        PredFormerGFT.layer_weights.clear()
-        PredFormerGFT.gft_name = ""
+        PredFormerGFTSingle.layer_weights.clear()
+        PredFormerGFTSingle.gft_name = ""
         
         output = []
         zquvtw = self.x_to_zquvtw(x)
         x_history = []
         for idx, layer in enumerate(self.encoder):
-            PredFormerGFT.gft_name = f"{idx}_encoder"
+            PredFormerGFTSingle.gft_name = f"{idx}_encoder"
             x = layer(x)
-        for layer_idx, layer in enumerate(self.body):
-            PredFormerGFT.gft_name = f"{layer_idx}_body"
+
+        for layer_idx in range(6): # Use the same hybrid block 6 times
+            layer = self.body
+            
+            PredFormerGFTSingle.gft_name = f"{layer_idx}_body"
+
             x, zquvtw, x_history = layer(x, zquvtw, x_history)
 
             if layer_idx in self.out_layer:
-                
                 x_t_emb = self.cat_t_emb(x, layer_idx)
                 for layer in self.decoder:
-                    PredFormerGFT.gft_name = f"{layer_idx}_body_decoder"
+                    PredFormerGFTSingle.gft_name = f"{layer_idx}_body_decoder"
                     x_t_emb = layer(x_t_emb)
                 output.append(x_t_emb)
 
@@ -863,7 +864,7 @@ if __name__ == "__main__":
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     print(device)
 
-    model = PredFormerGFT(hidden_dim=256,
+    model = PredFormerGFTSingle(hidden_dim=256,
                 physics_part_coef=0.1,
                 encoder_layers=[2, 2, 2],
                 edcoder_heads=[2, 4, 4],

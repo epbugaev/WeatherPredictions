@@ -50,7 +50,7 @@ class GatedTransformerBlock(nn.Module):
         if WindowAttention: 
             x = rearrange(x, 'b (h w) d -> b h w d', h=h, w=w)
 
-        return x, attn
+        return x, None
 
 
 class FullAttentionLayer(nn.Module):
@@ -95,5 +95,5 @@ class BinaryTSLayer(nn.Module):
         x = rearrange(x, '(b h w) t d -> (b t) h w d', h=H, w=W)
         attn_mask.make_square(x.shape[0], x.shape[1], device=x.device)
         x, attn = self.gtb_s(x, attn_mask=attn_mask, WindowAttention=True) # No attn_mask for Space, applying WindowAttention
-        x = rearrange(x, '(b t) h w d -> b t h w d', t=T, s=S)
-        return x, None
+        x = rearrange(x, '(b t) h w d -> b t h w d', b=B, t=T)
+        return x[:, -1, ...]

@@ -3,6 +3,7 @@ import comet_ml
 import lightning as L
 from lightning.pytorch.callbacks.early_stopping import EarlyStopping
 from lightning.pytorch.callbacks import ModelCheckpoint
+from lightning.pytorch.strategies import DDPStrategy
 from torch.utils.data import DataLoader
 from argparse import ArgumentParser
 import datetime
@@ -15,7 +16,7 @@ import string
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from Data.weatherbench_128 import WeatherBench128
-from Models.PredFormerGFT import PredFormerGFT
+from Models.PredFormerGFTSingle import PredFormerGFTSingle
 
 from LitModels.mutiout import MutiOut
 from utils.metrics import Metrics
@@ -23,14 +24,14 @@ from utils.metrics import Metrics
 from lightning.pytorch.loggers import CometLogger
 
 def train_model(devices, num_nodes):    
-    torch_model = PredFormerGFT(hidden_dim=256,
+    torch_model = PredFormerGFTSingle(hidden_dim=256,
                     physics_part_coef=None, # None means using learnable matrix C x H x W
                     encoder_layers=[2, 2, 2], # original: [3, 3, 3]
                     edcoder_heads=[2, 4, 4], # original: [3, 6, 6]
                     encoder_scaling_factors=[0.5, 0.5, 1], # [128, 256] --> [64, 128] --> [32, 64] --> [32, 64], that is, patch size = 4 (128/32)
                     encoder_dim_factors=[-1, 2, 2],
 
-                    body_layers=[4, 4, 4, 4, 4, 4], # A total of 4x6=24 HybridBlock, corresponding to 6 hours (24x15min) of time evolution
+                    body_layers=[2, 2, 2, 2, 2, 2], # A total of 4x6=24 HybridBlock, corresponding to 6 hours (24x15min) of time evolution
                     body_heads=[6, 6, 6, 6, 6, 6], # original: [8, 8, 8, 8, 8, 8]
                     body_scaling_factors=[1, 1, 1, 1, 1, 1],
                     body_dim_factors=[1, 1, 1, 1, 1, 1],
@@ -57,10 +58,10 @@ def train_model(devices, num_nodes):
 
     train_data = WeatherBench128(start_time=train_start_time, end_time=train_end_time,
                                 include_target=False, lead_time=1, interval=6, muti_target_steps=6)
-    train_loader = DataLoader(train_data, batch_size=4, shuffle=True, num_workers=4)
+    train_loader = DataLoader(train_data, batch_size=1, shuffle=True, num_workers=4)
     valid_data = WeatherBench128(start_time=val_start_time, end_time=val_end_time,
                                 include_target=False, lead_time=1, interval=6, muti_target_steps=6)
-    valid_loader = DataLoader(valid_data, batch_size=4, shuffle=False, num_workers=4)
+    valid_loader = DataLoader(valid_data, batch_size=1, shuffle=False, num_workers=4)
 
     world_size=devices*num_nodes
     lr=5e-4
@@ -91,7 +92,7 @@ def train_model(devices, num_nodes):
                         precision=32, # "16-mixed"
                         max_epochs=max_epoch, 
                         logger=CometLogger(project_name="WeatherPredictions", experiment_name=EXP_NAME, offline=True),
-                        accelerator="gpu", devices=devices, num_nodes=num_nodes, strategy="ddp",
+                        accelerator="gpu", devices=devices, num_nodes=num_nodes, strategy=DDPStrategy(static_graph=True),
                         callbacks=[checkpoint_callback, early_stopping_callback])
 
     trainer.print("[checkpoint path]", save_path)
