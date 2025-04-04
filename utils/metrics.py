@@ -1,10 +1,10 @@
 import torch
 import numpy as np
 
-SEDI_t2m_128 = torch.from_numpy(np.load("/mnt/petrelfs/xuwanghan/projects/high_resolution/sedi/Q_SEDI_128/SEDI_t2m.npy"))
-SEDI_ws10_128 = torch.from_numpy(np.load("/mnt/petrelfs/xuwanghan/projects/high_resolution/sedi/Q_SEDI_128/SEDI_ws10.npy"))
-SEDI_t2m_721 = torch.from_numpy(np.load("/mnt/petrelfs/xuwanghan/projects/high_resolution/sedi/Q_SEDI_721/SEDI_t2m.npy"))
-SEDI_ws10_721 = torch.from_numpy(np.load("/mnt/petrelfs/xuwanghan/projects/high_resolution/sedi/Q_SEDI_721/SEDI_ws10.npy"))
+# SEDI_t2m_128 = torch.from_numpy(np.load("/mnt/petrelfs/xuwanghan/projects/high_resolution/sedi/Q_SEDI_128/SEDI_t2m.npy"))
+# SEDI_ws10_128 = torch.from_numpy(np.load("/mnt/petrelfs/xuwanghan/projects/high_resolution/sedi/Q_SEDI_128/SEDI_ws10.npy"))
+# SEDI_t2m_721 = torch.from_numpy(np.load("/mnt/petrelfs/xuwanghan/projects/high_resolution/sedi/Q_SEDI_721/SEDI_t2m.npy"))
+# SEDI_ws10_721 = torch.from_numpy(np.load("/mnt/petrelfs/xuwanghan/projects/high_resolution/sedi/Q_SEDI_721/SEDI_ws10.npy"))
 
 @torch.jit.script
 def lat(j: torch.Tensor, num_lat: int) -> torch.Tensor:
@@ -135,93 +135,93 @@ class Metrics():
         gt_real = gt * data_std.view(1, gt.shape[1], 1, 1) + data_mean.view(1, gt.shape[1], 1, 1)
         return (top_quantiles_error_torch(pred_real[:,[37,24,0,11,2,66],:,:], gt_real[:,[37,24,0,11,2,66],:,:])).tolist()
         
-    def SEDI(self, pred, gt, month):
-        t2m_c = 2
-        u_c = 0
-        v_c = 1
+    # def SEDI(self, pred, gt, month):
+    #     t2m_c = 2
+    #     u_c = 0
+    #     v_c = 1
 
-        data_mean = self.data_mean.to(gt.device)
-        data_std = self.data_std.to(gt.device)
-        pred_real = pred * data_std.view(1, gt.shape[1], 1, 1) + data_mean.view(1, gt.shape[1], 1, 1)
-        gt_real = gt * data_std.view(1, gt.shape[1], 1, 1) + data_mean.view(1, gt.shape[1], 1, 1)
+    #     data_mean = self.data_mean.to(gt.device)
+    #     data_std = self.data_std.to(gt.device)
+    #     pred_real = pred * data_std.view(1, gt.shape[1], 1, 1) + data_mean.view(1, gt.shape[1], 1, 1)
+    #     gt_real = gt * data_std.view(1, gt.shape[1], 1, 1) + data_mean.view(1, gt.shape[1], 1, 1)
 
-        if gt.shape[-2] == 721:
-            SEDI_t2m_device = SEDI_t2m_721[month-1].to(gt.device)
-            SEDI_ws10_device = SEDI_ws10_721[month-1].to(gt.device)
-        else:
-            SEDI_t2m_device = SEDI_t2m_128[month-1].to(gt.device)
-            SEDI_ws10_device = SEDI_ws10_128[month-1].to(gt.device)
+    #     if gt.shape[-2] == 721:
+    #         SEDI_t2m_device = SEDI_t2m_721[month-1].to(gt.device)
+    #         SEDI_ws10_device = SEDI_ws10_721[month-1].to(gt.device)
+    #     else:
+    #         SEDI_t2m_device = SEDI_t2m_128[month-1].to(gt.device)
+    #         SEDI_ws10_device = SEDI_ws10_128[month-1].to(gt.device)
         
-        sedi_t2m_ws10 = torch.zeros([8]).to(gt.device)
+    #     sedi_t2m_ws10 = torch.zeros([8]).to(gt.device)
 
-        for i in range(4):
-            SEDI_t2m_th = SEDI_t2m_device[i]
-            SEDI_ws10_th = SEDI_ws10_device[i]
+    #     for i in range(4):
+    #         SEDI_t2m_th = SEDI_t2m_device[i]
+    #         SEDI_ws10_th = SEDI_ws10_device[i]
 
-            gt_t2m_ex = (gt_real[:, t2m_c] > SEDI_t2m_th).float()
-            gt_ws10 = (gt_real[:, u_c]**2 + gt_real[:, v_c]**2)**0.5
-            gt_ws10_ex = (gt_ws10 > SEDI_ws10_th).float()
+    #         gt_t2m_ex = (gt_real[:, t2m_c] > SEDI_t2m_th).float()
+    #         gt_ws10 = (gt_real[:, u_c]**2 + gt_real[:, v_c]**2)**0.5
+    #         gt_ws10_ex = (gt_ws10 > SEDI_ws10_th).float()
 
-            pred_t2m_ex = (pred_real[:, t2m_c] > SEDI_t2m_th).float()
-            pred_ws10 = (pred_real[:, u_c]**2 + pred_real[:, v_c]**2)**0.5
-            pred_ws10_ex = (pred_ws10 > SEDI_ws10_th).float()
+    #         pred_t2m_ex = (pred_real[:, t2m_c] > SEDI_t2m_th).float()
+    #         pred_ws10 = (pred_real[:, u_c]**2 + pred_real[:, v_c]**2)**0.5
+    #         pred_ws10_ex = (pred_ws10 > SEDI_ws10_th).float()
 
-            FP_t2m = (pred_t2m_ex-gt_t2m_ex == 1).float().sum() # pred = 1; tar = 0
-            TN_t2m = (pred_t2m_ex+gt_t2m_ex == 0).float().sum() # pred = 0; tar = 0
-            TP_t2m = (pred_t2m_ex+gt_t2m_ex == 2).float().sum() # pred = 1; tar = 1
-            FN_t2m = (gt_t2m_ex-pred_t2m_ex == 1).float().sum() # pred = 0; tar = 1
+    #         FP_t2m = (pred_t2m_ex-gt_t2m_ex == 1).float().sum() # pred = 1; tar = 0
+    #         TN_t2m = (pred_t2m_ex+gt_t2m_ex == 0).float().sum() # pred = 0; tar = 0
+    #         TP_t2m = (pred_t2m_ex+gt_t2m_ex == 2).float().sum() # pred = 1; tar = 1
+    #         FN_t2m = (gt_t2m_ex-pred_t2m_ex == 1).float().sum() # pred = 0; tar = 1
 
-            if FP_t2m == 0:
-                FP_t2m += 1
-            if TN_t2m == 0:
-                TN_t2m += 1
-            if TP_t2m == 0:
-                TP_t2m += 1
-            if FN_t2m == 0:
-                FN_t2m += 1
+    #         if FP_t2m == 0:
+    #             FP_t2m += 1
+    #         if TN_t2m == 0:
+    #             TN_t2m += 1
+    #         if TP_t2m == 0:
+    #             TP_t2m += 1
+    #         if FN_t2m == 0:
+    #             FN_t2m += 1
 
-            F_t2m = FP_t2m/(FP_t2m+TN_t2m)
-            H_t2m = TP_t2m/(TP_t2m+FN_t2m)
+    #         F_t2m = FP_t2m/(FP_t2m+TN_t2m)
+    #         H_t2m = TP_t2m/(TP_t2m+FN_t2m)
 
-            SEDI_t2m = (torch.log(F_t2m)-torch.log(H_t2m)-torch.log(1-F_t2m)+torch.log(1-H_t2m))/ \
-                        (torch.log(F_t2m)+torch.log(H_t2m)+torch.log(1-F_t2m)+torch.log(1-H_t2m))
+    #         SEDI_t2m = (torch.log(F_t2m)-torch.log(H_t2m)-torch.log(1-F_t2m)+torch.log(1-H_t2m))/ \
+    #                     (torch.log(F_t2m)+torch.log(H_t2m)+torch.log(1-F_t2m)+torch.log(1-H_t2m))
             
-            FP_ws10 = (pred_ws10_ex-gt_ws10_ex == 1).float().sum() # pred = 1; tar = 0
-            TN_ws10 = (pred_ws10_ex+gt_ws10_ex == 0).float().sum() # pred = 0; tar = 0
-            TP_ws10 = (pred_ws10_ex+gt_ws10_ex == 2).float().sum() # pred = 1; tar = 1
-            FN_ws10 = (gt_ws10_ex-pred_ws10_ex == 1).float().sum() # pred = 0; tar = 1
+    #         FP_ws10 = (pred_ws10_ex-gt_ws10_ex == 1).float().sum() # pred = 1; tar = 0
+    #         TN_ws10 = (pred_ws10_ex+gt_ws10_ex == 0).float().sum() # pred = 0; tar = 0
+    #         TP_ws10 = (pred_ws10_ex+gt_ws10_ex == 2).float().sum() # pred = 1; tar = 1
+    #         FN_ws10 = (gt_ws10_ex-pred_ws10_ex == 1).float().sum() # pred = 0; tar = 1
 
-            if FP_ws10 == 0:
-                FP_ws10 += 1
-            if TN_ws10 == 0:
-                TN_ws10 += 1
-            if TP_ws10 == 0:
-                TP_ws10 += 1
-            if FN_ws10 == 0:
-                FN_ws10 += 1
+    #         if FP_ws10 == 0:
+    #             FP_ws10 += 1
+    #         if TN_ws10 == 0:
+    #             TN_ws10 += 1
+    #         if TP_ws10 == 0:
+    #             TP_ws10 += 1
+    #         if FN_ws10 == 0:
+    #             FN_ws10 += 1
 
-            F_ws10 = FP_ws10/(FP_ws10+TN_ws10)
-            H_ws10 = TP_ws10/(TP_ws10+FN_ws10)
+    #         F_ws10 = FP_ws10/(FP_ws10+TN_ws10)
+    #         H_ws10 = TP_ws10/(TP_ws10+FN_ws10)
 
-            SEDI_ws10 = (torch.log(F_ws10)-torch.log(H_ws10)-torch.log(1-F_ws10)+torch.log(1-H_ws10))/ \
-                        (torch.log(F_ws10)+torch.log(H_ws10)+torch.log(1-F_ws10)+torch.log(1-H_ws10))
+    #         SEDI_ws10 = (torch.log(F_ws10)-torch.log(H_ws10)-torch.log(1-F_ws10)+torch.log(1-H_ws10))/ \
+    #                     (torch.log(F_ws10)+torch.log(H_ws10)+torch.log(1-F_ws10)+torch.log(1-H_ws10))
 
-            sedi_t2m_ws10[i] = SEDI_t2m
-            sedi_t2m_ws10[4+i] = SEDI_ws10
+    #         sedi_t2m_ws10[i] = SEDI_t2m
+    #         sedi_t2m_ws10[4+i] = SEDI_ws10
 
-        return sedi_t2m_ws10.tolist()
+    #     return sedi_t2m_ws10.tolist()
 
-if __name__ == "__main__":
-    pred = torch.randn([2, 69, 128, 256])
-    gt = torch.randn([2, 69, 128, 256])
-    data_mean = torch.randn([69])
-    data_std = torch.randn([69])
-    climate = torch.randn([2, 69, 128, 256])
-    metrics = Metrics(data_mean, data_std)
-    print(metrics.MSE(pred, gt))
-    print(metrics.Bias(pred, gt))
-    print(metrics.Activity(pred, climate))
-    print(metrics.WRMSE(pred, gt))
-    print(metrics.WACC(pred, gt, climate))
-    print(metrics.RQE(pred, gt))
-    print(metrics.SEDI(pred, gt, 12))
+# if __name__ == "__main__":
+#     pred = torch.randn([2, 69, 128, 256])
+#     gt = torch.randn([2, 69, 128, 256])
+#     data_mean = torch.randn([69])
+#     data_std = torch.randn([69])
+#     climate = torch.randn([2, 69, 128, 256])
+#     metrics = Metrics(data_mean, data_std)
+#     print(metrics.MSE(pred, gt))
+#     print(metrics.Bias(pred, gt))
+#     print(metrics.Activity(pred, climate))
+#     print(metrics.WRMSE(pred, gt))
+#     print(metrics.WACC(pred, gt, climate))
+#     print(metrics.RQE(pred, gt))
+#     print(metrics.SEDI(pred, gt, 12))

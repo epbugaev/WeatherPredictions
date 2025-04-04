@@ -16,41 +16,67 @@ import string
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from Data.weatherbench_128 import WeatherBench128
-from Models.WeatherGFTSingle import GFT
-
+from Models.FedorPredFormer import PredFormer_Model
+# from Models.FedorPredFormerGFT import PredFormer_Model
 from LitModels.mutiout import MutiOut
 from utils.metrics import Metrics
 
 from lightning.pytorch.loggers import CometLogger
 
-def train_model(devices, num_nodes):    
-    torch_model = GFT(hidden_dim=256,
-                    physics_part_coef=0.1, # None means using learnable matrix C x H x W
-                    encoder_layers=[2, 2, 2], # original: [3, 3, 3]
-                    edcoder_heads=[2, 4, 4], # original: [3, 6, 6]
-                    encoder_scaling_factors=[0.5, 0.5, 1], # [128, 256] --> [64, 128] --> [32, 64] --> [32, 64], that is, patch size = 4 (128/32)
-                    encoder_dim_factors=[-1, 2, 2],
+def train_model(devices, num_nodes):
 
-                    body_layers=[2, 2, 2, 2, 2, 2], # A total of 4x6=24 HybridBlock, corresponding to 6 hours (24x15min) of time evolution
-                    body_heads=[6, 6, 6, 6, 6, 6], # original: [8, 8, 8, 8, 8, 8]
-                    body_scaling_factors=[1, 1, 1, 1, 1, 1],
-                    body_dim_factors=[1, 1, 1, 1, 1, 1],
+    model_config = {
+        # image h w c
+        'height': 128,
+        'width': 256,
+        'num_channels': 69,
+        # video length in and out
+        'pre_seq': 12,
+        'after_seq': 12,
+        # patch size
+        'patch_size': 8,
+        'dim': 256, 
+        'heads': 8,
+        'dim_head': 32,
+        # dropout
+        'dropout': 0.0,
+        'attn_dropout': 0.0,
+        'drop_path': 0.0,
+        'scale_dim': 4,
+        # depth
+        'depth': 1,
+        'Ndepth': 24,
+        'path_to_constants': '/home/fratnikov/weather_bench/1.40625deg/constants/constants_1.40625deg.nc',
+    }
 
-                    decoder_layers=[2, 2, 2], # original: [3, 3, 3]
-                    decoder_heads=[4, 4, 2], # original: [6, 6, 3]
-                    decoder_scaling_factors=[1, 2, 1],
-                    decoder_dim_factors=[1, 0.5, 1],
+    torch_model = PredFormer_Model(model_config)
+    # torch_model = GFT(hidden_dim=256,
+    #                 physics_part_coef=0.1, # None means using learnable matrix C x H x W
+    #                 encoder_layers=[2, 2, 2], # original: [3, 3, 3]
+    #                 edcoder_heads=[2, 4, 4], # original: [3, 6, 6]
+    #                 encoder_scaling_factors=[0.5, 0.5, 1], # [128, 256] --> [64, 128] --> [32, 64] --> [32, 64], that is, patch size = 4 (128/32)
+    #                 encoder_dim_factors=[-1, 2, 2],
 
-                    channels=69,
-                    head_dim=128,
-                    window_size=[4,8],
-                    relative_pos_embedding=False,
-                    out_kernel=[2,2],
+    #                 body_layers=[2, 2, 2, 2, 2, 2], # A total of 4x6=24 HybridBlock, corresponding to 6 hours (24x15min) of time evolution
+    #                 body_heads=[6, 6, 6, 6, 6, 6], # original: [8, 8, 8, 8, 8, 8]
+    #                 body_scaling_factors=[1, 1, 1, 1, 1, 1],
+    #                 body_dim_factors=[1, 1, 1, 1, 1, 1],
+
+    #                 decoder_layers=[2, 2, 2], # original: [3, 3, 3]
+    #                 decoder_heads=[4, 4, 2], # original: [6, 6, 3]
+    #                 decoder_scaling_factors=[1, 2, 1],
+    #                 decoder_dim_factors=[1, 0.5, 1],
+
+    #                 channels=69,
+    #                 head_dim=128,
+    #                 window_size=[4,8],
+    #                 relative_pos_embedding=False,
+    #                 out_kernel=[2,2],
                     
-                    pde_block_depth=3, # 1 HybridBlock contains 3 PDE kernels, corresponding to 15 minutes (3x300s) of time evolution
-                    block_dt=300, # One PDE kernel corresponds to 300s of time evolution
-                    inverse_time=False, 
-                    use_checkpoint=True)
+    #                 pde_block_depth=3, # 1 HybridBlock contains 3 PDE kernels, corresponding to 15 minutes (3x300s) of time evolution
+    #                 block_dt=300, # One PDE kernel corresponds to 300s of time evolution
+    #                 inverse_time=False, 
+    #                 use_checkpoint=True)
     
     train_start_time = '2000-01-01 00:00:00'
     train_end_time = '2003-12-25 00:00:00' # '2000-01-01 23:00:00' #
@@ -58,11 +84,11 @@ def train_model(devices, num_nodes):
     val_end_time = '2004-12-25 00:00:00' # '2004-01-01 23:00:00' #
 
     train_data = WeatherBench128(start_time=train_start_time, end_time=train_end_time,
-                                include_target=False, lead_time=1, interval=6, muti_target_steps=6)
-    train_loader = DataLoader(train_data, batch_size=4, shuffle=True, num_workers=4)
+                                include_target=False, lead_time=1, interval=12, muti_target_steps=12)
+    train_loader = DataLoader(train_data, batch_size=8, shuffle=True, num_workers=4)
     valid_data = WeatherBench128(start_time=val_start_time, end_time=val_end_time,
-                                include_target=False, lead_time=1, interval=6, muti_target_steps=6)
-    valid_loader = DataLoader(valid_data, batch_size=4, shuffle=False, num_workers=4)
+                                include_target=False, lead_time=1, interval=12, muti_target_steps=12)
+    valid_loader = DataLoader(valid_data, batch_size=8, shuffle=False, num_workers=4)
 
     world_size=devices*num_nodes
     lr=5e-4
@@ -74,9 +100,9 @@ def train_model(devices, num_nodes):
     lit_model = MutiOut(torch_model, lr=lr, eta_min=eta_min, max_epoch=max_epoch, steps_per_epoch=steps_per_epoch,
                         loss_type="MAE", metrics=metrics, muti_out_nums=6)
 
-    EXP_NAME = "train_single_block"
+    EXP_NAME = "train_predformer_fedor"
 
-    save_path = os.path.join('/home/epbugaev/checkpoints/', EXP_NAME, datetime.datetime.now().strftime("%Y-%m-%d-%H:%M") + ''.join(random.choices(string.ascii_lowercase + string.digits, k=5)))
+    save_path = os.path.join('/home/fa.buzaev/checkpoints/', EXP_NAME, datetime.datetime.now().strftime("%Y-%m-%d-%H:%M") + ''.join(random.choices(string.ascii_lowercase + string.digits, k=5)))
     checkpoint_callback = ModelCheckpoint(dirpath=save_path,
                                           monitor='val_loss', save_last=True, save_top_k=1, mode="min",
                                           save_on_train_epoch_end=True,
@@ -84,7 +110,7 @@ def train_model(devices, num_nodes):
     early_stopping_callback = EarlyStopping(monitor="val_loss", mode="min", patience=5, check_finite=True)
     # lr_monitor = LearningRateMonitor(logging_interval='step')
     
-    os.environ["COMET_API_KEY"] = "D75wgJ5A8n5yvnTcrdgLGpuYy"
+    os.environ["COMET_API_KEY"] = "3wVTcWCAZ9LFRxOLDsqRDutwt"
     os.environ["COMET_EXPERIMENT_KEY"] = ''.join(random.choices(string.ascii_lowercase + string.digits, k=50))
     comet_ml.login()
     
