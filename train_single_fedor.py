@@ -15,7 +15,7 @@ import string
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from Data.weatherbench_128 import WeatherBench128
+from Data.weatherbench_128_v2 import WeatherBench128
 from Models.FedorPredFormer import PredFormer_Model
 # from Models.FedorPredFormerGFT import PredFormer_Model
 from LitModels.mutiout_fedor import MutiOut
@@ -84,11 +84,25 @@ def train_model(devices, num_nodes):
     val_end_time = '2004-12-25 00:00:00' # '2004-01-01 23:00:00' #
 
     train_data = WeatherBench128(start_time=train_start_time, end_time=train_end_time,
-                                include_target=False, lead_time=1, interval=12, muti_target_steps=12)
-    train_loader = DataLoader(train_data, batch_size=8, shuffle=True, num_workers=4)
+                                include_target=False, 
+                                lead_time=1, 
+                                interval=1,
+                                muti_target_steps=1,
+                                start_time_x=0,
+                                end_time_x=11,      
+                                start_time_y=12,
+                                end_time_y=23)  
+    train_loader = DataLoader(train_data, batch_size=2, shuffle=True, num_workers=4)
     valid_data = WeatherBench128(start_time=val_start_time, end_time=val_end_time,
-                                include_target=False, lead_time=1, interval=12, muti_target_steps=12)
-    valid_loader = DataLoader(valid_data, batch_size=8, shuffle=False, num_workers=4)
+                                include_target=False,
+                                lead_time=1, 
+                                interval=1,
+                                muti_target_steps=1,
+                                start_time_x=0,
+                                end_time_x=11,      
+                                start_time_y=12,
+                                end_time_y=23)  
+    valid_loader = DataLoader(valid_data, batch_size=2, shuffle=False, num_workers=4)
 
     world_size=devices*num_nodes
     lr=5e-4

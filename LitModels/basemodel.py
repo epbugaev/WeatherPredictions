@@ -31,7 +31,7 @@ class BaseModel(L.LightningModule):
         self.muti_steps = muti_steps
         self.test_metrics = {}
         # ==============================
-        self.example_input_array = torch.Tensor(1, 69, 128, 256)
+        self.example_input_array = torch.Tensor(1, 12, 69, 128, 256)
         self.save_hyperparameters(ignore=['model', 'metrics', 'muti_steps_reader']) # too big too save
 
 
