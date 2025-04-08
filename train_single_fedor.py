@@ -16,8 +16,8 @@ import string
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from Data.weatherbench_128_v2 import WeatherBench128
-from Models.FedorPredFormer import PredFormer_Model
-# from Models.FedorPredFormerGFT import PredFormer_Model
+# from Models.FedorPredFormer import PredFormer_Model
+from Models.FedorPredFormerGFT import PredFormer_Model
 from LitModels.mutiout_fedor import MutiOut
 from utils.metrics import Metrics
 
@@ -92,7 +92,7 @@ def train_model(devices, num_nodes):
                                 end_time_x=11,      
                                 start_time_y=12,
                                 end_time_y=23)  
-    train_loader = DataLoader(train_data, batch_size=2, shuffle=True, num_workers=4)
+    train_loader = DataLoader(train_data, batch_size=4, shuffle=True, num_workers=4)
     valid_data = WeatherBench128(start_time=val_start_time, end_time=val_end_time,
                                 include_target=False,
                                 lead_time=1, 
@@ -102,7 +102,7 @@ def train_model(devices, num_nodes):
                                 end_time_x=11,      
                                 start_time_y=12,
                                 end_time_y=23)  
-    valid_loader = DataLoader(valid_data, batch_size=2, shuffle=False, num_workers=4)
+    valid_loader = DataLoader(valid_data, batch_size=4, shuffle=False, num_workers=4)
 
     world_size=devices*num_nodes
     lr=5e-4
@@ -114,7 +114,7 @@ def train_model(devices, num_nodes):
     lit_model = MutiOut(torch_model, lr=lr, eta_min=eta_min, max_epoch=max_epoch, steps_per_epoch=steps_per_epoch,
                         loss_type="MAE", metrics=metrics, muti_out_nums=6)
 
-    EXP_NAME = "train_predformer_fedor"
+    EXP_NAME = "train_predformer_fedor_gft"
 
     save_path = os.path.join('/home/fa.buzaev/checkpoints/', EXP_NAME, datetime.datetime.now().strftime("%Y-%m-%d-%H:%M") + ''.join(random.choices(string.ascii_lowercase + string.digits, k=5)))
     checkpoint_callback = ModelCheckpoint(dirpath=save_path,

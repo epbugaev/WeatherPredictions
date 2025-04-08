@@ -6,6 +6,7 @@ from torch import nn, einsum
 from einops import rearrange
 from einops.layers.torch import Rearrange
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
+import torch.nn.functional as F
 
 
 class PreNorm(nn.Module):
