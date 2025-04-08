@@ -104,9 +104,9 @@ def weno_derivative(u, dx, epsilon=1e-6, boundary="periodic"):
       dx       : шаг по координате (скаляр или 0D/1D тензор).
       boundary : тип граничных условий ("periodic" или "reflect").
     """
-    flux_iphalf = weno5_flux(u, epsilon=epsilon, boundary=boundary)
+    flux_iphalf = weno5_flux(u, epsilon=epsilon, boundary=boundary).to(u.device)
     if boundary == "periodic":
-        flux_imhalf = torch.roll(flux_iphalf, shifts=1, dims=-1)
+        flux_imhalf = torch.roll(flux_iphalf, shifts=1, dims=-1).to(u.device)
     elif boundary == "reflect":
         flux_imhalf = flux_iphalf.clone()
         flux_imhalf[..., 1:] = flux_iphalf[..., :-1]
@@ -117,7 +117,7 @@ def weno_derivative(u, dx, epsilon=1e-6, boundary="periodic"):
     if not isinstance(dx, torch.Tensor):
         dx = torch.tensor(dx, dtype=u.dtype, device=u.device)
     if dx.dim() == 1:
-        dx = dx.unsqueeze(-1)
+        dx = dx.unsqueeze(-1).to(u.device)
     return (flux_iphalf - flux_imhalf) / dx
 
 def d_x_weno(input_tensor, boundary="reflect"):
@@ -380,9 +380,6 @@ class PDE_kernel(nn.Module):
         skip = x
 
         ################################################################
-        # Заменить self.physics part coef (nn.Parameters)
-        # print(zquvtw.shape, self.physics_part_coef)
-
         zquvtw_old = (1 - self.physics_part_coef)*self.variable_norm(x) + self.physics_part_coef*zquvtw
         z_old, t_old, q_old, u_old, v_old= zquvtw_old.chunk(5, dim=1)
 
@@ -664,13 +661,6 @@ class PredFormer_Model(nn.Module):
         
         self.hybrid_block = HybridBlock(
             dim=input_dim,             # Размерность входного канала
-            heads=8,                   # Количество голов в механизме внимания
-            head_dim=32,               # Размерность каждой головы
-            mlp_dim=input_dim*4,       # Размерность скрытого слоя MLP
-            shifted=False,             # Не использовать сдвинутые окна
-            window_size=[4, 8],        # Размер окна для внимания [H, W]
-            relative_pos_embedding=False,  # Относительное позиционное кодирование
-            use_pde=True,              # Использовать блок PDE 
             zquvtw_channel=13,         # 13 вертикальных уровней
             depth=3,                   # Глубина блока PDE
             block_dt=300,              # Временной шаг для PDE в секундах
@@ -711,14 +701,12 @@ class PredFormer_Model(nn.Module):
         x_gft_list = []
         for i in range(T - 1):
             # Применяем GFT с помощью hybrid_block
-            x_patch = x[:, i, 4:, :, :]  # Берем только каналы с индекса 4, получая Z, Q, U, V, T, W
+            x_patch = x[:, i, 4:, :, :]  # Берем только каналы с индекса 4, получая Z, Q, U, V, T
             # x_patch = x_patch.permute(0, 3, 2, 1)  # [B, H, W, C]
             
             # Получаем входные данные для hybrid_block
             zquvtw = self.x_to_zquvtw(x_patch)
 
-            x_patch = zquvtw
-            
             for j in range(12):
                 # Получаем физические эмбеддинги через hybrid_block
                 x_patch, zquvtw = self.hybrid_block(x_patch, zquvtw)  # Используем одинаковые данные для обоих входов
@@ -786,7 +774,7 @@ class PredFormer_Model(nn.Module):
 
 
 class HybridBlock(nn.Module):
-    def __init__(self, dim, heads, head_dim, mlp_dim, shifted, window_size, relative_pos_embedding, use_pde, zquvtw_channel, depth, block_dt, inverse_time, physics_part_coef):
+    def __init__(self, dim, zquvtw_channel, depth, block_dt, inverse_time, physics_part_coef):
         super().__init__()
         
         self.pde_block = PDE_block(dim, zquvtw_channel, depth=depth, block_dt=block_dt, inverse_time=inverse_time, physics_part_coef=physics_part_coef)
@@ -801,6 +789,7 @@ class HybridBlock(nn.Module):
         weight_Physics = 0.5*torch.ones_like(x)-self.router_weight
         x = weight_AI*zquvtw + weight_Physics*feat_pde
         return x, zquvtw
+
 
 
 # model_config = {

@@ -2,8 +2,9 @@ import torch
 import math
 import random
 from torch import nn
-from .utils_for_models.imvp_modules import CircularConvSC, ConvNeXt_block, Learnable_Filter, Attention, ConvNeXt_bottle
 
+from .imvp_modules import CircularConvSC, ConvNeXt_block, Learnable_Filter, Attention, ConvNeXt_bottle
+from .FedorPredFormerGFT import HybridBlock
 
 class SinusoidalPosEmb(nn.Module):
     def __init__(self, dim):
@@ -128,23 +129,50 @@ class Predictor(nn.Module):
         return y
 
 
+
 class IAM4VP(nn.Module):
-    def __init__(self, shape_in, hid_S=64, hid_T=512, N_S=4, N_T=6):
+    def __init__(self, T_data=12, C_data=69, H_data=128, W_data=256, hid_S=64, hid_T=512, N_S=4, N_T=6):
         super(IAM4VP, self).__init__()
-        T, C, H, W = shape_in
-        self.time_mlp = Time_MLP(dim=64)
-        self.enc = Encoder(C, hid_S, N_S)
-        self.hid = Predictor(T * hid_S, hid_T, N_T)
-        self.dec = Decoder(hid_S, C, N_S, T)
-        self.attn = Attention(64)
-        self.readout = nn.Conv2d(64, C, 1)
-        #self.mask_token = nn.Parameter(torch.zeros(T, hid_S, 8, 16)) #for 5_6
-        self.mask_token = nn.Parameter(torch.zeros(T, hid_S, H // 4, W // 4)) #for 1_4 and 5_6
-        self.lp = LP(C, hid_S, N_S)
+        self.time_mlp = Time_MLP(dim=hid_S)
+        self.enc = Encoder(C_data, hid_S, N_S)
+        self.hid = Predictor(T_data * hid_S, hid_T, N_T)
+        self.dec = Decoder(hid_S, C_data, N_S, T_data)
+        self.attn = Attention(hid_S)
+        self.readout = nn.Conv2d(hid_S, C_data, 1)
+        self.mask_token = nn.Parameter(torch.zeros(T_data, hid_S, H_data // 4, W_data // 4)) #for 1_4 and 5_6
+        self.lp = LP(C_data, hid_S, N_S)
+        self.lp_phys = LP(C_data, hid_S, N_S)
+        self.hybrid_block = HybridBlock(dim=C_data-4, zquvtw_channel=13, depth=3, block_dt=1200, inverse_time=False, physics_part_coef=0.5)
         
-        self.skip_mask_token = nn.Parameter(torch.zeros(T, hid_S,  H, W))
-        self.embed_1_mask_token = nn.Parameter(torch.zeros(T, hid_S,  H // 2, W // 2))
-        self.embed_2_mask_token = nn.Parameter(torch.zeros(T, hid_S,  H // 2, W // 2))
+        self.skip_mask_token = nn.Parameter(torch.zeros(T_data, hid_S,  H_data, W_data))
+        self.embed_1_mask_token = nn.Parameter(torch.zeros(T_data, hid_S,  H_data // 2, W_data // 2))
+        self.embed_2_mask_token = nn.Parameter(torch.zeros(T_data, hid_S,  H_data // 2, W_data // 2))
+        self.downscaling_factor_all = 4
+
+    def x_to_zquvtw(self, x):
+        """
+        Преобразует входные данные x в формат zquvtw, пригодный для обработки через hybrid_block.
+        
+        Args:
+            x: Входной тензор формы [B, C, H, W], где C - число каналов (обычно 65)
+        
+        Returns:
+            zquvtw: Тензор формы [B, H//4, W//4, C] - пространственно понижающее преобразование и перестановка осей
+        """
+        # x имеет форму [B, C, H, W]
+        B, C, H, W = x.shape
+        
+        # Понижающая дискретизация для уменьшения размера пространственных координат
+        zquvtw = torch.nn.functional.interpolate(
+            x, 
+            size=(H//self.downscaling_factor_all, W//self.downscaling_factor_all), 
+            mode='bilinear'
+        )
+        
+        # Перестановка осей для формата [B, H, W, C], который ожидает HybridBlock
+        zquvtw = zquvtw.permute(0, 2, 3, 1)  # [B, H//4, W//4, C]
+        
+        return zquvtw
 
 
     def forward(self, x_raw, y_raw=None, t=None):
@@ -160,12 +188,38 @@ class IAM4VP(nn.Module):
         embed_2_mask_token = self.embed_2_mask_token.repeat(B, 1, 1, 1, 1)
 
         for idx, pred in enumerate(y_raw):
-            embed2, skip_lp, embed_1_lp, embed_2_lp = self.lp(pred)
-            mask_token[:, idx, :, :, :] = embed2
 
-            skip_mask_token[:, idx, :, :, :] = skip_lp
-            embed_1_mask_token[:, idx, :, :, :] = embed_1_lp
-            embed_2_mask_token[:, idx, :, :, :] = embed_2_lp
+            embed2, skip_lp, embed_1_lp, embed_2_lp = self.lp(pred)
+
+            if idx == 0:
+                prev_pred = x_raw[:, -1]
+
+            pred_phys = prev_pred[:, 4:, :, :]
+            zquvtw = self.x_to_zquvtw(pred_phys)
+            pred_phys = zquvtw
+
+            for j in range(3):
+                # Получаем физические эмбеддинги через hybrid_block
+                pred_phys, zquvtw = self.hybrid_block(pred_phys, zquvtw)  # Используем одинаковые данные для обоих входов
+        
+            # Возвращаем к исходному формату
+            pred_phys = pred_phys.permute(0, 3, 1, 2)  # [B, C, H//4, W//4]
+            
+            # Масштабируем обратно до исходного размера
+            pred_phys = torch.nn.functional.interpolate(pred_phys, size=(H, W), mode='bilinear')
+            
+            pred_to_hybrid = torch.cat([pred[:, :4, :, :], pred_phys], dim=1)
+
+            embed2_phys, skip_lp_phys, embed_1_lp_phys, embed_2_lp_phys = self.lp_phys(pred_to_hybrid)
+
+
+            mask_token[:, idx, :, :, :] = embed2 + 0.1 * embed2_phys
+
+            skip_mask_token[:, idx, :, :, :] = skip_lp + 0.1 * skip_lp_phys
+            embed_1_mask_token[:, idx, :, :, :] = embed_1_lp + 0.1 * embed_1_lp_phys
+            embed_2_mask_token[:, idx, :, :, :] = embed_2_lp + 0.1 * embed_2_lp_phys
+
+            prev_pred = pred
 
         _, C_, H_, W_ = embed.shape
         

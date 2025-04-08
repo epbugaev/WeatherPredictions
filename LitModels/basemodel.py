@@ -47,7 +47,6 @@ class BaseModel(L.LightningModule):
         elif type == "MSE":
             self.loss = self.mse_loss
 
-
     def forward(self, x):
         x = self.model(x)
         return x
