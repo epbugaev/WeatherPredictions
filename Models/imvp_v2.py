@@ -131,7 +131,7 @@ class Predictor(nn.Module):
 
 
 class IAM4VP(nn.Module):
-    def __init__(self, T_data=12, C_data=69, H_data=128, W_data=256, hid_S=64, hid_T=512, N_S=4, N_T=6):
+    def __init__(self, T_data=6, C_data=69, H_data=128, W_data=256, hid_S=64, hid_T=256, N_S=4, N_T=6):
         super(IAM4VP, self).__init__()
         self.time_mlp = Time_MLP(dim=hid_S)
         self.enc = Encoder(C_data, hid_S, N_S)

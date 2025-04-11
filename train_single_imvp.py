@@ -43,20 +43,20 @@ def train_model(devices, num_nodes):
                                 interval=1,
                                 muti_target_steps=1,
                                 start_time_x=0,
-                                end_time_x=11,      
-                                start_time_y=12,
-                                end_time_y=23)  
-    train_loader = DataLoader(train_data, batch_size=16, shuffle=True, num_workers=4)
+                                end_time_x=5,      
+                                start_time_y=6,
+                                end_time_y=11)  
+    train_loader = DataLoader(train_data, batch_size=16, shuffle=True, num_workers=8)
     valid_data = WeatherBench128(start_time=val_start_time, end_time=val_end_time,
                                 include_target=False,
                                 lead_time=1, 
                                 interval=1,
                                 muti_target_steps=1,
                                 start_time_x=0,
-                                end_time_x=11,      
-                                start_time_y=12,
-                                end_time_y=23)  
-    valid_loader = DataLoader(valid_data, batch_size=16, shuffle=False, num_workers=4)
+                                end_time_x=5,      
+                                start_time_y=6,
+                                end_time_y=11)  
+    valid_loader = DataLoader(valid_data, batch_size=16, shuffle=False, num_workers=8)
 
     world_size=devices*num_nodes
     lr=5e-4
@@ -66,9 +66,9 @@ def train_model(devices, num_nodes):
 
     metrics = Metrics(train_data.data_mean_tensor, train_data.data_std_tensor)
     lit_model = MutiOut(torch_model, lr=lr, eta_min=eta_min, max_epoch=max_epoch, steps_per_epoch=steps_per_epoch,
-                        loss_type="MAE", metrics=metrics, muti_out_nums=6, time_prediction=12)
+                        loss_type="MAE", metrics=metrics, muti_out_nums=6, time_prediction=6)
 
-    EXP_NAME = "train_imvp"
+    EXP_NAME = "train_imvp_mini_gft"
 
     save_path = os.path.join('/home/fa.buzaev/checkpoints/', EXP_NAME, datetime.datetime.now().strftime("%Y-%m-%d-%H:%M") + ''.join(random.choices(string.ascii_lowercase + string.digits, k=5)))
     checkpoint_callback = ModelCheckpoint(dirpath=save_path,
