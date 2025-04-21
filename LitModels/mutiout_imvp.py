@@ -3,7 +3,9 @@ import lightning as L
 from utils.metrics import Metrics
 import numpy as np
 from torch import nn
+import matplotlib.pyplot as plt
 from LitModels.basemodel import BaseModel
+
 
 class MutiOut(BaseModel):
     def __init__(self, 
@@ -92,12 +94,73 @@ class MutiOut(BaseModel):
         rmse_first = self.metrics.WRMSE(pred_list[0], y[:, 0])
         rmse_last = self.metrics.WRMSE(pred_list[-1], y[:, -1])
         
-        log_dict = {
-            "val_loss": val_loss, 
-            "RMSE_z500_first": rmse_first[11], 
-            "RMSE_z500_last": rmse_last[11]
+        # Определение индексов для различных переменных
+        # На основе порядка в weatherbench_128_v2.py
+        index_map = {
+            'u10': 1,      # 10m_u_component_of_wind
+            'v10': 2,      # 10m_v_component_of_wind
+            't2': 0,       # 2m_temperature
+            'z500': 11,    # geopotential на уровне 500 hPa
+            't500': 20,    # temperature на уровне 500 hPa
+            't50': 23,     # temperature на уровне 50 hPa
+            't1000': 19,   # temperature на уровне 1000 hPa
+            'u500': 32,    # u_component_of_wind на уровне 500 hPa
+            'v500': 45,    # v_component_of_wind на уровне 500 hPa
+            'u50': 35,     # u_component_of_wind на уровне 50 hPa
+            'v50': 48,     # v_component_of_wind на уровне 50 hPa
+            'u1000': 31,   # u_component_of_wind на уровне 1000 hPa
+            'v1000': 44,   # v_component_of_wind на уровне 1000 hPa
         }
         
+        log_dict = {
+            "val_loss": val_loss,
+        }
+        
+        # Добавляем логирование для первого и последнего предсказания
+        for var_name, idx in index_map.items():
+            log_dict[f"RMSE_{var_name}_first"] = rmse_first[idx]
+            log_dict[f"RMSE_{var_name}_last"] = rmse_last[idx]
+        
         self.log_dict(log_dict, prog_bar=True)
+        
+        # Добавляем визуализации в comet для указанных переменных
+        if batch_idx == 0 and self.logger is not None and hasattr(self.logger, "experiment"):
+            # Список переменных для визуализации
+            vis_vars = ['u50', 'v50', 'z500', 'u500', 'v500']
+            
+            # Визуализируем только последний прогноз
+            last_pred = pred_list[-1]
+            last_true = y[:, -1]
+            
+            for var_name in vis_vars:
+                if var_name in index_map:
+                    var_idx = index_map[var_name]
+                    
+                    # Берем первый образец из батча
+                    pred_map = last_pred[0, var_idx].cpu().numpy()
+                    true_map = last_true[0, var_idx].cpu().numpy()
+                    diff_map = pred_map - true_map
+                    
+                    # Создаем и логируем изображения
+                    fig_pred, ax_pred = plt.subplots(figsize=(10, 8))
+                    im_pred = ax_pred.imshow(pred_map, cmap='viridis')
+                    plt.colorbar(im_pred, ax=ax_pred)
+                    ax_pred.set_title(f'{var_name} Prediction')
+                    self.logger.experiment.log_figure(figure=fig_pred, figure_name=f'{var_name}_prediction')
+                    plt.close(fig_pred)
+                    
+                    fig_true, ax_true = plt.subplots(figsize=(10, 8))
+                    im_true = ax_true.imshow(true_map, cmap='viridis')
+                    plt.colorbar(im_true, ax=ax_true)
+                    ax_true.set_title(f'{var_name} Ground Truth')
+                    self.logger.experiment.log_figure(figure=fig_true, figure_name=f'{var_name}_true')
+                    plt.close(fig_true)
+                    
+                    fig_diff, ax_diff = plt.subplots(figsize=(10, 8))
+                    im_diff = ax_diff.imshow(diff_map, cmap='RdBu_r')
+                    plt.colorbar(im_diff, ax=ax_diff)
+                    ax_diff.set_title(f'{var_name} Prediction - True')
+                    self.logger.experiment.log_figure(figure=fig_diff, figure_name=f'{var_name}_diff')
+                    plt.close(fig_diff)
         
         return val_loss

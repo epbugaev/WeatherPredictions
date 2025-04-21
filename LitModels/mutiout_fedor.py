@@ -41,7 +41,31 @@ class MutiOut(BaseModel):
         rmse_first = self.metrics.WRMSE(y_hat[:,0], y[:,0])
         rmse_last = self.metrics.WRMSE(y_hat[:,-1], y[:,-1])
 
-        log_dict = {"val_loss": val_loss, "RMSE_z500_first": rmse_first[11], "RMSE_z500_last": rmse_last[11]}
-
+        # Определение индексов для различных переменных
+        # На основе порядка в weatherbench_128_v2.py
+        index_map = {
+            'u10': 1,      # 10m_u_component_of_wind
+            'v10': 2,      # 10m_v_component_of_wind
+            't2': 0,       # 2m_temperature
+            'z500': 11,    # geopotential на уровне 500 hPa
+            't500': 20,    # temperature на уровне 500 hPa
+            't50': 23,     # temperature на уровне 50 hPa
+            't1000': 19,   # temperature на уровне 1000 hPa
+            'u500': 32,    # u_component_of_wind на уровне 500 hPa
+            'v500': 45,    # v_component_of_wind на уровне 500 hPa
+            'u50': 35,     # u_component_of_wind на уровне 50 hPa
+            'v50': 48,     # v_component_of_wind на уровне 50 hPa
+            'u1000': 31,   # u_component_of_wind на уровне 1000 hPa
+            'v1000': 44,   # v_component_of_wind на уровне 1000 hPa
+        }
+        
+        log_dict = {
+            "val_loss": val_loss,
+        }
+        
+        # Добавляем логирование для первого и последнего предсказания
+        for var_name, idx in index_map.items():
+            log_dict[f"RMSE_{var_name}_first"] = rmse_first[idx]
+            log_dict[f"RMSE_{var_name}_last"] = rmse_last[idx]
         
         self.log_dict(log_dict, prog_bar=True)

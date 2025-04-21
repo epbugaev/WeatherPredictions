@@ -15,7 +15,7 @@ import torch
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from Data.weatherbench_128_v2 import WeatherBench128
-from Models.imvp_v2 import IAM4VP
+from Models.imvp_v1 import IAM4VP
 from LitModels.mutiout_imvp import MutiOut
 from utils.metrics import Metrics
 
@@ -33,9 +33,9 @@ def train_model(devices, num_nodes):
     torch_model = IAM4VP()
     
     train_start_time = '2000-01-01 00:00:00'
-    train_end_time = '2003-12-25 00:00:00' # '2000-01-01 23:00:00' #
-    val_start_time = '2004-01-01 00:00:00'
-    val_end_time = '2004-12-25 00:00:00' # '2004-01-01 23:00:00' #
+    train_end_time = '2016-12-25 00:00:00' # '2000-01-01 23:00:00' #
+    val_start_time = '2017-01-01 00:00:00'
+    val_end_time = '2017-12-25 00:00:00' # '2004-01-01 23:00:00' #
 
     train_data = WeatherBench128(start_time=train_start_time, end_time=train_end_time,
                                 include_target=False, 
@@ -68,7 +68,7 @@ def train_model(devices, num_nodes):
     lit_model = MutiOut(torch_model, lr=lr, eta_min=eta_min, max_epoch=max_epoch, steps_per_epoch=steps_per_epoch,
                         loss_type="MAE", metrics=metrics, muti_out_nums=6, time_prediction=6)
 
-    EXP_NAME = "train_imvp_mini_gft"
+    EXP_NAME = "train_imvp_v1"
 
     save_path = os.path.join('/home/fa.buzaev/checkpoints/', EXP_NAME, datetime.datetime.now().strftime("%Y-%m-%d-%H:%M") + ''.join(random.choices(string.ascii_lowercase + string.digits, k=5)))
     checkpoint_callback = ModelCheckpoint(dirpath=save_path,

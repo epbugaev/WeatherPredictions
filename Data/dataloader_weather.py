@@ -5,6 +5,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 import xarray as xr
+import dask
 
 from timm.data.distributed_sampler import OrderedDistributedSampler, RepeatAugSampler
 from functools import partial
@@ -355,21 +356,22 @@ class WeatherBenchDataset(Dataset):
             except OSError:
                 print("OSError: Invalid path {}/{}/*.nc".format(self.data_root, data_map[data_name]))
                 assert False
-            dataset = dataset.sel(time=slice(*self.training_time))
-            dataset = dataset.isel(time=slice(None, -1, self.step))
-            if self.time is None and single_variant:
-                self.week = dataset['time.week']
-                self.month = dataset['time.month']
-                self.year = dataset['time.year']
-                self.time = np.stack(
-                    [self.week, self.month, self.year], axis=1)
-                lon, lat = np.meshgrid(
-                    (dataset.lon-180) * d2r, dataset.lat*d2r)
-                x, y, z = latlon2xyz(lat, lon)
-                self.V = np.stack([x, y, z]).reshape(3, self.shape[0]*self.shape[1]).T
-            if not single_variant and isinstance(self.level, list):
-                dataset = dataset.sel(level=np.array(self.level))
-            data = dataset.get(data_name).values[:, np.newaxis, :, :]
+            with dask.config.set(**{'array.slicing.split_large_chunks': True}):
+                dataset = dataset.sel(time=slice(*self.training_time))
+                dataset = dataset.isel(time=slice(None, -1, self.step))
+                if self.time is None and single_variant:
+                    self.week = dataset['time.week']
+                    self.month = dataset['time.month']
+                    self.year = dataset['time.year']
+                    self.time = np.stack(
+                        [self.week, self.month, self.year], axis=1)
+                    lon, lat = np.meshgrid(
+                        (dataset.lon-180) * d2r, dataset.lat*d2r)
+                    x, y, z = latlon2xyz(lat, lon)
+                    self.V = np.stack([x, y, z]).reshape(3, self.shape[0]*self.shape[1]).T
+                if not single_variant and isinstance(self.level, list):
+                    dataset = dataset.sel(level=np.array(self.level))
+                data = dataset.get(data_name).values[:, np.newaxis, :, :]
 
         elif data_name == 'uv10':
             input_datasets = []
@@ -384,19 +386,20 @@ class WeatherBenchDataset(Dataset):
                 except OSError:
                     print("OSError: Invalid path {}/{}/*.nc".format(self.data_root, data_map[key]))
                     assert False
-                dataset = dataset.sel(time=slice(*self.training_time))
-                dataset = dataset.isel(time=slice(None, -1, self.step))
-                if self.time is None and single_variant:
-                    self.week = dataset['time.week']
-                    self.month = dataset['time.month']
-                    self.year = dataset['time.year']
-                    self.time = np.stack(
-                        [self.week, self.month, self.year], axis=1)
-                    lon, lat = np.meshgrid(
-                        (dataset.lon-180) * d2r, dataset.lat*d2r)
-                    x, y, z = latlon2xyz(lat, lon)
-                    self.V = np.stack([x, y, z]).reshape(3, self.shape[0]*self.shape[1]).T
-                input_datasets.append(dataset.get(key).values[:, np.newaxis, :, :])
+                with dask.config.set(**{'array.slicing.split_large_chunks': True}):
+                    dataset = dataset.sel(time=slice(*self.training_time))
+                    dataset = dataset.isel(time=slice(None, -1, self.step))
+                    if self.time is None and single_variant:
+                        self.week = dataset['time.week']
+                        self.month = dataset['time.month']
+                        self.year = dataset['time.year']
+                        self.time = np.stack(
+                            [self.week, self.month, self.year], axis=1)
+                        lon, lat = np.meshgrid(
+                            (dataset.lon-180) * d2r, dataset.lat*d2r)
+                        x, y, z = latlon2xyz(lat, lon)
+                        self.V = np.stack([x, y, z]).reshape(3, self.shape[0]*self.shape[1]).T
+                    input_datasets.append(dataset.get(key).values[:, np.newaxis, :, :])
             data = np.concatenate(input_datasets, axis=1)
 
         # uv10
@@ -622,30 +625,31 @@ class WeatherBenchDataset2(Dataset):
             print("OSError: Invalid path {}/{}/*.nc".format(self.data_root, data_map2[data_name]))
             assert False
 
-        if 'time' not in dataset.indexes:
-            dataset = dataset.expand_dims(dim={"time": 1}, axis=0)
-        else:
-            dataset = dataset.sel(time=slice(*self.training_time))
-            dataset = dataset.isel(time=slice(None, -1, self.step))
-            self.time_size = dataset.dims['time']
+        with dask.config.set(**{'array.slicing.split_large_chunks': True}):
+            if 'time' not in dataset.indexes:
+                dataset = dataset.expand_dims(dim={"time": 1}, axis=0)
+            else:
+                dataset = dataset.sel(time=slice(*self.training_time))
+                dataset = dataset.isel(time=slice(None, -1, self.step))
+                self.time_size = dataset.dims['time']
 
-        if 'level' not in dataset.indexes:
-            dataset = dataset.expand_dims(dim={"level": 1}, axis=1)
-        else:
-            dataset = dataset.sel(level=np.array(levels))
+            if 'level' not in dataset.indexes:
+                dataset = dataset.expand_dims(dim={"level": 1}, axis=1)
+            else:
+                dataset = dataset.sel(level=np.array(levels))
 
-        if data_name in data_keys_map2:
-            data = dataset.get(data_keys_map2[data_name]).values
-        else:
-            data = dataset.get(data_name).values
+            if data_name in data_keys_map2:
+                data = dataset.get(data_keys_map2[data_name]).values
+            else:
+                data = dataset.get(data_name).values
 
-        mean = data.mean().reshape(1, 1, 1, 1)
-        std = data.std().reshape(1, 1, 1, 1)
-        # mean = dataset.mean('time').mean(('lat', 'lon')).compute()[data_name].values
-        # std = dataset.std('time').mean(('lat', 'lon')).compute()[data_name].values
-        # data = (data - mean) / std
+            mean = data.mean().reshape(1, 1, 1, 1)
+            std = data.std().reshape(1, 1, 1, 1)
+            # mean = dataset.mean('time').mean(('lat', 'lon')).compute()[data_name].values
+            # std = dataset.std('time').mean(('lat', 'lon')).compute()[data_name].values
+            # data = (data - mean) / std
 
-        return data, mean, std
+            return data, mean, std
 
     def _augment_seq(self, seqs, crop_scale=0.96):
         """Augmentations as a video sequence"""

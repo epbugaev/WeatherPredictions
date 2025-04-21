@@ -112,8 +112,8 @@ def top_quantiles_error_torch(pred: torch.Tensor, target: torch.Tensor) -> torch
 
 
 class Metrics():
-    def __init__(self, dtat_mean=None, data_std=None):
-        self.data_mean = dtat_mean
+    def __init__(self, data_mean=None, data_std=None):
+        self.data_mean = data_mean
         self.data_std = data_std
         
     def MSE(self, pred, gt):
