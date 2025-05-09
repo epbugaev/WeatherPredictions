@@ -11,10 +11,11 @@ import os
 import sys
 import random
 import string
+import torch
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from Data.weatherbench_128_v3 import WeatherBench128
-from Models.imvp_v3 import IAM4VP
+from Models.imvp_v2 import IAM4VP
 from LitModels.mutiout_imvp import MutiOut
 from utils.metrics import Metrics
 
@@ -22,8 +23,14 @@ from lightning.pytorch.loggers import CometLogger
 
 def train_model(devices, num_nodes):
 
+    model_config = {
+        "hid_S": 64,
+        "hid_T": 512,
+        "N_S": 4,
+        "N_T": 6
+    }
 
-    torch_model = IAM4VP(T_data=12, C_data=69, H_data=128, W_data=256, hid_S=64, hid_T=256, N_S=4, N_T=12)
+    torch_model = IAM4VP()
     
     train_start_time = '2000-01-01 00:00:00'
     train_end_time = '2016-12-25 00:00:00' # '2000-01-01 23:00:00' #
@@ -36,20 +43,20 @@ def train_model(devices, num_nodes):
                                 interval=1,
                                 muti_target_steps=1,
                                 start_time_x=0,
-                                end_time_x=11,      
-                                start_time_y=12,
-                                end_time_y=23)  
-    train_loader = DataLoader(train_data, batch_size=8, shuffle=True, num_workers=8)
+                                end_time_x=5,      
+                                start_time_y=6,
+                                end_time_y=11)  
+    train_loader = DataLoader(train_data, batch_size=26, shuffle=True, num_workers=8)
     valid_data = WeatherBench128(start_time=val_start_time, end_time=val_end_time,
                                 include_target=False,
                                 lead_time=1, 
                                 interval=1,
                                 muti_target_steps=1,
                                 start_time_x=0,
-                                end_time_x=11,      
-                                start_time_y=12,
-                                end_time_y=23)  
-    valid_loader = DataLoader(valid_data, batch_size=8, shuffle=False, num_workers=8)
+                                end_time_x=5,      
+                                start_time_y=6,
+                                end_time_y=11)  
+    valid_loader = DataLoader(valid_data, batch_size=26, shuffle=False, num_workers=8)
 
     world_size=devices*num_nodes
     lr=5e-4
@@ -61,7 +68,7 @@ def train_model(devices, num_nodes):
     lit_model = MutiOut(torch_model, lr=lr, eta_min=eta_min, max_epoch=max_epoch, steps_per_epoch=steps_per_epoch,
                         loss_type="MAE", metrics=metrics, muti_out_nums=6, time_prediction=6)
 
-    EXP_NAME = "train_imvp_v3_big_model"
+    EXP_NAME = "train_imvp_v2_continue_2_may"
 
     save_path = os.path.join('/home/fa.buzaev/checkpoints/', EXP_NAME, datetime.datetime.now().strftime("%Y-%m-%d-%H:%M") + ''.join(random.choices(string.ascii_lowercase + string.digits, k=5)))
     checkpoint_callback = ModelCheckpoint(dirpath=save_path,
@@ -85,9 +92,9 @@ def train_model(devices, num_nodes):
 
     trainer.print("[checkpoint path]", save_path)
 
-    trainer.fit(model=lit_model, train_dataloaders=train_loader, val_dataloaders=valid_loader)
-    # trainer.fit(model=lit_model, train_dataloaders=train_loader, val_dataloaders=valid_loader, 
-    #             ckpt_path='/home/fa.buzaev/checkpoints/train_imvp_v2/2025-04-29-15:38aeboe/last.ckpt')
+    # trainer.fit(model=lit_model, train_dataloaders=train_loader, val_dataloaders=valid_loader)
+    trainer.fit(model=lit_model, train_dataloaders=train_loader, val_dataloaders=valid_loader, 
+                ckpt_path='/home/fa.buzaev/checkpoints/train_imvp_v2/2025-04-29-15:38aeboe/last.ckpt')
 
 
     trainer.print("train over")

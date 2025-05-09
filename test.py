@@ -5,7 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from einops import rearrange
 import torch.nn.functional as F
-from Models.imvp_v2 import IAM4VP
+from Models.imvp_v3 import IAM4VP
 
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 print(device)
