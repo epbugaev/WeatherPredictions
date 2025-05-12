@@ -22,7 +22,7 @@ class MutiOut(BaseModel):
                  time_prediction:int=6,  # Number of time steps to predict
                  **kwargs):
         super().__init__(model, lr, eta_min, max_epoch, steps_per_epoch, loss_type, metrics, muti_steps)
-        self.example_input_array = torch.Tensor(1, 6, 69, 128, 256)
+        self.example_input_array = torch.Tensor(1, 12, 69, 128, 256)
         self.time_prediction = time_prediction
         self.automatic_optimization = False  # Disable automatic optimization for manual optimization
 

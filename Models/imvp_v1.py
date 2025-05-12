@@ -4,7 +4,6 @@ import random
 from torch import nn
 
 from .imvp_modules import CircularConvSC, ConvNeXt_block, Learnable_Filter, Attention, ConvNeXt_bottle
-from .FedorPredFormerGFT import HybridBlock
 
 class SinusoidalPosEmb(nn.Module):
     def __init__(self, dim):

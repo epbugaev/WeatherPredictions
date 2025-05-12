@@ -39,7 +39,7 @@ def train_model(devices, num_nodes):
                                 end_time_x=11,      
                                 start_time_y=12,
                                 end_time_y=23)  
-    train_loader = DataLoader(train_data, batch_size=8, shuffle=True, num_workers=8)
+    train_loader = DataLoader(train_data, batch_size=4, shuffle=True, num_workers=8)
     valid_data = WeatherBench128(start_time=val_start_time, end_time=val_end_time,
                                 include_target=False,
                                 lead_time=1, 
@@ -49,7 +49,7 @@ def train_model(devices, num_nodes):
                                 end_time_x=11,      
                                 start_time_y=12,
                                 end_time_y=23)  
-    valid_loader = DataLoader(valid_data, batch_size=8, shuffle=False, num_workers=8)
+    valid_loader = DataLoader(valid_data, batch_size=4, shuffle=False, num_workers=8)
 
     world_size=devices*num_nodes
     lr=5e-4

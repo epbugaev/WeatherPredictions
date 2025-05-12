@@ -330,8 +330,10 @@ class color_preserving_advection(nn.Module):
         self.grid = torch.stack((x, y), dim=-1).unsqueeze(0).unsqueeze(0).to(device)
 
     def forward(self, T, U, V):
+        # Перемещаем self.grid на то же устройство, что и входные тензоры
+        grid = self.grid.to(T.device)
         UV = torch.stack((U, V), dim=-1)
-        transformation_grid = self.grid + UV
+        transformation_grid = grid + UV
         Th = F.grid_sample(T, transformation_grid.squeeze(1), align_corners=True)
 
         return Th
