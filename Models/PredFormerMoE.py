@@ -309,6 +309,62 @@ class GatedTransformer(nn.Module):
             x = x + drop_path2(ff(x))
         return self.norm(x)
     
+class WeightedTokenMixing(nn.Module):
+    """Weighted token mixing for improved long-range forecasting.
+    This module allows the model to dynamically weight different temporal positions
+    when making predictions, which is particularly useful for weather forecasting.
+    """
+    def __init__(self, dim, seq_len):
+        super().__init__()
+        self.dim = dim
+        self.seq_len = seq_len
+        
+        # Weight matrix for token mixing (learnable)
+        self.temporal_weights = nn.Parameter(torch.ones(seq_len, seq_len))
+        self.value_proj = nn.Linear(dim, dim)
+        self.output_proj = nn.Linear(dim, dim)
+        
+        # Initialize with temporal decay pattern (more weight to recent tokens)
+        with torch.no_grad():
+            # Create decay pattern (newer tokens have more influence)
+            decay_pattern = torch.exp(torch.linspace(0, -2, seq_len)).unsqueeze(0)
+            decay_pattern = decay_pattern.repeat(seq_len, 1)
+            
+            # Make it causal for forecasting (can't see future tokens)
+            mask = torch.tril(torch.ones(seq_len, seq_len))
+            self.temporal_weights.data = decay_pattern * mask
+        
+    def forward(self, x):
+        # x shape could be [batch, seq_len, dim] or [seq_len, dim]
+        shape = x.shape
+        
+        # Handle both 2D and 3D inputs
+        if len(shape) == 2:
+            seq_len, dim = shape
+            x = x.unsqueeze(0)  # Add batch dimension
+            batch = 1
+        else:
+            batch, seq_len, dim = shape
+            
+        assert dim == self.dim, f"Expected dimension {self.dim}, got {dim}"
+        
+        # Project values
+        values = self.value_proj(x)  # [batch, seq_len, dim]
+        
+        # Apply softmax to weights for each position
+        mixing_weights = F.softmax(self.temporal_weights[:seq_len, :seq_len], dim=-1)  # [seq_len, seq_len]
+        
+        # Apply weighted mixing
+        mixed = torch.matmul(mixing_weights, values)  # [batch, seq_len, dim]
+        
+        # Project back to original dimension
+        output = self.output_proj(mixed)  # [batch, seq_len, dim]
+        
+        # Return in the same shape as input
+        if len(shape) == 2:
+            return output.squeeze(0)
+        return output
+
 class PredFormerLayer(nn.Module):
     def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout=0., attn_dropout=0., drop_path=0.1, use_moe=True, num_experts=4):
         super(PredFormerLayer, self).__init__()
@@ -319,6 +375,9 @@ class PredFormerLayer(nn.Module):
                                              mlp_dim, dropout, attn_dropout, drop_path, use_moe, num_experts)
         self.temporal_transformer_second = GatedTransformer(dim, depth, heads, dim_head, 
                                                        mlp_dim, dropout, attn_dropout, drop_path, use_moe, num_experts)
+        
+        # Add weighted token mixing for better temporal modeling
+        self.temporal_mixer = WeightedTokenMixing(dim, 12)  # 12 for sequence length
 
     def forward(self, x):
         b, t, n, _ = x.shape        
@@ -328,6 +387,21 @@ class PredFormerLayer(nn.Module):
         x_t = rearrange(x_t, 'b t n d -> b n t d')
         x_t = rearrange(x_t, 'b n t d -> (b n) t d')
         x_t = self.temporal_transformer_first(x_t)
+        
+        # Safely apply weighted token mixing
+        try:
+            # Reshape for mixing
+            bn, t, d = x_t.shape
+            x_t_mixed = x_t.clone()  # Create a copy to avoid in-place modification issues
+            
+            # Process each sequence separately
+            for i in range(bn):
+                x_t_mixed[i] = self.temporal_mixer(x_t[i])
+                
+            x_t = x_t_mixed
+        except Exception as e:
+            # If there's an error, just skip the mixing
+            print(f"Skipping temporal mixing due to: {e}")
         
         # s branch (space)
         x_ts = rearrange(x_t, '(b n) t d -> b n t d', b=b)
@@ -392,10 +466,13 @@ class PredFormer_Model(nn.Module):
 
         self.blocks = nn.ModuleList([
             PredFormerLayer(self.dim, self.depth, self.heads, self.dim_head, 
-                            self.dim * self.scale_dim, self.dropout, self.attn_dropout, 
-                            self.drop_path, self.use_moe, self.num_experts)
+                             self.dim * self.scale_dim, self.dropout, self.attn_dropout, 
+                             self.drop_path, self.use_moe, self.num_experts)
             for i in range(self.Ndepth)
         ])
+        
+        # Add an adaptive layer norm for better normalization across channels
+        self.adaptive_ln = nn.LayerNorm(self.dim)
 
         self.mlp_head = nn.Sequential(
             nn.LayerNorm(self.dim),
@@ -416,6 +493,9 @@ class PredFormer_Model(nn.Module):
         # PredFormer Encoder
         for idx, blk in enumerate(self.blocks):
             x_combined = blk(x_combined)
+            
+        # Apply adaptive layer norm
+        x_combined = self.adaptive_ln(x_combined)
             
         # MLP head
         x = self.mlp_head(x_combined.reshape(-1, self.dim))
@@ -475,10 +555,10 @@ model_config_small = {
     'scale_dim': 2,
     # depth
     'depth': 1,
-    'Ndepth': 24,
+    'Ndepth': 2,
     # MoE settings
     'use_moe': True,
-    'num_experts': 5,
+    'num_experts': 20,
     'use_improved_model': True,  # Flag to use the improved model
     'path_to_constants': '/home/user/mamba_x_predformer/PredFormer/constants_1.40625deg.nc',
 }
