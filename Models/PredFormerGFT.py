@@ -1,35 +1,36 @@
 import torch
-from torch import nn, einsum
 import numpy as np
+import xarray as xr
+import torch
+from torch import nn, einsum
 from einops import rearrange
+from einops.layers.torch import Rearrange
+from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 import torch.nn.functional as F
-import math
-from fairscale.nn.checkpoint.checkpoint_activations import checkpoint_wrapper
-
-from Models.PredFormer import BinaryTSLayer, FullAttentionLayer
-from Models.PredFormerUtils import FullAttention, AttentionLayer
 
 @torch.jit.script
 def lat(j: torch.Tensor, num_lat: int) -> torch.Tensor:
     return 90. - j * 180./float(num_lat-1)
 
-latents_size = [32, 64] # patch size = 4, input size [128, 256], latents size = [128/4, 256/4]
-
+# ===== Исходные расчёты параметров дискретизации =====
+latents_size = [8, 16] #[32, 64]  # patch size = 4, input size [128, 256], latents size = [128/4, 256/4]
 radius = 6371.0 * 1000
 num_lat = latents_size[0] + 2
 lat_t = torch.arange(start=0, end=num_lat)
+# Функция для равномерного распределения широт от -90 до 90 градусов:
+def lat(lat_t, num_lat):
+    return torch.linspace(-90, 90, steps=num_lat)
 latitudes = lat(lat_t, num_lat)[1:-1]
-latitudes = latitudes/180*torch.pi
+latitudes = latitudes / 180 * torch.pi  # перевод в радианы
 
-c_lats = 2*torch.pi*radius*torch.cos(latitudes)
+c_lats = 2 * torch.pi * radius * torch.cos(latitudes)
 c_lats = c_lats.reshape([1, 1, latents_size[0], 1])
 
-pixel_x = c_lats/latents_size[1] # The actual distance each pixel corresponds to in the horizontal direction
-pixel_y = torch.pi*radius/(latents_size[0]+1) # The actual distance each pixel corresponds to in the vertical direction
+pixel_x = c_lats / latents_size[1]  # горизонтальное расстояние (ось x)
+pixel_y = torch.pi * radius / (latents_size[0] + 1)  # вертикальное расстояние (ось y)
 
 pressure = torch.tensor([50, 100, 150, 200, 250, 300, 400, 500, 600, 700, 850, 925, 1000]).reshape([1, 13, 1, 1])
-pixel_z = torch.tensor([50, 50, 50, 50, 50, 75, 100, 100, 100, 125, 112, 75, 75]).reshape([1, 13, 1, 1]) # The difference between adjacent pressure levels, which will be used to calculate the p-direction integral
-
+pixel_z = torch.tensor([50, 50, 50, 50, 50, 75, 100, 100, 100, 125, 112, 75, 75]).reshape([1, 13, 1, 1])
 
 pressure_level_num = pixel_z.shape[1]
 M_z = torch.zeros(pressure_level_num, pressure_level_num)
@@ -38,85 +39,190 @@ for M_z_i in range(pressure_level_num):
         if M_z_i <= M_z_j:
             M_z[M_z_i, M_z_j] = pixel_z[0, M_z_j, 0, 0]
 
-
 def integral_z(input_tensor):
-    # Pressure-direction integral
+    # Вертикальное интегрирование по давлению
     B, pressure_level_num, H, W = input_tensor.shape
-    input_tensor = input_tensor.reshape(B, pressure_level_num, H*W)
+    input_tensor = input_tensor.reshape(B, pressure_level_num, H * W)
     output = M_z.to(input_tensor.dtype).to(input_tensor.device) @ input_tensor
     output = output.reshape(B, pressure_level_num, H, W)
     return output
 
+# ===== Реализация WENO 5-го порядка для вычисления производных =====
 
-def d_x(input_tensor):
-    # Latitude-direction differential
+def weno5_flux(u, epsilon=1e-6, boundary="periodic"):
+    """
+    Вычисляет численный поток на интерфейсах ячеек по схеме WENO 5-го порядка.
+    Аргументы:
+      u        : тензор, по последней оси которого вычисляются срезы (форма (..., W))
+      epsilon  : малое число для предотвращения деления на ноль.
+      boundary : тип граничных условий: "periodic" или "reflect".
+    """
+    if boundary == "periodic":
+        u_m2 = torch.roll(u, shifts=2, dims=-1)  # u_{i-2}
+        u_m1 = torch.roll(u, shifts=1, dims=-1)  # u_{i-1}
+        u_0  = u                                # u_i
+        u_p1 = torch.roll(u, shifts=-1, dims=-1)  # u_{i+1}
+        u_p2 = torch.roll(u, shifts=-2, dims=-1)  # u_{i+2}
+    elif boundary == "reflect":
+        # Отражающее дополнение: pad=(2,2) по последней оси
+        u_pad = F.pad(u, pad=(2, 2), mode="reflect")
+        u_m2 = u_pad[..., 0:-4]
+        u_m1 = u_pad[..., 1:-3]
+        u_0  = u_pad[..., 2:-2]
+        u_p1 = u_pad[..., 3:-1]
+        u_p2 = u_pad[..., 4:]
+    else:
+        raise ValueError("Unknown boundary condition")
+        
+    f1 = (2 * u_m2 - 7 * u_m1 + 11 * u_0) / 6.0
+    f2 = (-u_m1 + 5 * u_0 + 2 * u_p1) / 6.0
+    f3 = (2 * u_0 + 5 * u_p1 - u_p2) / 6.0
+
+    beta1 = (13/12.0) * (u_m2 - 2*u_m1 + u_0)**2 + (1/4.0) * (u_m2 - 4*u_m1 + 3*u_0)**2
+    beta2 = (13/12.0) * (u_m1 - 2*u_0 + u_p1)**2 + (1/4.0) * (u_m1 - u_p1)**2
+    beta3 = (13/12.0) * (u_0 - 2*u_p1 + u_p2)**2 + (1/4.0) * (3*u_0 - 4*u_p1 + u_p2)**2
+
+    d1, d2, d3 = 0.1, 0.6, 0.3
+    alpha1 = d1 / (epsilon + beta1)**2
+    alpha2 = d2 / (epsilon + beta2)**2
+    alpha3 = d3 / (epsilon + beta3)**2
+
+    alpha_sum = alpha1 + alpha2 + alpha3
+    omega1 = alpha1 / alpha_sum
+    omega2 = alpha2 / alpha_sum
+    omega3 = alpha3 / alpha_sum
+
+    flux_iphalf = omega1 * f1 + omega2 * f2 + omega3 * f3
+    return flux_iphalf
+
+def weno_derivative(u, dx, epsilon=1e-6, boundary="periodic"):
+    """
+    Вычисляет первую производную функции u по последней оси с использованием WENO 5-го порядка.
+    Аргументы:
+      u        : тензор с формой (N, W), по последней оси которого считается производная.
+      dx       : шаг по координате (скаляр или 0D/1D тензор).
+      boundary : тип граничных условий ("periodic" или "reflect").
+    """
+    flux_iphalf = weno5_flux(u, epsilon=epsilon, boundary=boundary).to(u.device)
+    if boundary == "periodic":
+        flux_imhalf = torch.roll(flux_iphalf, shifts=1, dims=-1).to(u.device)
+    elif boundary == "reflect":
+        flux_imhalf = flux_iphalf.clone()
+        flux_imhalf[..., 1:] = flux_iphalf[..., :-1]
+        flux_imhalf[..., 0] = flux_iphalf[..., 0]
+    else:
+        raise ValueError("Unknown boundary condition")
+    
+    if not isinstance(dx, torch.Tensor):
+        dx = torch.tensor(dx, dtype=u.dtype, device=u.device)
+    if dx.dim() == 1:
+        dx = dx.unsqueeze(-1).to(u.device)
+    return (flux_iphalf - flux_imhalf) / dx
+
+def d_x_weno(input_tensor, boundary="reflect"):
+    """
+    Вычисляет производную по оси 3 (ширина) с использованием WENO 5-го порядка.
+    Результат масштабируется с помощью pixel_x.
+    """
     B, C, H, W = input_tensor.shape
-    conv_kernel = torch.zeros([1,1,1,5], device=input_tensor.device, dtype=input_tensor.dtype, requires_grad=False)
-    conv_kernel[0,0,0,0] = 1
-    conv_kernel[0,0,0,1] = -8
-    conv_kernel[0,0,0,3] = 8
-    conv_kernel[0,0,0,4] = -1
+    input_flat = input_tensor.reshape(B * C * H, W)
+    dx_flat = pixel_x.expand(B, C, H, 1).reshape(B * C * H)
+    derivative_flat = weno_derivative(input_flat, dx_flat, boundary=boundary)
+    derivative = derivative_flat.reshape(B, C, H, W)
+    return derivative
 
-    input_tensor = torch.cat((input_tensor[:,:,:,-2:], 
-                              input_tensor,
-                              input_tensor[:,:,:,:2]), dim=3)
-    _, _, H_, W_ = input_tensor.shape
-    
-    input_tensor = input_tensor.reshape(B*C, 1, H_, W_)
-    output_x = F.conv2d(input_tensor, conv_kernel)/12
-    output_x = output_x.reshape(B, C, H, W)
-    output_x = output_x/pixel_x.to(output_x.dtype).to(output_x.device)
-    
-    return output_x
-
-
-def d_y(input_tensor):
-    # longitude-direction differential
+def d_y_weno(input_tensor, boundary="reflect"):
+    """
+    Вычисляет производную по оси 2 (высота) с использованием WENO 5-го порядка.
+    Результат масштабируется с помощью pixel_y.
+    """
     B, C, H, W = input_tensor.shape
-    conv_kernel = torch.zeros([1,1,5,1], device=input_tensor.device, dtype=input_tensor.dtype, requires_grad=False)
-    conv_kernel[0,0,0] = -1
-    conv_kernel[0,0,1] = 8
-    conv_kernel[0,0,3] = -8
-    conv_kernel[0,0,4] = 1
+    input_perm = input_tensor.permute(0, 1, 3, 2)
+    input_flat = input_perm.reshape(B * C * W, H)
+    derivative_flat = weno_derivative(input_flat, pixel_y, boundary=boundary)
+    derivative_perm = derivative_flat.reshape(B, C, W, H)
+    derivative = derivative_perm.permute(0, 1, 3, 2)
+    return derivative
 
-    input_tensor = torch.cat((input_tensor[:,:,:2], 
-                              input_tensor,
-                              input_tensor[:,:,-2:]), dim=2)
-    _, _, H_, W_ = input_tensor.shape
-    
-    input_tensor = input_tensor.reshape(B*C, 1, H_, W_)
-    output_y = F.conv2d(input_tensor, conv_kernel)/12
-    output_y = output_y.reshape(B, C, H, W)
-    output_y = output_y/pixel_y
-    
-    return output_y
-
+# Используем функции d_x_weno и d_y_weno напрямую
+d_x = d_x_weno
+d_y = d_y_weno
 
 def d_z(input_tensor):
-    # Pressure-direction differential
-    conv_kernel = torch.zeros([1,1,5,1,1], device=input_tensor.device, dtype=input_tensor.dtype, requires_grad=False)
-    conv_kernel[0,0,0] = -1
-    conv_kernel[0,0,1] = 8
-    conv_kernel[0,0,3] = -8
-    conv_kernel[0,0,4] = 1
+    # Вертикальная производная по давлению без изменений (используется периодическая логика через concat)
+    conv_kernel = torch.zeros([1, 1, 5, 1, 1], device=input_tensor.device, dtype=input_tensor.dtype, requires_grad=False)
+    conv_kernel[0, 0, 0] = -1
+    conv_kernel[0, 0, 1] = 8
+    conv_kernel[0, 0, 3] = -8
+    conv_kernel[0, 0, 4] = 1
 
-    input_tensor = torch.cat((input_tensor[:,:2], 
+    input_tensor = torch.cat((input_tensor[:, :2],
                               input_tensor,
-                              input_tensor[:,-2:]), dim=1)
-    
-    input_tensor = input_tensor.unsqueeze(1) # B, 1, C, H, W
-    output_z = F.conv3d(input_tensor, conv_kernel)/12
+                              input_tensor[:, -2:]), dim=1)
+    input_tensor = input_tensor.unsqueeze(1)  # [B, 1, C, H, W]
+    output_z = F.conv3d(input_tensor, conv_kernel) / 12
     output_z = output_z.squeeze(1)
-    output_z = output_z/pixel_z.to(output_z.dtype).to(output_z.device)
-    
+    output_z = output_z / pixel_z.to(output_z.dtype).to(output_z.device)
     return output_z
 
+def laplacian_tensor(u):
+    d2u_dx2 = d_x(d_x(u))
+    d2u_dy2 = d_y(d_y(u))
+    return d2u_dx2 + d2u_dy2
 
+# ===== Функции для адаптивного уточнения сетки (AMR) =====
+
+def adaptive_mesh_refinement(field, grad_threshold=1e-3, upscale_factor=2):
+    """
+    Если максимальное значение градиента (вычисляемого с помощью d_x и d_y) превышает grad_threshold,
+    возвращает уточнённое поле с увеличенным разрешением (с использованием F.interpolate).
+    """
+    grad_field = torch.sqrt(d_x(field)**2 + d_y(field)**2)
+    if grad_field.max() > grad_threshold:
+        refined_field = F.interpolate(field, scale_factor=upscale_factor, mode='bilinear', align_corners=True)
+        return refined_field, True
+    else:
+        return field, False
+
+def compute_derivative_with_amr(field, derivative_fn, grad_threshold=1e-3, upscale_factor=2, boundary="reflect"):
+    """
+    Вычисляет производную поля с использованием AMR.
+    Если поле имеет сильные градиенты (макс. значение > grad_threshold), оно уточняется,
+    затем вычисляется производная на уточнённом поле, и результат обратно интерполируется до исходного разрешения.
+    """
+    refined_field, refined = adaptive_mesh_refinement(field, grad_threshold, upscale_factor)
+    if refined:
+        refined_deriv = derivative_fn(refined_field, boundary=boundary)
+        deriv = F.interpolate(refined_deriv, scale_factor=1/upscale_factor, mode='bilinear', align_corners=True)
+        return deriv
+    else:
+        return derivative_fn(field, boundary=boundary)
+
+# ===== Класс PDE_kernel с учётом бета-подхода, улучшенных граничных условий и AMR =====
+#
+# Коэффициент Кориолиса определяется как:
+#     f = f0 + beta * y,
+# где y = R * lat (меридиональное расстояние в метрах).
+#
 class PDE_kernel(nn.Module):
-    def __init__(self, in_dim, physics_part_coef, variable_dim=13, block_dt=300, inverse_time=False):
+    def __init__(self, in_dim, physics_part_coef, variable_dim=13, block_dt=300, inverse_time=False, norm=False, eddy_viscosity=0.0,
+                 beta=1.6e-11, f0=7.29e-5):
+        """
+        eddy_viscosity: коэффициент вихревой вязкости для субрешеточной турбулентности.
+        beta: коэффициент бета (с^-1 м^-1) для вариации f по меридионали.
+        f0: базовое значение коэффициента Кориолиса.
+        """
         super().__init__()
-        self.in_dim = in_dim
-        self.variable_dim = variable_dim
+        self.norm = norm
+        self.eddy_viscosity = eddy_viscosity
+        
+        self.f0 = f0
+        self.beta = beta
+        # Вычисляем меридиональное расстояние y = R * lat для каждого пикселя по широте.
+        y_coords = radius * latitudes  # в метрах
+        # f_field имеет форму [1, 1, H, 1] для вещания с полями [B, C, H, W]
+        f_field = self.f0 + self.beta * y_coords
+        self.register_buffer("f_field", f_field.reshape(1, 1, -1, 1))
 
         self.variable_norm = nn.Conv2d(in_channels=in_dim, out_channels=variable_dim*5, kernel_size=3, stride=1, padding=1)
         if physics_part_coef is not None:
@@ -124,7 +230,7 @@ class PDE_kernel(nn.Module):
         else: # Activate learnable matrix for these coefs: shape C x W x H
             self.physics_part_coef = nn.Parameter(0.5 * torch.ones(1, variable_dim*5, 32, 64), requires_grad=True) # 32 and 64 is for H/W grid
         
-        self.f = 7.29e-5
+        
         self.L = 2.5e6
         self.R = 8.314
         self.c_p = 1005
@@ -133,7 +239,7 @@ class PDE_kernel(nn.Module):
         self.diff_ratio = 0.05
         self.block_dt = block_dt
         if inverse_time:
-            self.block_dt = - self.block_dt
+            self.block_dt = -self.block_dt
 
         self.norm_z = nn.BatchNorm2d(variable_dim)
         self.norm_q = nn.BatchNorm2d(variable_dim)
@@ -144,52 +250,54 @@ class PDE_kernel(nn.Module):
         self.variable_innorm = nn.Conv2d(in_channels=variable_dim*5, out_channels=in_dim, kernel_size=3, stride=1, padding=1)
         self.block_norm = nn.BatchNorm2d(in_dim)
 
-
     def scale_tensor(self, tensor, a, b):
         min_val = tensor.min().detach()
         max_val = tensor.max().detach()
         scaled_tensor = (tensor - min_val) / (max_val - min_val)
-        scaled_tensor = scaled_tensor * (b - a) + a
-        return scaled_tensor
+        return scaled_tensor * (b - a) + a
     
-
     def scale_diff(self, diff_x, x):
         x_min, x_mean, x_max = x.min().detach(), x.mean().detach(), x.max().detach()
-        diff_min = (x_min-x_mean) * self.diff_ratio
-        diff_max = (x_max-x_mean) * self.diff_ratio
-        diff_x = self.scale_tensor(diff_x, diff_min, diff_max)
-        return diff_x
+        diff_min = (x_min - x_mean) * self.diff_ratio
+        diff_max = (x_max - x_mean) * self.diff_ratio
+        return self.scale_tensor(diff_x, diff_min, diff_max)
     
     def avoid_inf(self, tensor, threshold=1.0):
-        tensor = torch.where(torch.abs(tensor) == 0.0, torch.ones_like(tensor)*0.1, tensor)
-        tensor = torch.where(torch.abs(tensor) < threshold, torch.sign(tensor) * threshold, tensor)
-        return tensor
-
+        tensor = torch.where(torch.abs(tensor) == 0.0, torch.ones_like(tensor) * 0.1, tensor)
+        return torch.where(torch.abs(tensor) < threshold, torch.sign(tensor) * threshold, tensor)
 
     def share_z_dxyz(self, z):
         self.z_x = d_x(z)
         self.z_y = d_y(z)
         self.z_z = d_z(z)
 
-    ############################# u v #############################
+    ############################# u, v #############################
     def get_uv_dt(self, u, v, w):
-        u_x = self.u_x
-        u_y = d_y(u)
-        u_z = d_z(u)
+        # Консервативное представление нелинейных членов с применением AMR для уточнения
+        adv_u = compute_derivative_with_amr(u * u, d_x) \
+              + compute_derivative_with_amr(u * v, d_y) \
+              + d_z(u * w)  # вертикальная производная без AMR
+        adv_v = compute_derivative_with_amr(u * v, d_x) \
+              + compute_derivative_with_amr(v * v, d_y) \
+              + d_z(v * w)
+        
+        # Используем f_field (вариация по широте)
+        self.u_t = -adv_u + self.f_field * v - self.z_x
+        self.v_t = -adv_v - self.f_field * u - self.z_y
 
-        v_x = d_x(v)
-        v_y = self.v_y
-        v_z = d_z(v)
+        # Параметризация субрешеточной турбулентности через вихревую вязкость
+        if self.eddy_viscosity > 0:
+            lap_u = laplacian_tensor(u)
+            lap_v = laplacian_tensor(v)
+            self.u_t += self.eddy_viscosity * lap_u
+            self.v_t += self.eddy_viscosity * lap_v
 
-        self.u_t = -u*u_x - v*u_y - w*u_z + self.f*v - self.z_x
-        self.v_t = -u*v_x - v*v_y - w*v_z - self.f*u - self.z_y
         return self.u_t, self.v_t
     
-
     def uv_evolution(self, u, v, w):
         u_t, v_t = self.get_uv_dt(u, v, w)
-        u = u + self.scale_diff(u_t*self.block_dt, u).detach()
-        v = v + self.scale_diff(v_t*self.block_dt, v).detach()
+        u = u + self.scale_diff(u_t * self.block_dt, u).detach()
+        v = v + self.scale_diff(v_t * self.block_dt, v).detach()
         return u, v
     ################################################################
     
@@ -198,21 +306,18 @@ class PDE_kernel(nn.Module):
         t_x = d_x(t)
         t_y = d_y(t)
         t_z = d_z(t)
-
-        Q = -self.L*self.z_z*w
-        self.t_t = (Q-self.z_z*w)/self.c_p - u*t_x - v*t_y - w*t_z
+        Q = -self.L * self.z_z * w
+        self.t_t = (Q - self.z_z * w) / self.c_p - u * t_x - v * t_y - w * t_z
         return self.t_t
     
     def t_evolution(self, u, v, w, t):
         t_t = self.get_t_t(u, v, w, t)
-        t = t + self.scale_diff(t_t*self.block_dt, t).detach()
-        return t
+        return t + self.scale_diff(t_t * self.block_dt, t).detach()
     ################################################################
 
     ############################# z #############################
     def get_z_zt(self):    
-        z_zt = -self.R/pressure.to(self.t_t.dtype).to(self.t_t.device)*self.t_t
-        return z_zt
+        return -self.R / pressure.to(self.t_t.dtype).to(self.t_t.device) * self.t_t
     
     def get_z_t(self):
         z_zt = self.get_z_zt()
@@ -221,8 +326,7 @@ class PDE_kernel(nn.Module):
     
     def z_evolution(self, z):
         z_t = self.get_z_t()
-        z = z + self.scale_diff(z_t*self.block_dt, z).detach()
-        return z
+        return z + self.scale_diff(z_t * self.block_dt, z).detach()
     ################################################################
 
     ############################# w #############################
@@ -230,48 +334,43 @@ class PDE_kernel(nn.Module):
         self.u_x = d_x(u)
         self.v_y = d_y(v)
         w_z = - self.u_x - self.v_y
-        w = integral_z(w_z).detach()
-        return w
+        return integral_z(w_z).detach()
     ################################################################
 
-
-    ############################# w #############################
+    ############################# q #############################
     def get_q_dt(self, u, v, t, w, q):
         def get_qs(p, T):
-            t = T - 273.15
-            e_s = 6.112 * torch.exp(self.scale_tensor(17.67 * t / self.avoid_inf(t + 243.5), -3.47, 3.01)) * 100
-            q_s = 0.622 * e_s / self.avoid_inf(p - 0.378 * e_s)
-            return q_s
+            t_c = T - 273.15
+            e_s = 6.112 * torch.exp(self.scale_tensor(17.67 * t_c / self.avoid_inf(t_c + 243.5), -3.47, 3.01)) * 100
+            return 0.622 * e_s / self.avoid_inf(p - 0.378 * e_s)
 
         def get_delta(p_t, q, q_s):
             cond = torch.logical_and(p_t < 0, torch.ge(q, q_s))
             return torch.where(cond, torch.ones_like(p_t), torch.zeros_like(p_t))
 
         def get_F(T, q, q_s):
-            R = (1 + 0.608 * q) * self.R_d
-            F_ = (self.L * R - self.c_p * self.R_v * T) / self.avoid_inf(self.c_p * self.R_v * T * T + self.L * self.L * q_s)
-            F_ = F_ * q_s * T
-            return F_
+            R_ = (1 + 0.608 * q) * self.R_d
+            F_ = (self.L * R_ - self.c_p * self.R_v * T) / self.avoid_inf(self.c_p * self.R_v * T * T + self.L * self.L * q_s)
+            return F_ * q_s * T
 
         q_x = d_x(q)
         q_y = d_y(q)
         q_z = d_z(q)
 
-        rho = - 1/self.avoid_inf(self.z_z)
-        p = rho*self.R*t
+        rho = -1 / self.avoid_inf(self.z_z)
+        p = rho * self.R * t
 
         q_s = get_qs(p, t).detach()
-        q_s = torch.maximum(q_s, torch.ones_like(q_s)*1e-6)
-        delta = get_delta(self.z_t + u*self.z_x + v*self.z_y + w*self.z_z, q, q_s).detach()
+        q_s = torch.maximum(q_s, torch.ones_like(q_s) * 1e-6)
+        delta = get_delta(self.z_t + u * self.z_x + v * self.z_y + w * self.z_z, q, q_s).detach()
         F_ = get_F(t, q, q_s).detach()
 
-        q_t =  -(u*q_x + v*q_y + w*q_z) + (self.z_t + u*self.z_x + v*self.z_y + w*self.z_z) * delta * F_ / self.avoid_inf(self.R*t)
+        q_t = -(u * q_x + v * q_y + w * q_z) + (self.z_t + u * self.z_x + v * self.z_y + w * self.z_z) * delta * F_ / self.avoid_inf(self.R * t)
         return q_t
     
     def q_evolution(self, u, v, t, w, q):
         q_t = self.get_q_dt(u, v, t, w, q)
-        q = q + self.scale_diff(q_t*self.block_dt, q).detach()
-        return q
+        return q + self.scale_diff(q_t * self.block_dt, q).detach()
     ################################################################
 
 
@@ -280,9 +379,8 @@ class PDE_kernel(nn.Module):
         skip = x
 
         ################################################################
-        # Заменить self.physics part coef (nn.Parameters)
-        # print(zquvtw.shape, self.physics_part_coef)
-
+        #print('shapes:', x_trans.shape, zquvtw.shape)
+        
         zquvtw_old = (1 - self.physics_part_coef)*self.variable_norm(x) + self.physics_part_coef*zquvtw
         z_old, t_old, q_old, u_old, v_old= zquvtw_old.chunk(5, dim=1)
 
@@ -327,31 +425,6 @@ class PDE_block(nn.Module):
         return x+skip_x, zquvtw+skip_zquvtw # x [B, H, W, D]
 
 
-class CyclicShift(nn.Module):
-    def __init__(self, displacement):
-        super().__init__()
-        self.displacement = displacement
-
-    def forward(self, x):
-        return torch.roll(x, shifts=(self.displacement[0], self.displacement[1]), dims=(1, 2))
-
-
-class Residual(nn.Module):
-    def __init__(self, fn):
-        super().__init__()
-        self.fn = fn
-
-    def forward(self, x, **kwargs):
-        t = self.fn(x, **kwargs)
-
-        #print('x shape:', x.shape, 't shape:', t.shape)
-        if len(x.shape) > len(t.shape):
-            new_t = t + x[:, -1, ...] # After transformer layer remote all times except last
-        else:
-            new_t = t + x
-        return new_t
-
-
 class PreNorm(nn.Module):
     def __init__(self, dim, fn):
         super().__init__()
@@ -361,586 +434,392 @@ class PreNorm(nn.Module):
     def forward(self, x, **kwargs):
         return self.fn(self.norm(x), **kwargs)
 
-
-class MLP(nn.Module):
-    def __init__(self, dim, hidden_dim):
+class FeedForward(nn.Module):
+    def __init__(self, dim, hidden_dim, dropout=0.):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(dim, hidden_dim),
             nn.GELU(),
+            nn.Dropout(dropout),
             nn.Linear(hidden_dim, dim),
+            nn.Dropout(dropout)
         )
 
     def forward(self, x):
         return self.net(x)
-
-
-def create_mask(window_size, displacement, upper_lower, left_right):
-    mask = torch.zeros(window_size[0] * window_size[1], window_size[0] * window_size[1])
-    displacement_ = [window_size[0]-displacement[0], window_size[1]-displacement[1]]
-
-    if upper_lower:
-        mask[displacement_[0] * window_size[1]:, :displacement_[0] * window_size[1]] = float('-inf')
-        mask[:displacement_[0] * window_size[1], displacement_[0] * window_size[1]:] = float('-inf')
-
-    if left_right:
-        mask = rearrange(mask, '(h1 w1) (h2 w2) -> h1 w1 h2 w2', h1=window_size[0], h2=window_size[0])
-        mask[:, displacement_[1]:, :, :displacement_[1]] = float('-inf')
-        mask[:, :displacement_[1], :, displacement_[1]:] = float('-inf')
-        mask = rearrange(mask, 'h1 w1 h2 w2 -> (h1 w1) (h2 w2)')
-
-    return mask
-
-
-def get_relative_distances(window_size):
-    indices = torch.tensor(np.array([[x, y] for x in range(window_size[0]) for y in range(window_size[1])]))
-    distances = indices[None, :, :] - indices[:, None, :]
-    return distances
-
-
-class WindowAttention(nn.Module):
-    def __init__(self, dim, heads, head_dim, shifted, window_size, relative_pos_embedding):
+     
+class Attention(nn.Module):
+    def __init__(self, dim, heads=8, dim_head=64, dropout=0.):
         super().__init__()
-        inner_dim = head_dim * heads
+        inner_dim = dim_head * heads
+        project_out = not (heads == 1 and dim_head == dim)
 
         self.heads = heads
-        self.scale = head_dim ** -0.5
-        self.window_size = window_size
-        self.relative_pos_embedding = relative_pos_embedding
-        self.shifted = shifted
-
-        if self.shifted:
-            displacement = [window_size[0] // 2, window_size[1] // 2]
-            displacement_ = [-window_size[0] // 2, -window_size[1] // 2]
-            self.cyclic_shift = CyclicShift(displacement_)
-            self.cyclic_back_shift = CyclicShift(displacement)
-            self.upper_lower_mask = nn.Parameter(create_mask(window_size=window_size, displacement=displacement,
-                                                             upper_lower=True, left_right=False), requires_grad=False)
-            self.left_right_mask = nn.Parameter(create_mask(window_size=window_size, displacement=displacement,
-                                                            upper_lower=False, left_right=True), requires_grad=False)
-            nn.init.trunc_normal_(self.upper_lower_mask, std=.02)
-            nn.init.trunc_normal_(self.left_right_mask, std=.02)
+        self.scale = dim_head ** -0.5
 
         self.to_qkv = nn.Linear(dim, inner_dim * 3, bias=False)
 
-        if self.relative_pos_embedding:
-            relative_indices = get_relative_distances(window_size)
-            relative_indices[:,:,0] += (window_size[0] - 1)
-            relative_indices[:,:,1] += (window_size[1] - 1)
-            self.relative_indices = relative_indices
-            self.pos_embedding = nn.Parameter(torch.randn(2 * window_size[0] - 1, 2 * window_size[1] - 1))
-        else:
-            self.pos_embedding = nn.Parameter(torch.randn(window_size[0] * window_size[1], window_size[0] * window_size[1]))
-        nn.init.trunc_normal_(self.pos_embedding, std=.02)
-
-        self.to_out = nn.Linear(inner_dim, dim)
+        self.to_out = nn.Sequential(
+            nn.Linear(inner_dim, dim),
+            nn.Dropout(dropout)
+        ) if project_out else nn.Identity()
 
     def forward(self, x):
-        if self.shifted:
-            x = self.cyclic_shift(x)
+        b, n, _, h = *x.shape, self.heads
+        qkv = self.to_qkv(x).chunk(3, dim=-1)
+        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h=h), qkv)
+        dots = einsum('b h i d, b h j d -> b h i j', q, k) * self.scale
 
-        b, n_h, n_w, _, h = *x.shape, self.heads # 1, 180, 360, 96, 3
+        attn = dots.softmax(dim=-1)
 
-        qkv = self.to_qkv(x).chunk(3, dim=-1) #3[1, 180, 360, 96]
-        nw_h = n_h // self.window_size[0] # 36
-        nw_w = n_w // self.window_size[1] # 36
-
-        q, k, v = map(
-            lambda t: rearrange(t, 'b (nw_h w_h) (nw_w w_w) (h d) -> b h (nw_h nw_w) (w_h w_w) d',
-                                h=h, w_h=self.window_size[0], w_w=self.window_size[1]), qkv)
-
-        dots = einsum('b h w i d, b h w j d -> b h w i j', q, k) * self.scale #[1, 3, 1296, 50, 50]
-
-        if self.relative_pos_embedding:
-            dots += self.pos_embedding[self.relative_indices[:, :, 0], self.relative_indices[:, :, 1]]
-        else:
-            dots += self.pos_embedding
-
-        if self.shifted:
-            dots[:, :, -nw_w:] += self.upper_lower_mask
-            dots[:, :, nw_w - 1::nw_w] += self.left_right_mask
-
-        attn = dots.softmax(dim=-1) # [1, 3, 1296, 50, 50]
-
-        out = einsum('b h w i j, b h w j d -> b h w i d', attn, v)
-        out = rearrange(out, 'b h (nw_h nw_w) (w_h w_w) d -> b (nw_h w_h) (nw_w w_w) (h d)',
-                        h=h, w_h=self.window_size[0], w_w=self.window_size[1], nw_h=nw_h, nw_w=nw_w) #[1, 180, 360, 96]
-        out = self.to_out(out) #[1, 180, 360, 96]
-
-        if self.shifted:
-            out = self.cyclic_back_shift(out)
+        out = einsum('b h i j, b h j d -> b h i d', attn, v)
+        out = rearrange(out, 'b h n d -> b n (h d)')
+        out = self.to_out(out)
         return out
 
 
-class HybridBlock(nn.Module):
-    def __init__(self, dim, heads, head_dim, mlp_dim, shifted, window_size, relative_pos_embedding, use_pde, zquvtw_channel, depth, block_dt, inverse_time, physics_part_coef):
-        """
-        Depends on use_pde: False -> use only space attention, True -> use T/S attention, PredFormer-like
-        """
+class SwiGLU(nn.Module):
+    def __init__(
+            self,
+            in_features,
+            hidden_features=None,
+            out_features=None,
+            act_layer=nn.SiLU,
+            norm_layer=None,
+            bias=True,
+            drop=0.,
+    ):
         super().__init__()
-        self.attention_block = Residual(PreNorm(dim, WindowAttention(dim=dim,
-                                                                     heads=heads,
-                                                                     head_dim=head_dim,
-                                                                     shifted=shifted,
-                                                                     window_size=window_size,
-                                                                     relative_pos_embedding=relative_pos_embedding)))
-        
-        self.use_pde = use_pde
-        if use_pde:
-            space_attention_layer = WindowAttention(dim=dim,
-                                                heads=heads,
-                                                head_dim=head_dim,
-                                                shifted=shifted,
-                                                window_size=window_size,
-                                                relative_pos_embedding=relative_pos_embedding)
+        out_features = out_features or in_features
+        hidden_features = hidden_features or in_features
+        bias = to_2tuple(bias)
+        drop_probs = to_2tuple(drop)
 
-            time_attention_layer = AttentionLayer(FullAttention(), d_model=dim, n_heads=heads)
-            self.attention_block = Residual(PreNorm(dim, BinaryTSLayer(time_attention_layer, 
-                                                         space_attention_layer, 
-                                                         d_model=dim)))
+        self.fc1_g = nn.Linear(in_features, hidden_features, bias=bias[0])
+        self.fc1_x = nn.Linear(in_features, hidden_features, bias=bias[0])
+        self.act = act_layer()
+        self.drop1 = nn.Dropout(drop_probs[0])
+        self.norm = norm_layer(hidden_features) if norm_layer is not None else nn.Identity()
+        self.fc2 = nn.Linear(hidden_features, out_features, bias=bias[1])
+        self.drop2 = nn.Dropout(drop_probs[1])
 
-            self.pde_block = PDE_block(dim, zquvtw_channel, depth=depth, block_dt=block_dt, inverse_time=inverse_time, physics_part_coef=physics_part_coef)
-            self.router_weight = nn.Parameter(torch.zeros(1, 1, 1, dim), requires_grad=True)
-
-        self.router_MLP = Residual(PreNorm(dim, MLP(dim, hidden_dim=mlp_dim)))
-
-    def forward(self, x, zquvtw=None, x_history=None):
-        if self.use_pde:
-            # AI & Physics
-            feat_att = self.attention_block(x_history)
-            feat_pde, zquvtw = self.pde_block(x, zquvtw)
-            # Adaptive Router
-            PredFormerGFT.layer_weights[f"{self.__class__.__name__}_{PredFormerGFT.gft_name}"] = self.router_weight.detach().cpu().numpy()
-            weight_AI = 0.5*torch.ones_like(x)+self.router_weight
-            weight_Physics = 0.5*torch.ones_like(x)-self.router_weight
-            x = weight_AI*feat_att + weight_Physics*feat_pde
-            # x = weight_AI*feat_att
-
-            x = self.router_MLP(x)
-            return x, zquvtw
-        else:
-            x = self.attention_block(x)
-            x = self.router_MLP(x)
-            return x
-
-
-class PatchMerging(nn.Module):
-    def __init__(self, in_channels, out_channels, downscaling_factor):
-        super().__init__()
-        self.downscaling_factor = downscaling_factor
-        self.patch_merge = nn.Unfold(kernel_size=downscaling_factor, stride=downscaling_factor, padding=0)
-        self.linear = nn.Linear(in_channels * downscaling_factor ** 2, out_channels)
+    def init_weights(self):
+        nn.init.ones_(self.fc1_g.bias)
+        nn.init.normal_(self.fc1_g.weight, std=1e-6)
 
     def forward(self, x):
-        b, c, h, w = x.shape
-        new_h, new_w = h // self.downscaling_factor, w // self.downscaling_factor
-        x = self.patch_merge(x).view(b, -1, new_h, new_w).permute(0, 2, 3, 1)
-        x = self.linear(x)
+        x_gate = self.fc1_g(x)
+        x = self.fc1_x(x)
+        x = self.act(x_gate) * x
+        x = self.drop1(x)
+        x = self.norm(x)
+        x = self.fc2(x)
+        x = self.drop2(x)
         return x
 
-class PatchRemaining(nn.Module):
-    def __init__(self, in_channels, out_channels):
+class GatedTransformer(nn.Module):
+    def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout=0., attn_dropout=0., drop_path=0.1):
         super().__init__()
-        self.linear = nn.Linear(in_channels, out_channels)
-
-    def forward(self, x):
-        x = x.permute(0, 2, 3, 1)
-        x = self.linear(x)
-        return x
-    
-class PatchExpanding(nn.Module):
-    def __init__(self, in_channels, out_channels, upscaling_factor):
-        super().__init__()
-        self.upscaling_factor = upscaling_factor
-        self.expand = nn.Linear(in_channels, out_channels*upscaling_factor**2)
-
-    def forward(self, x):
-        x = x.permute(0, 2, 3, 1)
-        x = self.expand(x)
-        b, h, w, c = x.shape
-        x = rearrange(x, 'b h w (p1 p2 c)-> b (h p1) (w p2) c', 
-                      p1=self.upscaling_factor, p2=self.upscaling_factor, 
-                      c = c//self.upscaling_factor**2)
-        return x
-
-
-def update_history(x_history, x_new): 
-    x_history.append(x_new.cpu())
-    if len(x_history) > 4: 
-        x_history = x_history[:4]
-    return x_history
-
-class StageModule(nn.Module):
-    def __init__(self, in_channels, hidden_dimension, layers, scaling_factors, num_heads, head_dim, window_size,
-                 relative_pos_embedding, physics_part_coef, use_pde=False, zquvtw_channel=None, depth=3, block_dt=300, inverse_time=False):
-        super().__init__()
-        self.use_pde = use_pde
-        assert layers % 2 == 0, 'Stage layers need to be divisible by 2 for regular and shifted block.'
-
-        if scaling_factors < 1:
-            self.patch_partition = PatchMerging(in_channels=in_channels, out_channels=hidden_dimension,
-                                                downscaling_factor=int(1/scaling_factors))
-        elif scaling_factors == 1:
-            self.patch_partition = PatchRemaining(in_channels=in_channels, out_channels=hidden_dimension)
-        elif scaling_factors > 1:
-            self.patch_partition = PatchExpanding(in_channels=in_channels, out_channels=hidden_dimension,
-                                                  upscaling_factor=scaling_factors)
-
         self.layers = nn.ModuleList([])
-        for _ in range(layers // 2):
+        self.norm = nn.LayerNorm(dim)
+        for _ in range(depth):
             self.layers.append(nn.ModuleList([
-                HybridBlock(dim=hidden_dimension, heads=num_heads, head_dim=head_dim, mlp_dim=hidden_dimension * 4,
-                            physics_part_coef=physics_part_coef,
-                            shifted=False, window_size=window_size, relative_pos_embedding=relative_pos_embedding, 
-                            use_pde=use_pde, zquvtw_channel=zquvtw_channel, depth=depth, block_dt=block_dt, inverse_time=inverse_time),
-                HybridBlock(dim=hidden_dimension, heads=num_heads, head_dim=head_dim, mlp_dim=hidden_dimension * 4,
-                            physics_part_coef=physics_part_coef,
-                            shifted=True, window_size=window_size, relative_pos_embedding=relative_pos_embedding, 
-                            use_pde=use_pde, zquvtw_channel=zquvtw_channel, depth=depth, block_dt=block_dt, inverse_time=inverse_time),
+                PreNorm(dim, Attention(dim, heads=heads, dim_head=dim_head, dropout=attn_dropout)),
+                PreNorm(dim, SwiGLU(dim, mlp_dim, drop=dropout)),
+                DropPath(drop_path) if drop_path > 0. else nn.Identity(),
+                DropPath(drop_path) if drop_path > 0. else nn.Identity()
             ]))
-
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
-            nn.init.trunc_normal_(m.weight, std=.02)
+            trunc_normal_(m.weight, std=.02)
             if isinstance(m, nn.Linear) and m.bias is not None:
                 nn.init.constant_(m.bias, 0)
         elif isinstance(m, nn.LayerNorm):
             nn.init.constant_(m.bias, 0)
-            nn.init.constant_(m.weight, 1.0)
-
-    def forward(self, x, zquvtw=None, x_prev=None):
-        if self.use_pde:
-            if x_prev is not None: 
-                x_history = x_prev
-            else:
-                x_history = []
-
-            x = self.patch_partition(x) 
-            x_history = update_history(x_history, x)
-
-            for regular_block, shifted_block in self.layers:
-                x, zquvtw = regular_block(x, zquvtw, torch.stack(x_history).transpose(0, 1).to(x.device))
-                x_history = update_history(x_history, x)
-
-                x, zquvtw = shifted_block(x, zquvtw, torch.stack(x_history).transpose(0, 1).to(x.device))
-                x_history = update_history(x_history, x)
+            nn.init.constant_(m.weight, 1.0)       
             
-            x = x.permute(0, 3, 1, 2) # [B, D, H, W]
-            return x, zquvtw, x_history
-        else:
-            x = self.patch_partition(x)
-            for regular_block, shifted_block in self.layers:
-                x = regular_block(x)
-                x = shifted_block(x)
-            x = x.permute(0, 3, 1, 2) # [B, D, H, W]
-            return x
+    def forward(self, x):
+        for attn, ff, drop_path1,drop_path2 in self.layers:
+            x = x + drop_path1(attn(x))
+            x = x + drop_path2(ff(x))
+        return self.norm(x)
+    
+class PredFormerLayer(nn.Module):
+    def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout=0., attn_dropout=0., drop_path=0.1):
+        super(PredFormerLayer, self).__init__()
 
-
-class RandomOrLearnedSinusoidalPosEmb(nn.Module):
-    """ following @crowsonkb 's lead with random (learned optional) sinusoidal pos emb """
-    """ https://github.com/crowsonkb/v-diffusion-jax/blob/master/diffusion/models/danbooru_128.py#L8 """
-
-    def __init__(self, dim, is_random = False):
-        super().__init__()
-        assert (dim % 2) == 0
-        half_dim = dim // 2
-        self.weights = nn.Parameter(torch.randn(half_dim), requires_grad = not is_random)
+        self.temporal_transformer_first = GatedTransformer(dim, depth, heads, dim_head, 
+                                                      mlp_dim, dropout, attn_dropout, drop_path)
+        self.space_transformer = GatedTransformer(dim, depth, heads, dim_head, 
+                                             mlp_dim, dropout, attn_dropout, drop_path)
+        self.temporal_transformer_second = GatedTransformer(dim, depth, heads, dim_head, 
+                                                       mlp_dim, dropout, attn_dropout, drop_path)
 
     def forward(self, x):
-        x = rearrange(x, 'b -> b 1')
-        freqs = x * rearrange(self.weights, 'd -> 1 d') * 2 * math.pi
-        fouriered = torch.cat((freqs.sin(), freqs.cos()), dim = -1)
-        fouriered = torch.cat((x, fouriered), dim = -1)
-        return fouriered
+        b, t, n, _ = x.shape        
+        x_t, x_ori = x, x 
+        
+        # t branch (first temporal)
+        x_t = rearrange(x_t, 'b t n d -> b n t d')
+        x_t = rearrange(x_t, 'b n t d -> (b n) t d')
+        x_t = self.temporal_transformer_first(x_t)
+        
+        # s branch (space)
+        x_ts = rearrange(x_t, '(b n) t d -> b n t d', b=b)
+        x_ts = rearrange(x_ts, 'b n t d -> b t n d')
+        x_ts = rearrange(x_ts, 'b t n d -> (b t) n d') 
+        x_ts = self.space_transformer(x_ts)
+        
+        # t branch (second temporal)
+        x_tst = rearrange(x_ts, '(b t) n d -> b t n d', b=b)
+        x_tst = rearrange(x_tst, 'b t n d -> b n t d')
+        x_tst = rearrange(x_tst, 'b n t d -> (b n) t d')
+        x_tst = self.temporal_transformer_second(x_tst)
 
+        # ts output branch     
+        x_tst = rearrange(x_tst, '(b n) t d -> b n t d', b=b)
+        x_tst = rearrange(x_tst, 'b n t d -> b t n d', b=b) 
+  
+        # add residual connection, we only add this for human3.6m  
+        # x_tst += x_ori
+        
+        return x_tst
 
-class PredFormerGFT(nn.Module):
-    
-    layer_weights = {}  # Глобальный словарь для хранения значений router_weight
-    
-    gft_name = ""
-    
-    def __init__(self, 
-                hidden_dim=256,
-                physics_part_coef=None,
-                encoder_layers=[2, 2, 2],
-                edcoder_heads=[3, 6, 6],
-                encoder_scaling_factors=[0.5, 0.5, 1],
-                encoder_dim_factors=[-1, 2, 2],
+def sinusoidal_embedding(n_channels, dim):
+    pe = torch.FloatTensor([[p / (10000 ** (2 * (i // 2) / dim)) for i in range(dim)]
+                            for p in range(n_channels)])
+    pe[:, 0::2] = torch.sin(pe[:, 0::2])
+    pe[:, 1::2] = torch.cos(pe[:, 1::2])
+    return rearrange(pe, '... -> 1 ...')
 
-                body_layers=[4, 4, 4, 4, 4, 4],
-                body_heads=[8, 8, 8, 8, 8, 8],
-                body_scaling_factors=[1, 1, 1, 1, 1, 1],
-                body_dim_factors=[1, 1, 1, 1, 1, 1],
-
-                decoder_layers=[2, 2, 2],
-                decoder_heads=[6, 6, 3],
-                decoder_scaling_factors=[1, 2, 1],
-                decoder_dim_factors=[1, 0.5, 1],
-
-                channels=69,
-                head_dim=128,
-                window_size=[4,8],
-                relative_pos_embedding=False,
-                out_kernel=[2,2],
-                
-                pde_block_depth=3, 
-                block_dt=300, 
-                inverse_time=False,
-                use_checkpoint=True):
+      
+class PredFormer_Model(nn.Module):
+    def __init__(self, model_config, **kwargs):
         super().__init__()
+        self.image_height = model_config['height']
+        self.image_width = model_config['width']
+        self.patch_size = model_config['patch_size']
+        self.num_patches_h = self.image_height // self.patch_size
+        self.num_patches_w = self.image_width // self.patch_size
+        self.num_patches = self.num_patches_h * self.num_patches_w
+        self.num_frames_in = model_config['pre_seq']
+        self.dim = model_config['dim']
+        self.num_channels = model_config['num_channels']
+        self.num_classes = self.num_channels
+        self.heads = model_config['heads']
+        self.dim_head = model_config['dim_head']
+        self.dropout = model_config['dropout']
+        self.attn_dropout = model_config['attn_dropout']
+        self.drop_path = model_config['drop_path']
+        self.scale_dim = model_config['scale_dim']
+        self.Ndepth = model_config['Ndepth']  # Ensure this is defined
+        self.depth = model_config['depth']  # Ensure this is defined
+        self.path_to_constants = model_config['path_to_constants']
+        self.ds = xr.open_dataset(self.path_to_constants)
+        self.orography_mask = torch.Tensor(np.array(self.ds.orography)) # shape = [H, W]
+        self.soil_mask = torch.Tensor(np.array(self.ds.slt)) # shape = [H, W]
+        self.lsm_mask = torch.Tensor(np.array(self.ds.lsm)) # shape = [H, W]
+        self.static_masks = torch.stack([self.orography_mask, self.soil_mask, self.lsm_mask], dim=0).unsqueeze(0) # [1, 3, H, W]
+        self.num_masks = 3 # Определяем количество масок
+        self.downscaling_factor_all = 4  # Default downscaling factor for GFT
+        self.gft_weight = 0.1  # Вес физических эмбеддингов при добавлении к основным данным
 
-        self.t_emb_dim = 32
-        self.out_layer = [0, 2, 5]
-        self.PDE_block_seconds_list = self.get_block_seconds(body_layers, block_dt*pde_block_depth)
+        self.static_masks = self.static_masks[..., 128 - 92:128 - 60, 256 - 131:256 - 67] 
 
-        self.downscaling_factor_all = 1
-        for factor in encoder_scaling_factors:
-            self.downscaling_factor_all = self.downscaling_factor_all // factor
-        self.downscaling_factor_all = int(self.downscaling_factor_all)
+        assert self.image_height % self.patch_size == 0, 'Image height must be divisible by the patch size.'
+        assert self.image_width % self.patch_size == 0, 'Image width must be divisible by the patch size.'
+        self.patch_dim = self.num_channels * self.patch_size ** 2
 
-        encoder_dim_list = [channels, hidden_dim] # first encoder_block, the first block dim is 69 --> 256
-        for factor in encoder_dim_factors[1:]:
-            encoder_dim_list.append(int(encoder_dim_list[-1]*factor))
-        
-        body_dim_list = [encoder_dim_list[-1]]
-        for factor in body_dim_factors:
-            body_dim_list.append(int(encoder_dim_list[-1]*factor))
-        
-        decoder_dim_list = [encoder_dim_list[-1]]
-        for factor in decoder_dim_factors:
-            decoder_dim_list.append(int(decoder_dim_list[-1]*factor))
-
-        self.encoder = nn.ModuleList()
-        for i_layer in range(len(encoder_layers)):
-            layer = StageModule(in_channels=encoder_dim_list[i_layer], hidden_dimension=encoder_dim_list[i_layer+1], layers=encoder_layers[i_layer],
-                                physics_part_coef=physics_part_coef, 
-                                scaling_factors=encoder_scaling_factors[i_layer], num_heads=edcoder_heads[i_layer], head_dim=head_dim,
-                                window_size=window_size, relative_pos_embedding=relative_pos_embedding)
-            self.encoder.append(layer)
-        
-        self.body = nn.ModuleList()
-        for i_layer in range(len(body_layers)):
-            if use_checkpoint:
-                layer = checkpoint_wrapper(StageModule(in_channels=body_dim_list[i_layer], hidden_dimension=body_dim_list[i_layer+1], layers=body_layers[i_layer],
-                                            physics_part_coef=physics_part_coef, 
-                                            scaling_factors=body_scaling_factors[i_layer], num_heads=body_heads[i_layer], head_dim=head_dim,
-                                            window_size=window_size, relative_pos_embedding=relative_pos_embedding, 
-                                            use_pde=True, zquvtw_channel=13, depth=pde_block_depth, block_dt=block_dt, inverse_time=inverse_time))
-            else:
-                layer = StageModule(in_channels=body_dim_list[i_layer], hidden_dimension=body_dim_list[i_layer+1], layers=body_layers[i_layer],
-                                    physics_part_coef=physics_part_coef,
-                                    scaling_factors=body_scaling_factors[i_layer], num_heads=body_heads[i_layer], head_dim=head_dim,
-                                    window_size=window_size, relative_pos_embedding=relative_pos_embedding, 
-                                    use_pde=True, zquvtw_channel=13, depth=pde_block_depth, block_dt=block_dt, inverse_time=inverse_time)
-            self.body.append(layer)
-        
-        self.time_mlp = nn.Sequential(
-            RandomOrLearnedSinusoidalPosEmb(16, True),
-            nn.Linear(17, self.t_emb_dim),
-            nn.GELU(),
-            nn.Linear(self.t_emb_dim, self.t_emb_dim)
+        self.to_patch_embedding = nn.Sequential(
+            Rearrange('b t c (h p1) (w p2) -> b t (h w) (p1 p2 c)', p1=self.patch_size, p2=self.patch_size),
+            nn.Linear(self.patch_dim, self.dim),
         )
-        for dim_i in range(len(decoder_dim_list)-1):
-            decoder_dim_list[dim_i] += self.t_emb_dim
+        
+        self.mask_patch_dim = self.num_masks * self.patch_size ** 2
+        self.rearrange_masks = Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1=self.patch_size, p2=self.patch_size)
+        self.mask_embedding = nn.Linear(self.mask_patch_dim, self.dim)
 
-        self.decoder = nn.ModuleList()
-        for i_layer in range(len(decoder_layers)):
-            layer = StageModule(in_channels=decoder_dim_list[i_layer], hidden_dimension=decoder_dim_list[i_layer+1], layers=decoder_layers[i_layer],
-                                  physics_part_coef=physics_part_coef,
-                                  scaling_factors=decoder_scaling_factors[i_layer], num_heads=decoder_heads[i_layer], head_dim=head_dim,
-                                  window_size=window_size, relative_pos_embedding=relative_pos_embedding)
-            self.decoder.append(layer)
+        self.pos_embedding = nn.Parameter(sinusoidal_embedding(self.num_frames_in * self.num_patches, self.dim),
+                                               requires_grad=False).view(1, self.num_frames_in, self.num_patches, self.dim)
 
-        self.decoder.append(nn.ConvTranspose2d(in_channels=decoder_dim_list[-1], out_channels=channels, kernel_size=out_kernel, stride=min(out_kernel)))
+        self.blocks = nn.ModuleList([
+            PredFormerLayer(self.dim, self.depth, self.heads, self.dim_head, self.dim * self.scale_dim, self.dropout, self.attn_dropout, self.drop_path)
+            for i in range(self.Ndepth)
+        ])
 
-
-    def get_block_seconds(self, block_nums, second_per_block=900):
-        block_seconds = [block_nums[0]]
-        for i in range(1, len(block_nums)):
-            block_seconds.append(block_seconds[i-1]+block_nums[i])
-        block_seconds = [l*second_per_block for l in block_seconds]
-        return block_seconds
-
-
+        self.mlp_head = nn.Sequential(
+            nn.LayerNorm(self.dim),
+            nn.Linear(self.dim, self.num_channels * self.patch_size ** 2)
+            ) 
+        
+        # Создаем HybridBlock для GFT
+        self._init_gft_block()
+        
+    def _init_gft_block(self):
+        """Инициализирует HybridBlock для GFT с оптимальными параметрами"""
+        # Размерность входных данных (без первых 4 каналов)
+        input_dim = 65  # Обычно 65 каналов для физических переменных
+        
+        self.hybrid_block = HybridBlock(
+            dim=input_dim,             # Размерность входного канала
+            zquvtw_channel=13,         # 13 вертикальных уровней
+            depth=1,                   # Глубина блока PDE
+            block_dt=1200,              # Временной шаг для PDE в секундах
+            inverse_time=False,        # Не инвертировать временную эволюцию
+            physics_part_coef=0.5      # Равный вес для AI и физики
+        )
+        
     def x_to_zquvtw(self, x):
-        zquvtw = x[:,4:] # B, 65, 128, 256
-        _, _, self.H, self.W = zquvtw.shape
-        zquvtw = torch.nn.functional.interpolate(zquvtw, size=(self.H//self.downscaling_factor_all, self.W//self.downscaling_factor_all), mode='bilinear')
-        zquvtw = zquvtw.permute(0, 2, 3, 1) # B, 32, 64, 65
-        return zquvtw
-    
-
-    def cat_t_emb(self, x, layer_idx):
-        B, _, H, W = x.shape
-        total_seconds = self.PDE_block_seconds_list[layer_idx]
-        t = torch.tensor([total_seconds]*B).to(x.device)
-        t_emb = self.time_mlp(t)
-        t_emb = t_emb.reshape(B,self.t_emb_dim,1,1).expand(B,self.t_emb_dim, H, W)
-        x_t_emb = torch.cat([x, t_emb], dim=1)
-        return x_t_emb
-    
-    
-    def get_learnable_physics_importance(self):
         """
-        Function that returns learned physics_importance coefs from all layers that contain PDE_kernels.
-        Use only if physics_importance_coef was not specified. 
-
+        Преобразует входные данные x в формат zquvtw, пригодный для обработки через hybrid_block.
+        
+        Args:
+            x: Входной тензор формы [B, C, H, W], где C - число каналов (обычно 65)
+        
         Returns:
-            List[Tensor[Layer, C, H, W]]: List of learned physics importance coefficients 
-            from the layers with PDE_kernels.
-
+            zquvtw: Тензор формы [B, H//4, W//4, C] - пространственно понижающее преобразование и перестановка осей
         """
-        total_coefs = []
-
-        for layer in self.encoder: 
-            if isinstance(layer, StageModule):
-                for inner_layer_pack in layer.layers:
-                    for hybrid_block in inner_layer_pack:
-                        if hybrid_block.use_pde:
-                            for pde_kernel in hybrid_block.pde_block.PDE_kernels:
-                                total_coefs.append(pde_kernel.physics_part_coef.data)
-
-        for layer in self.body: 
-            if isinstance(layer, StageModule):
-                for inner_layer_pack in layer.layers:
-                    for hybrid_block in inner_layer_pack:
-                        if hybrid_block.use_pde:
-                            for pde_kernel in hybrid_block.pde_block.PDE_kernels:
-                                total_coefs.append(pde_kernel.physics_part_coef.data)
-
-        for layer in self.decoder: 
-            if isinstance(layer, StageModule):
-                for inner_layer_pack in layer.layers:
-                    for hybrid_block in inner_layer_pack:
-                        if hybrid_block.use_pde:
-                            for pde_kernel in hybrid_block.pde_block.PDE_kernels:
-                                total_coefs.append(pde_kernel.physics_part_coef.data)
-
-        return torch.squeeze(torch.stack(total_coefs, dim=0))
-
+        # x имеет форму [B, C, H, W]
+        B, C, H, W = x.shape
+        
+        # Понижающая дискретизация для уменьшения размера пространственных координат
+        zquvtw = torch.nn.functional.interpolate(
+            x, 
+            size=(H//self.downscaling_factor_all, W//self.downscaling_factor_all), 
+            mode='bilinear'
+        )
+        
+        # Перестановка осей для формата [B, H, W, C], который ожидает HybridBlock
+        zquvtw = zquvtw.permute(0, 2, 3, 1)  # [B, H//4, W//4, C]
+        
+        return zquvtw
+                
+     
     def forward(self, x):
-        x = x.squeeze(1)
+        B, T, C, H, W = x.shape
+        assert C == self.num_channels
+
+        # ---Make PredFormer predictions-------------------
+
+        mask_patches = self.rearrange_masks(self.static_masks.to(x.device)) # [1, num_patches, 3*ps*ps]
+        mask_embed = self.mask_embedding(mask_patches) # [1, num_patches, dim]
+        mask_embed = mask_embed.unsqueeze(1) # [1, 1, num_patches, dim]
+        mask_embed = mask_embed.to(x.device) 
+
+        # Patch Embedding для входа x
+        x_embed = self.to_patch_embedding(x) # [B, T, num_patches, dim]
+        print('x_embed shape:', x_embed.shape, mask_embed.shape)
+        x_combined = x_embed + mask_embed       
+
+        # Position Embedding
+        x_combined += self.pos_embedding.to(x.device)
         
-        PredFormerGFT.layer_weights.clear()
-        PredFormerGFT.gft_name = ""
+        # PredFormer Encoder
+        for idx, blk in enumerate(self.blocks):
+            x_combined = blk(x_combined)
+        # MLP head        
+        x_predformer = self.mlp_head(x_combined.reshape(-1, self.dim))
+        x_predformer = x_predformer.view(B, T, self.num_patches_h, self.num_patches_w, C, self.patch_size, self.patch_size)
+        x_predformer = x_predformer.permute(0, 1, 4, 2, 5, 3, 6).reshape(B, T, C, H, W)
+
+        # ---Get Physics predictions----------------------
+
+        x_gft_list = []
+
+        for i in range(T):
+            # Применяем GFT с помощью hybrid_block, сначала выбираем
+            if i == 0: #
+                x_patch = x[:, -1, 4:, :, :]
+            else: 
+                x_patch = x_predformer[:, i - 1, 4:, :, :]
+            # x_patch = x_patch.permute(0, 3, 2, 1)  # [B, H, W, C]
+            
+            #print('i:', i, 'x_patch.shape:', x_patch.shape)
+            # Получаем входные данные для hybrid_block
+            zquvtw = self.x_to_zquvtw(x_patch)
+            x_patch = zquvtw.clone()
+
+            #for j in range(12):
+
+            #x_patch = x_patch.permute(0, 2, 3, 1)
+            # Получаем физические эмбеддинги через hybrid_block
+            x_patch, zquvtw = self.hybrid_block(x_patch, zquvtw)  # Используем одинаковые данные для обоих входов
+            
+            x_gft = x_patch
+            # Возвращаем к исходному формату
+            x_gft = x_gft.permute(0, 3, 1, 2)  # [B, C, H//4, W//4]
+            
+            # Масштабируем обратно до исходного размера
+            x_gft = torch.nn.functional.interpolate(x_gft, size=(H, W), mode='bilinear')
+            
+            x_gft_list.append(x_gft)
+
+        x_gft = torch.stack(x_gft_list, dim=1)  # [B, T, C-4, H, W]
+
+        x_predformer[:, :, 4:, :, :] = (x_predformer[:, :, 4:, :, :] + x_gft) / 2
+        return x_predformer
+
+
+class HybridBlock(nn.Module):
+    def __init__(self, dim, zquvtw_channel, depth, block_dt, inverse_time, physics_part_coef):
+        super().__init__()
         
-        output = []
-        zquvtw = self.x_to_zquvtw(x)
-        x_history = []
-        for idx, layer in enumerate(self.encoder):
-            PredFormerGFT.gft_name = f"{idx}_encoder"
-            x = layer(x)
-        for layer_idx, layer in enumerate(self.body):
-            PredFormerGFT.gft_name = f"{layer_idx}_body"
-            x, zquvtw, x_history = layer(x, zquvtw, x_history)
+        self.pde_block = PDE_block(dim, zquvtw_channel, depth=depth, block_dt=block_dt, inverse_time=inverse_time, physics_part_coef=physics_part_coef)
+        self.router_weight = nn.Parameter(torch.zeros(1, 1, 1, dim), requires_grad=True)
 
-            if layer_idx in self.out_layer:
-                
-                x_t_emb = self.cat_t_emb(x, layer_idx)
-                for layer in self.decoder:
-                    PredFormerGFT.gft_name = f"{layer_idx}_body_decoder"
-                    x_t_emb = layer(x_t_emb)
-                output.append(x_t_emb)
+    def forward(self, x, zquvtw=None):
 
-        if len(output) == 1:
-            return output[0]
-        else:
-            return torch.stack(output, dim=1)
-
-
-
-if __name__ == "__main__":
-    import os
-    import json
-    import matplotlib.pyplot as plt
-    import matplotlib.colors as colors
-    import numpy as np
-    # from thop import profile
-
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-    print(device)
-
-    model = PredFormerGFT(hidden_dim=256,
-                physics_part_coef=0.1,
-                encoder_layers=[2, 2, 2],
-                edcoder_heads=[2, 4, 4],
-                encoder_scaling_factors=[0.5, 0.5, 1], # [128, 256] --> [64, 128] --> [32, 64] --> [32, 64], that is, patch size = 4 (128/32)
-                encoder_dim_factors=[-1, 2, 2],
-
-                body_layers=[4, 4, 4, 4, 4, 4], # A total of 4x6=24 HybridBlock, corresponding to 6 hours (24x15min) of time evolution
-                body_heads=[8, 8, 8, 8, 8, 8],
-                body_scaling_factors=[1, 1, 1, 1, 1, 1],
-                body_dim_factors=[1, 1, 1, 1, 1, 1],
-
-                decoder_layers=[2, 2, 2],
-                decoder_heads=[4, 4, 2],
-                decoder_scaling_factors=[1, 2, 1],
-                decoder_dim_factors=[1, 0.5, 1],
-
-                channels=69,
-                head_dim=128,
-                window_size=[4,8],
-                relative_pos_embedding=False,
-                out_kernel=[2,2],
-                
-                pde_block_depth=3, # 1 HybridBlock contains 3 PDE kernels, corresponding to 15 minutes (3x300s) of time evolution
-                block_dt=300, # One PDE kernel corresponds to 300s of time evolution
-                inverse_time=False).to(device)
-
-    if os.path.exists('../example_data/input.npy') and os.path.exists('../example_data/target.npy'):
-        inp = torch.tensor(np.load('../example_data/input.npy')).float().to(device)
-        target = torch.tensor(np.load('../example_data/target.npy')).float().to(device)
-    else:
-        inp = torch.randn(1, 69, 128, 256).to(device)
-        target = None
-    
-    # total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    # print(f"total parameters: {total_params}")
-    # flops, params = profile(model, inputs=(inp,))
-    # print(f"flops: {round(flops/10**9, 2)} G, params: {round(params/10**6, 2)} M")
-
-
-    pred = model(inp)
-    print(pred.shape)
-    # torch.Size([1, 3, 69, 128, 256]), the prediction results of lead time=[1,3,6]h respectively
-
-    model.out_layer = [5] # decode only the last layer
-    pred = model(inp)
-    # torch.Size([1, 69, 128, 256]), the prediction results of lead time=[1,3,6]h respectively
-    print(pred.shape)
-
-    if target is not None:
-        print('prediction MSE:', ((target-pred)**2).mean().item())
-
-        with open('../example_data/mean_std.json', 'r') as json_file:
-            mean_std = json.load(json_file)
-        mean = torch.tensor(mean_std['mean']).reshape(1, 69, 1, 1).to(inp.device)
-        std = torch.tensor(mean_std['std']).reshape(1, 69, 1, 1).to(inp.device)
-
-        pred = pred*std+mean # Denormalization
-        target = target*std+mean # Denormalization
-
-        fig, axs = plt.subplots(1, 3, figsize=(18, 5))
-
-        a0 = axs[0].imshow(pred[0, 0].detach().cpu().flip(0).numpy())
-        axs[0].set_title('prediction t2m')
-        axs[0].axis('off')
-        fig.colorbar(a0, ax=axs[0], orientation='horizontal', shrink=0.8, aspect=16, extend='both')
-
-        a1 = axs[1].imshow(target[0, 0].detach().cpu().flip(0).numpy())
-        axs[1].set_title('ground truth t2m')
-        axs[1].axis('off')
-        fig.colorbar(a1, ax=axs[1], orientation='horizontal', shrink=0.8, aspect=16, extend='both')
-
-        error = pred[0, 0]-target[0, 0]
-        a2 = axs[2].imshow(error.detach().cpu().flip(0).numpy(), cmap='RdBu_r', norm = colors.Normalize(-10, 10))
-        axs[2].set_title('prediction error t2m')
-        axs[2].axis('off')
-        fig.colorbar(a2, ax=axs[2], orientation='horizontal', shrink=0.8, aspect=16, extend='both')
+        feat_pde, zquvtw = self.pde_block(x, zquvtw)
         
-        plt.tight_layout()
-        plt.savefig('visualization.png', dpi=300)
-        plt.close()
+        # Adaptive Router
+        weight_AI = 0.5*torch.ones_like(x)+self.router_weight
+        weight_Physics = 0.5*torch.ones_like(x)-self.router_weight
+        x = weight_AI*zquvtw + weight_Physics*feat_pde
+        return x, zquvtw
+
+
+"""
+model_config = {
+    # image h w c
+    'height': 32,
+    'width': 64,
+    'num_channels': 69,
+    # video length in and out
+    'pre_seq': 12,
+    'after_seq': 12,
+    # patch size
+    'patch_size': 8,
+    'dim': 256, 
+    'heads': 8,
+    'dim_head': 32,
+    # dropout
+    'dropout': 0.0,
+    'attn_dropout': 0.0,
+    'drop_path': 0.0,
+    'scale_dim': 4,
+    # depth
+    'depth': 1,
+    'Ndepth': 24,
+    'path_to_constants': '/home/fratnikov/weather_bench/1.40625deg/constants/constants_1.40625deg.nc',
+}
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
+print("Start testing PredFormer model")
+model = PredFormer_Model(model_config).to(device)
+# Count and print the total number of parameters in the model
+total_params = sum(p.numel() for p in model.parameters())
+trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+print(f"Total parameters: {total_params:,}")
+print(f"Trainable parameters: {trainable_params:,}")
+print(f"Model size: {total_params * 4 / (1024 * 1024):.2f} MB")
+
+print("Model loaded successfully")
+x = torch.rand(1, 12, 69, 32, 64    ).to(device)
+print("Input tensor created successfully")
+output = model(x)
+print("Output tensor created successfully")
+print(output.shape)  # [B, T, C, H, W]
+"""

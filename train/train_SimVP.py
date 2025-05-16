@@ -16,7 +16,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from Data.weatherbench_128_v3 import WeatherBench128
 from Models.SimVP import SimVP_Model
-from LitModels.mutiout_fedor import MutiOut
+from LitModels.mutiout_f import MutiOut
 from utils.metrics import Metrics
 
 from lightning.pytorch.loggers import CometLogger

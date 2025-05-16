@@ -16,7 +16,7 @@ import string
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from Data.weatherbench_128 import WeatherBench128
-from Models.PredFormerGFTSingle import PredFormerGFTSingle
+from hse_year_4.thesis.WeatherPredictions.Models.dev.PredFormerGFTSingle import PredFormerGFTSingle
 
 from LitModels.mutiout import MutiOut
 from utils.metrics import Metrics

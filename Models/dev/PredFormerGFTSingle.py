@@ -6,12 +6,14 @@ import torch.nn.functional as F
 import math
 from fairscale.nn.checkpoint.checkpoint_activations import checkpoint_wrapper
 
+from hse_year_4.thesis.WeatherPredictions.Models.dev.PredFormer import BinaryTSLayer, FullAttentionLayer
+from Models.PredFormerUtils import FullAttention, AttentionLayer
 
 @torch.jit.script
 def lat(j: torch.Tensor, num_lat: int) -> torch.Tensor:
     return 90. - j * 180./float(num_lat-1)
 
-latents_size = [8, 16] # patch size = 4, input size [128, 256], latents size = [128/4, 256/4]
+latents_size = [32, 64] # patch size = 4, input size [128, 256], latents size = [128/4, 256/4]
 
 radius = 6371.0 * 1000
 num_lat = latents_size[0] + 2
@@ -340,7 +342,14 @@ class Residual(nn.Module):
         self.fn = fn
 
     def forward(self, x, **kwargs):
-        return self.fn(x, **kwargs) + x
+        t = self.fn(x, **kwargs)
+
+        #print('x shape:', x.shape, 't shape:', t.shape)
+        if len(x.shape) > len(t.shape):
+            new_t = t + x[:, -1, ...] # After transformer layer remote all times except last
+        else:
+            new_t = t + x
+        return new_t
 
 
 class PreNorm(nn.Module):
@@ -465,6 +474,9 @@ class WindowAttention(nn.Module):
 
 class HybridBlock(nn.Module):
     def __init__(self, dim, heads, head_dim, mlp_dim, shifted, window_size, relative_pos_embedding, use_pde, zquvtw_channel, depth, block_dt, inverse_time, physics_part_coef):
+        """
+        Depends on use_pde: False -> use only space attention, True -> use T/S attention, PredFormer-like
+        """
         super().__init__()
         self.attention_block = Residual(PreNorm(dim, WindowAttention(dim=dim,
                                                                      heads=heads,
@@ -472,25 +484,38 @@ class HybridBlock(nn.Module):
                                                                      shifted=shifted,
                                                                      window_size=window_size,
                                                                      relative_pos_embedding=relative_pos_embedding)))
+        
         self.use_pde = use_pde
         if use_pde:
+            space_attention_layer = WindowAttention(dim=dim,
+                                                heads=heads,
+                                                head_dim=head_dim,
+                                                shifted=shifted,
+                                                window_size=window_size,
+                                                relative_pos_embedding=relative_pos_embedding)
+
+            time_attention_layer = AttentionLayer(FullAttention(), d_model=dim, n_heads=heads)
+            self.attention_block = Residual(PreNorm(dim, BinaryTSLayer(time_attention_layer, 
+                                                         space_attention_layer, 
+                                                         d_model=dim)))
+
             self.pde_block = PDE_block(dim, zquvtw_channel, depth=depth, block_dt=block_dt, inverse_time=inverse_time, physics_part_coef=physics_part_coef)
             self.router_weight = nn.Parameter(torch.zeros(1, 1, 1, dim), requires_grad=True)
 
         self.router_MLP = Residual(PreNorm(dim, MLP(dim, hidden_dim=mlp_dim)))
 
-    def forward(self, x, zquvtw=None):
+    def forward(self, x, zquvtw=None, x_history=None):
         if self.use_pde:
             # AI & Physics
-            feat_att = self.attention_block(x)
+            feat_att = self.attention_block(x_history)
             feat_pde, zquvtw = self.pde_block(x, zquvtw)
-            
             # Adaptive Router
-            GFT.layer_weights[f"{self.__class__.__name__}_{GFT.gft_name}"] = self.router_weight.detach().cpu().numpy()
+            PredFormerGFTSingle.layer_weights[f"{self.__class__.__name__}_{PredFormerGFTSingle.gft_name}"] = self.router_weight.detach().cpu().numpy()
             weight_AI = 0.5*torch.ones_like(x)+self.router_weight
             weight_Physics = 0.5*torch.ones_like(x)-self.router_weight
             x = weight_AI*feat_att + weight_Physics*feat_pde
             # x = weight_AI*feat_att
+
             x = self.router_MLP(x)
             return x, zquvtw
         else:
@@ -539,6 +564,12 @@ class PatchExpanding(nn.Module):
         return x
 
 
+def update_history(x_history, x_new): 
+    x_history.append(x_new.cpu())
+    if len(x_history) > 4: 
+        x_history = x_history[:4]
+    return x_history
+
 class StageModule(nn.Module):
     def __init__(self, in_channels, hidden_dimension, layers, scaling_factors, num_heads, head_dim, window_size,
                  relative_pos_embedding, physics_part_coef, use_pde=False, zquvtw_channel=None, depth=3, block_dt=300, inverse_time=False):
@@ -579,14 +610,26 @@ class StageModule(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def forward(self, x, zquvtw=None):
+    def forward(self, x, zquvtw=None, x_prev=None):
         if self.use_pde:
-            x = self.patch_partition(x)
-            for regular_block, shifted_block in self.layers:
-                x, zquvtw = regular_block(x, zquvtw)
-                x, zquvtw = shifted_block(x, zquvtw)
+            if x_prev is not None: 
+                x_history = x_prev
+            else:
+                x_history = []
+
+            x = self.patch_partition(x) 
+            x_history = update_history(x_history, x)
+
+            for j in range(2):
+                for regular_block, shifted_block in self.layers:
+                    x, zquvtw = regular_block(x, zquvtw, torch.stack(x_history).transpose(0, 1).to(x.device))
+                    x_history = update_history(x_history, x)
+
+                    x, zquvtw = shifted_block(x, zquvtw, torch.stack(x_history).transpose(0, 1).to(x.device))
+                    x_history = update_history(x_history, x)
+            
             x = x.permute(0, 3, 1, 2) # [B, D, H, W]
-            return x, zquvtw
+            return x, zquvtw, x_history
         else:
             x = self.patch_partition(x)
             for regular_block, shifted_block in self.layers:
@@ -614,7 +657,7 @@ class RandomOrLearnedSinusoidalPosEmb(nn.Module):
         return fouriered
 
 
-class GFT(nn.Module):
+class PredFormerGFTSingle(nn.Module):
     
     layer_weights = {}  # Глобальный словарь для хранения значений router_weight
     
@@ -651,7 +694,7 @@ class GFT(nn.Module):
         super().__init__()
 
         self.t_emb_dim = 32
-        self.out_layer = [0, 1, 2, 3, 4, 5]
+        self.out_layer = [0, 2, 5]
         self.PDE_block_seconds_list = self.get_block_seconds(body_layers, block_dt*pde_block_depth)
 
         self.downscaling_factor_all = 1
@@ -679,21 +722,14 @@ class GFT(nn.Module):
                                 window_size=window_size, relative_pos_embedding=relative_pos_embedding)
             self.encoder.append(layer)
         
-        self.body = nn.ModuleList()
-        for i_layer in range(len(body_layers)):
-            if use_checkpoint:
-                layer = checkpoint_wrapper(StageModule(in_channels=body_dim_list[i_layer], hidden_dimension=body_dim_list[i_layer+1], layers=body_layers[i_layer],
-                                            physics_part_coef=physics_part_coef, 
-                                            scaling_factors=body_scaling_factors[i_layer], num_heads=body_heads[i_layer], head_dim=head_dim,
-                                            window_size=window_size, relative_pos_embedding=relative_pos_embedding, 
-                                            use_pde=True, zquvtw_channel=13, depth=pde_block_depth, block_dt=block_dt, inverse_time=inverse_time))
-            else:
-                layer = StageModule(in_channels=body_dim_list[i_layer], hidden_dimension=body_dim_list[i_layer+1], layers=body_layers[i_layer],
-                                    physics_part_coef=physics_part_coef,
-                                    scaling_factors=body_scaling_factors[i_layer], num_heads=body_heads[i_layer], head_dim=head_dim,
-                                    window_size=window_size, relative_pos_embedding=relative_pos_embedding, 
-                                    use_pde=True, zquvtw_channel=13, depth=pde_block_depth, block_dt=block_dt, inverse_time=inverse_time)
-            self.body.append(layer)
+        self.body = StageModule(in_channels=body_dim_list[0], hidden_dimension=body_dim_list[0], layers=body_layers[0],
+                                        physics_part_coef=physics_part_coef, 
+                                        scaling_factors=body_scaling_factors[0], num_heads=body_heads[0], head_dim=head_dim,
+                                        window_size=window_size, relative_pos_embedding=relative_pos_embedding, 
+                                        use_pde=True, zquvtw_channel=13, depth=pde_block_depth, block_dt=block_dt, inverse_time=inverse_time)
+        self.use_checkpoint = use_checkpoint
+        if use_checkpoint:
+            self.body = checkpoint_wrapper(self.body)
         
         self.time_mlp = nn.Sequential(
             RandomOrLearnedSinusoidalPosEmb(16, True),
@@ -713,7 +749,8 @@ class GFT(nn.Module):
             self.decoder.append(layer)
 
         self.decoder.append(nn.ConvTranspose2d(in_channels=decoder_dim_list[-1], out_channels=channels, kernel_size=out_kernel, stride=min(out_kernel)))
-
+        self.physics_part_coef = physics_part_coef
+        
 
     def get_block_seconds(self, block_nums, second_per_block=900):
         block_seconds = [block_nums[0]]
@@ -739,27 +776,73 @@ class GFT(nn.Module):
         t_emb = t_emb.reshape(B,self.t_emb_dim,1,1).expand(B,self.t_emb_dim, H, W)
         x_t_emb = torch.cat([x, t_emb], dim=1)
         return x_t_emb
+    
+    
+    def get_learnable_physics_importance(self):
+        """
+        Function that returns learned physics_importance coefs from all layers that contain PDE_kernels.
+        Use only if physics_importance_coef was not specified. 
+
+        Returns:
+            List[Tensor[Layer, C, H, W]]: List of learned physics importance coefficients 
+            from the layers with PDE_kernels.
+
+        """
+        if isinstance(self.physics_part_coef, float):
+            return self.physics_part_coef
+
+        total_coefs = []
+
+        for layer in self.encoder: 
+            if isinstance(layer, StageModule):
+                for inner_layer_pack in layer.layers:
+                    for hybrid_block in inner_layer_pack:
+                        if hybrid_block.use_pde:
+                            for pde_kernel in hybrid_block.pde_block.PDE_kernels:
+                                total_coefs.append(pde_kernel.physics_part_coef.data)
+
+        layer = self.body
+        if isinstance(layer, StageModule):
+            for inner_layer_pack in layer.layers:
+                for hybrid_block in inner_layer_pack:
+                    if hybrid_block.use_pde:
+                        for pde_kernel in hybrid_block.pde_block.PDE_kernels:
+                            total_coefs.append(pde_kernel.physics_part_coef.data)
+
+        for layer in self.decoder: 
+            if isinstance(layer, StageModule):
+                for inner_layer_pack in layer.layers:
+                    for hybrid_block in inner_layer_pack:
+                        if hybrid_block.use_pde:
+                            for pde_kernel in hybrid_block.pde_block.PDE_kernels:
+                                total_coefs.append(pde_kernel.physics_part_coef.data)
+
+        return torch.squeeze(torch.stack(total_coefs, dim=0))
 
     def forward(self, x):
         x = x.squeeze(1)
         
-        GFT.layer_weights.clear()
-        GFT.gft_name = ""
+        PredFormerGFTSingle.layer_weights.clear()
+        PredFormerGFTSingle.gft_name = ""
         
         output = []
         zquvtw = self.x_to_zquvtw(x)
+        x_history = []
         for idx, layer in enumerate(self.encoder):
-            GFT.gft_name = f"{idx}_encoder"
+            PredFormerGFTSingle.gft_name = f"{idx}_encoder"
             x = layer(x)
-        for layer_idx, layer in enumerate(self.body):
-            GFT.gft_name = f"{layer_idx}_body"
-            x, zquvtw = layer(x, zquvtw)
+
+        for layer_idx in range(6): # Use the same hybrid block 6 times
+            layer = self.body
+            
+            PredFormerGFTSingle.gft_name = f"{layer_idx}_body"
+
+            x, zquvtw, x_history = layer(x, zquvtw, x_history)
 
             if layer_idx in self.out_layer:
-                
                 x_t_emb = self.cat_t_emb(x, layer_idx)
                 for layer in self.decoder:
-                    GFT.gft_name = f"{layer_idx}_body_decoder"
+                    PredFormerGFTSingle.gft_name = f"{layer_idx}_body_decoder"
                     x_t_emb = layer(x_t_emb)
                 output.append(x_t_emb)
 
@@ -767,3 +850,98 @@ class GFT(nn.Module):
             return output[0]
         else:
             return torch.stack(output, dim=1)
+
+
+
+if __name__ == "__main__":
+    import os
+    import json
+    import matplotlib.pyplot as plt
+    import matplotlib.colors as colors
+    import numpy as np
+    # from thop import profile
+
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    print(device)
+
+    model = PredFormerGFTSingle(hidden_dim=256,
+                physics_part_coef=0.1,
+                encoder_layers=[2, 2, 2],
+                edcoder_heads=[2, 4, 4],
+                encoder_scaling_factors=[0.5, 0.5, 1], # [128, 256] --> [64, 128] --> [32, 64] --> [32, 64], that is, patch size = 4 (128/32)
+                encoder_dim_factors=[-1, 2, 2],
+
+                body_layers=[4, 4, 4, 4, 4, 4], # A total of 4x6=24 HybridBlock, corresponding to 6 hours (24x15min) of time evolution
+                body_heads=[8, 8, 8, 8, 8, 8],
+                body_scaling_factors=[1, 1, 1, 1, 1, 1],
+                body_dim_factors=[1, 1, 1, 1, 1, 1],
+
+                decoder_layers=[2, 2, 2],
+                decoder_heads=[4, 4, 2],
+                decoder_scaling_factors=[1, 2, 1],
+                decoder_dim_factors=[1, 0.5, 1],
+
+                channels=69,
+                head_dim=128,
+                window_size=[4,8],
+                relative_pos_embedding=False,
+                out_kernel=[2,2],
+                
+                pde_block_depth=3, # 1 HybridBlock contains 3 PDE kernels, corresponding to 15 minutes (3x300s) of time evolution
+                block_dt=300, # One PDE kernel corresponds to 300s of time evolution
+                inverse_time=False).to(device)
+
+    if os.path.exists('../example_data/input.npy') and os.path.exists('../example_data/target.npy'):
+        inp = torch.tensor(np.load('../example_data/input.npy')).float().to(device)
+        target = torch.tensor(np.load('../example_data/target.npy')).float().to(device)
+    else:
+        inp = torch.randn(1, 69, 128, 256).to(device)
+        target = None
+    
+    # total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    # print(f"total parameters: {total_params}")
+    # flops, params = profile(model, inputs=(inp,))
+    # print(f"flops: {round(flops/10**9, 2)} G, params: {round(params/10**6, 2)} M")
+
+
+    pred = model(inp)
+    print(pred.shape)
+    # torch.Size([1, 3, 69, 128, 256]), the prediction results of lead time=[1,3,6]h respectively
+
+    model.out_layer = [5] # decode only the last layer
+    pred = model(inp)
+    # torch.Size([1, 69, 128, 256]), the prediction results of lead time=[1,3,6]h respectively
+    print(pred.shape)
+
+    if target is not None:
+        print('prediction MSE:', ((target-pred)**2).mean().item())
+
+        with open('../example_data/mean_std.json', 'r') as json_file:
+            mean_std = json.load(json_file)
+        mean = torch.tensor(mean_std['mean']).reshape(1, 69, 1, 1).to(inp.device)
+        std = torch.tensor(mean_std['std']).reshape(1, 69, 1, 1).to(inp.device)
+
+        pred = pred*std+mean # Denormalization
+        target = target*std+mean # Denormalization
+
+        fig, axs = plt.subplots(1, 3, figsize=(18, 5))
+
+        a0 = axs[0].imshow(pred[0, 0].detach().cpu().flip(0).numpy())
+        axs[0].set_title('prediction t2m')
+        axs[0].axis('off')
+        fig.colorbar(a0, ax=axs[0], orientation='horizontal', shrink=0.8, aspect=16, extend='both')
+
+        a1 = axs[1].imshow(target[0, 0].detach().cpu().flip(0).numpy())
+        axs[1].set_title('ground truth t2m')
+        axs[1].axis('off')
+        fig.colorbar(a1, ax=axs[1], orientation='horizontal', shrink=0.8, aspect=16, extend='both')
+
+        error = pred[0, 0]-target[0, 0]
+        a2 = axs[2].imshow(error.detach().cpu().flip(0).numpy(), cmap='RdBu_r', norm = colors.Normalize(-10, 10))
+        axs[2].set_title('prediction error t2m')
+        axs[2].axis('off')
+        fig.colorbar(a2, ax=axs[2], orientation='horizontal', shrink=0.8, aspect=16, extend='both')
+        
+        plt.tight_layout()
+        plt.savefig('visualization.png', dpi=300)
+        plt.close()

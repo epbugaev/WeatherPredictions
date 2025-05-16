@@ -15,7 +15,7 @@ import torch
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from Data.weatherbench_128_v3 import WeatherBench128
-from Models.imvp_v2_small_world import IAM4VP
+from Models.PI_IAM4VP import IAM4VP
 from LitModels.mutiout_imvp_small_world import MutiOut
 from utils.metrics import Metrics
 
@@ -64,7 +64,7 @@ def train_model(devices, num_nodes):
     lit_model = MutiOut(torch_model, lr=lr, eta_min=eta_min, max_epoch=max_epoch, steps_per_epoch=steps_per_epoch,
                         loss_type="MAE", metrics=metrics, muti_out_nums=6, time_prediction=6)
 
-    EXP_NAME = "f train_imvp_mini_gft small world no physics"
+    EXP_NAME = "train_imvp_mini_gft small world physics"
 
     save_path = os.path.join('/home/ebugaev/checkpoints/', EXP_NAME, datetime.datetime.now().strftime("%Y-%m-%d-%H:%M") + ''.join(random.choices(string.ascii_lowercase + string.digits, k=5)))
     checkpoint_callback = ModelCheckpoint(dirpath=save_path,

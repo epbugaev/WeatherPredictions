@@ -16,7 +16,7 @@ import string
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from Data.weatherbench_128_v3 import WeatherBench128
-from Models.PredFormerTwoO import PredFormer_Model
+from Models.PredFormerGFT import PredFormer_Model
 from WeatherPredictions.LitModels.mutiout_f import MutiOut
 from utils.metrics import Metrics
 
@@ -88,7 +88,7 @@ def train_model(devices, num_nodes):
     lit_model = MutiOut(torch_model, lr=lr, eta_min=eta_min, max_epoch=max_epoch, steps_per_epoch=steps_per_epoch,
                         loss_type="MAE", metrics=metrics, muti_out_nums=6)
 
-    EXP_NAME = "train_predformer_two_o"
+    EXP_NAME = "train_predformer_gft"
 
     save_path = os.path.join('/home/epbugaev/checkpoints/', EXP_NAME, datetime.datetime.now().strftime("%Y-%m-%d-%H:%M") + ''.join(random.choices(string.ascii_lowercase + string.digits, k=5)))
     checkpoint_callback = ModelCheckpoint(dirpath=save_path,
