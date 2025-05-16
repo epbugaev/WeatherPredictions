@@ -9,16 +9,15 @@ from argparse import ArgumentParser
 import datetime
 import os
 import sys
-import wandb
 import random
 import string
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from Data.weatherbench_128_v2 import WeatherBench128
-# from Models.FedorPredFormer import PredFormer_Model
+from Data.dataloader_weather import WeatherBenchDataset2
+
 from hse_year_4.thesis.WeatherPredictions.Models.FPredFormer import PredFormer_Model
-from LitModels.mutiout_fedor import MutiOut
+from LitModels.mutiout_f import MutiOut
 from utils.metrics import Metrics
 
 from lightning.pytorch.loggers import CometLogger
@@ -50,31 +49,27 @@ def train_model(devices, num_nodes):
     }
 
     torch_model = PredFormer_Model(model_config)
-    train_start_time = '2000-01-01 00:00:00'
-    train_end_time = '2016-12-25 00:00:00' # '2000-01-01 23:00:00' #
-    val_start_time = '2017-01-01 00:00:00'
-    val_end_time = '2018-12-25 00:00:00' # '2004-01-01 23:00:00' #
 
-    train_data = WeatherBench128(start_time=train_start_time, end_time=train_end_time,
-                                include_target=False, 
-                                lead_time=1, 
-                                interval=1,
-                                muti_target_steps=1,
-                                start_time_x=0,
-                                end_time_x=11,      
-                                start_time_y=12,
-                                end_time_y=23)  
-    train_loader = DataLoader(train_data, batch_size=4, shuffle=True, num_workers=16)
-    valid_data = WeatherBench128(start_time=val_start_time, end_time=val_end_time,
-                                include_target=False,
-                                lead_time=1, 
-                                interval=1,
-                                muti_target_steps=1,
-                                start_time_x=0,
-                                end_time_x=11,      
-                                start_time_y=12,
-                                end_time_y=23)  
-    valid_loader = DataLoader(valid_data, batch_size=4, shuffle=False, num_workers=16)
+    train_data = WeatherBenchDataset2(data_root='/home/fa.buzaev/data/weatherbench',
+                                data_name='gft',
+                                training_time=['2015', '2015'],
+                                idx_in=[*range(0, 12)],
+                                idx_out=[*range(12, 24)],
+                                step=12,
+                                levels='all',
+                                data_split='1_40625',
+                                use_augment=False)
+    train_loader = DataLoader(train_data, batch_size=4, shuffle=True, num_workers=8)
+    valid_data = WeatherBenchDataset2(data_root='/home/fa.buzaev/data/weatherbench',
+                                data_name='gft',
+                                training_time=['2016', '2016'],
+                                idx_in=[*range(0, 12)],
+                                idx_out=[*range(12, 24)],
+                                step=12,
+                                levels='all',
+                                data_split='1_40625',
+                                use_augment=False)
+    valid_loader = DataLoader(valid_data, batch_size=4, shuffle=False, num_workers=8)
 
     world_size=devices*num_nodes
     lr=5e-4
@@ -86,7 +81,7 @@ def train_model(devices, num_nodes):
     lit_model = MutiOut(torch_model, lr=lr, eta_min=eta_min, max_epoch=max_epoch, steps_per_epoch=steps_per_epoch,
                         loss_type="MAE", metrics=metrics, muti_out_nums=6)
 
-    EXP_NAME = "train_predformer_fedor_from_2000_to_2016"
+    EXP_NAME = "train_predformer_fedor_from_2015_to_2016"
 
     save_path = os.path.join('/home/fa.buzaev/checkpoints/', EXP_NAME, datetime.datetime.now().strftime("%Y-%m-%d-%H:%M") + ''.join(random.choices(string.ascii_lowercase + string.digits, k=5)))
     checkpoint_callback = ModelCheckpoint(dirpath=save_path,

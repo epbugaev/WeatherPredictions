@@ -16,9 +16,8 @@ import string
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from Data.weatherbench_128 import WeatherBench128
-from hse_year_4.thesis.WeatherPredictions.Models.FPredFormer import PredFormer_Model
-# from Models.FedorPredFormerGFT import PredFormer_Model
-from LitModels.mutiout_fedor import MutiOut
+from Models.FPredFormer import PredFormer_Model
+from hse_year_4.thesis.WeatherPredictions.LitModels.mutiout_f import MutiOut
 from utils.metrics import Metrics
 
 from lightning.pytorch.loggers import CometLogger
@@ -57,10 +56,10 @@ def train_model(devices, num_nodes):
     val_end_time = '2004-12-25 00:00:00' # '2004-01-01 23:00:00' #
 
     train_data = WeatherBench128(start_time=train_start_time, end_time=train_end_time,
-                                include_target=False, lead_time=1, interval=12, muti_target_steps=12)
+                                include_target=False, lead_time=1, interval=12, muti_target_steps=23)
     train_loader = DataLoader(train_data, batch_size=8, shuffle=True, num_workers=4)
     valid_data = WeatherBench128(start_time=val_start_time, end_time=val_end_time,
-                                include_target=False, lead_time=1, interval=12, muti_target_steps=12)
+                                include_target=False, lead_time=1, interval=12, muti_target_steps=23)
     valid_loader = DataLoader(valid_data, batch_size=8, shuffle=False, num_workers=4)
 
     world_size=devices*num_nodes
@@ -75,7 +74,7 @@ def train_model(devices, num_nodes):
 
     EXP_NAME = "train_predformer_fedor"
 
-    save_path = os.path.join('/home/fa.buzaev/checkpoints/', EXP_NAME, datetime.datetime.now().strftime("%Y-%m-%d-%H:%M") + ''.join(random.choices(string.ascii_lowercase + string.digits, k=5)))
+    save_path = os.path.join('/home/epbugaev/checkpoints/', EXP_NAME, datetime.datetime.now().strftime("%Y-%m-%d-%H:%M") + ''.join(random.choices(string.ascii_lowercase + string.digits, k=5)))
     checkpoint_callback = ModelCheckpoint(dirpath=save_path,
                                           monitor='val_loss', save_last=True, save_top_k=1, mode="min",
                                           save_on_train_epoch_end=True,
@@ -83,7 +82,7 @@ def train_model(devices, num_nodes):
     early_stopping_callback = EarlyStopping(monitor="val_loss", mode="min", patience=5, check_finite=True)
     # lr_monitor = LearningRateMonitor(logging_interval='step')
     
-    os.environ["COMET_API_KEY"] = ""
+    os.environ["COMET_API_KEY"] = "D75wgJ5A8n5yvnTcrdgLGpuYy"
     os.environ["COMET_EXPERIMENT_KEY"] = ''.join(random.choices(string.ascii_lowercase + string.digits, k=50))
     comet_ml.login()
     

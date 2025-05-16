@@ -76,7 +76,7 @@ def train_model(devices, num_nodes):
     valid_loader = DataLoader(valid_data, batch_size=8, shuffle=False, num_workers=8)
 
     world_size=devices*num_nodes
-    lr=10e-4
+    lr=1e-4
     eta_min=0.0
     max_epoch=4
     steps_per_epoch=len(train_loader)//world_size
