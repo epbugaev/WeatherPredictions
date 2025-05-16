@@ -86,7 +86,7 @@ def train_model(devices, num_nodes):
     early_stopping_callback = EarlyStopping(monitor="val_loss", mode="min", patience=5, check_finite=True)
     # lr_monitor = LearningRateMonitor(logging_interval='step')
     
-    os.environ["COMET_API_KEY"] = "D75wgJ5A8n5yvnTcrdgLGpuYy"
+    os.environ["COMET_API_KEY"] = ""
     os.environ["COMET_EXPERIMENT_KEY"] = ''.join(random.choices(string.ascii_lowercase + string.digits, k=50))
     comet_ml.login()
 

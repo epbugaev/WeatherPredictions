@@ -17,8 +17,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from Data.weatherbench_128_v2 import WeatherBench128
 # from Models.FedorPredFormer import PredFormer_Model
-from hse_year_4.thesis.WeatherPredictions.Models.FPredFormer import PredFormer_Model
-from hse_year_4.thesis.WeatherPredictions.LitModels.mutiout_f import MutiOut
+from WeatherPredictions.Models.FPredFormer import PredFormer_Model
+from WeatherPredictions.LitModels.mutiout_f import MutiOut
 from utils.metrics import Metrics
 
 from lightning.pytorch.loggers import CometLogger

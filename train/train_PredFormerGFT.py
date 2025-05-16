@@ -17,8 +17,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from Data.weatherbench_128_v3 import WeatherBench128
 from Models.PredFormerTwoO import PredFormer_Model
-# from Models.FedorPredFormerGFT import PredFormer_Model
-from hse_year_4.thesis.WeatherPredictions.LitModels.mutiout_f import MutiOut
+from WeatherPredictions.LitModels.mutiout_f import MutiOut
 from utils.metrics import Metrics
 
 from lightning.pytorch.loggers import CometLogger
@@ -99,7 +98,7 @@ def train_model(devices, num_nodes):
     early_stopping_callback = EarlyStopping(monitor="val_loss", mode="min", patience=5, check_finite=True)
     # lr_monitor = LearningRateMonitor(logging_interval='step')
     
-    os.environ["COMET_API_KEY"] = "D75wgJ5A8n5yvnTcrdgLGpuYy"
+    os.environ["COMET_API_KEY"] = ""
     os.environ["COMET_EXPERIMENT_KEY"] = ''.join(random.choices(string.ascii_lowercase + string.digits, k=50))
     comet_ml.login()
     

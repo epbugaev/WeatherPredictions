@@ -16,7 +16,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from Data.dataloader_weather import WeatherBenchDataset2
 
-from hse_year_4.thesis.WeatherPredictions.Models.FPredFormer import PredFormer_Model
+from WeatherPredictions.Models.FPredFormer import PredFormer_Model
 from LitModels.mutiout_f import MutiOut
 from utils.metrics import Metrics
 
