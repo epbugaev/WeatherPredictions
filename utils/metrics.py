@@ -1,11 +1,6 @@
 import torch
 import numpy as np
 
-# SEDI_t2m_128 = torch.from_numpy(np.load("/mnt/petrelfs/xuwanghan/projects/high_resolution/sedi/Q_SEDI_128/SEDI_t2m.npy"))
-# SEDI_ws10_128 = torch.from_numpy(np.load("/mnt/petrelfs/xuwanghan/projects/high_resolution/sedi/Q_SEDI_128/SEDI_ws10.npy"))
-# SEDI_t2m_721 = torch.from_numpy(np.load("/mnt/petrelfs/xuwanghan/projects/high_resolution/sedi/Q_SEDI_721/SEDI_t2m.npy"))
-# SEDI_ws10_721 = torch.from_numpy(np.load("/mnt/petrelfs/xuwanghan/projects/high_resolution/sedi/Q_SEDI_721/SEDI_ws10.npy"))
-
 @torch.jit.script
 def lat(j: torch.Tensor, num_lat: int) -> torch.Tensor:
     return 90. - j * 180./float(num_lat-1)
