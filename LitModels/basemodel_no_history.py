@@ -31,12 +31,11 @@ class BaseModel(L.LightningModule):
         self.muti_steps = muti_steps
         self.test_metrics = {}
         # ==============================
-        self.example_input_array = torch.Tensor(1, 12, 69, 32, 64)
+        self.example_input_array = torch.Tensor(1, 69, 128, 256)
         # self.example_input_array = torch.Tensor(1, 69, 32, 64)
         self.save_hyperparameters(ignore=['model', 'metrics', 'muti_steps_reader']) # too big too save
 
-        self.trained = True
-
+        self.trained = False
 
     def mae_loss(self, pred, tar):
         return torch.mean(torch.abs(pred-tar))

@@ -3,8 +3,8 @@ import lightning as L
 from utils.metrics import Metrics
 import numpy as np
 from torch import nn
-import matplotlib.pyplot as plt
 from LitModels.basemodel import BaseModel
+import matplotlib.pyplot as plt
 
 
 class MutiOut(BaseModel):
@@ -22,7 +22,7 @@ class MutiOut(BaseModel):
                  time_prediction:int=6,  # Number of time steps to predict
                  **kwargs):
         super().__init__(model, lr, eta_min, max_epoch, steps_per_epoch, loss_type, metrics, muti_steps)
-        self.example_input_array = torch.Tensor(1, 12, 69, 128, 256)
+        self.example_input_array = torch.Tensor(1, 6, 69, 128, 256)
         self.time_prediction = time_prediction
         self.automatic_optimization = False  # Disable automatic optimization for manual optimization
 
@@ -94,22 +94,27 @@ class MutiOut(BaseModel):
         rmse_first = self.metrics.WRMSE(pred_list[0], y[:, 0])
         rmse_last = self.metrics.WRMSE(pred_list[-1], y[:, -1])
         
+        log_dict = {"val_loss": val_loss, "RMSE_z500_first": rmse_first[11], "RMSE_z500_last": rmse_last[11], 
+                    "RMSE_t500_first": rmse_first[11 + 13], "RMSE_t500_last": rmse_last[11 + 13], 
+                    "RMSE_u500_first": rmse_first[11 + 26], "RMSE_u500_last": rmse_last[11 + 26], 
+                    "RMSE_v500_first": rmse_first[11 + 39], "RMSE_v500_last": rmse_last[11 + 39]}
+
         # Определение индексов для различных переменных
         # На основе порядка в weatherbench_128_v2.py
         index_map = {
             'u10': 1,      # 10m_u_component_of_wind
             'v10': 2,      # 10m_v_component_of_wind
             't2': 0,       # 2m_temperature
-            'z500': 11,    # geopotential на уровне 500 hPa
-            't500': 20,    # temperature на уровне 500 hPa
-            't50': 23,     # temperature на уровне 50 hPa
-            't1000': 19,   # temperature на уровне 1000 hPa
-            'u500': 32,    # u_component_of_wind на уровне 500 hPa
-            'v500': 45,    # v_component_of_wind на уровне 500 hPa
-            'u50': 35,     # u_component_of_wind на уровне 50 hPa
-            'v50': 48,     # v_component_of_wind на уровне 50 hPa
-            'u1000': 31,   # u_component_of_wind на уровне 1000 hPa
-            'v1000': 44,   # v_component_of_wind на уровне 1000 hPa
+            'z500': 4 + 7,    # geopotential на уровне 500 hPa
+            't500': 17 + 7,    # temperature на уровне 500 hPa
+            't50': 17 + 0,     # temperature на уровне 50 hPa
+            't1000': 17 + 12,   # temperature на уровне 1000 hPa
+            'u500': 43 + 7,    # u_component_of_wind на уровне 500 hPa
+            'v500': 56 + 7,    # v_component_of_wind на уровне 500 hPa
+            'u50': 43 + 0,     # u_component_of_wind на уровне 50 hPa
+            'v50': 56 + 0,     # v_component_of_wind на уровне 50 hPa
+            'u1000': 43 + 12,   # u_component_of_wind на уровне 1000 hPa
+            'v1000': 56 + 12,   # v_component_of_wind на уровне 1000 hPa
         }
         
         log_dict = {
@@ -118,13 +123,15 @@ class MutiOut(BaseModel):
         
         # Добавляем логирование для первого и последнего предсказания
         for var_name, idx in index_map.items():
-            log_dict[f"RMSE_{var_name}_first"] = rmse_first[idx]
-            log_dict[f"RMSE_{var_name}_last"] = rmse_last[idx]
+            log_dict[f"f RMSE_{var_name}_first"] = rmse_first[idx]
+            log_dict[f"f RMSE_{var_name}_last"] = rmse_last[idx]
         
         self.log_dict(log_dict, prog_bar=True)
         
         # Добавляем визуализации в comet для указанных переменных
-        if batch_idx == 0 and self.logger is not None and hasattr(self.logger, "experiment"):
+        if self.trained and self.logger is not None and hasattr(self.logger, "experiment"):
+            print('HERE!!!')
+
             # Список переменных для визуализации
             vis_vars = ['u50', 'v50', 'z500', 'u500', 'v500']
             
@@ -162,5 +169,8 @@ class MutiOut(BaseModel):
                     ax_diff.set_title(f'{var_name} Prediction - True')
                     self.logger.experiment.log_figure(figure=fig_diff, figure_name=f'{var_name}_diff')
                     plt.close(fig_diff)
+        
+        self.log_dict(log_dict, prog_bar=True)
+        self.trained = False
         
         return val_loss

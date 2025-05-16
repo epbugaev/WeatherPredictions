@@ -5,7 +5,7 @@ import numpy as np
 import torch
 from torch import nn
 from torch.profiler import profile, ProfilerActivity
-from LitModels.basemodel_no_history import BaseModel
+from LitModels.basemodel_predrnn import BaseModel
 import matplotlib.pyplot as plt
 
 class MutiOut(BaseModel):
@@ -22,22 +22,29 @@ class MutiOut(BaseModel):
                  muti_steps:int=1,
                  **kwargs):
         super().__init__(model, lr, eta_min, max_epoch, steps_per_epoch, loss_type, metrics, muti_steps)
-        self.out_idx = self.model.out_layer
+        #self.out_idx = self.model.out_layer
 
 
     def training_step(self, batch):
         x, y = batch
-        #x = torch.concat([x, y[:, :11, ...]], axis=1)
-        #y = y[:, 11:, ...]
 
         activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA]
 
         #logger.debug(f'x, y shapes: {x.shape} {y.shape}')
-        y = y[:, [0, 2, 5], ...]
-        y_hat = self.model(x)[:, [0, 2, 5], ...]
+        inp = torch.cat([
+            x, 
+            y
+        ], dim=1)
         
+        inp = inp.permute(0, 1, 3, 4, 2).contiguous()
+        #print('inp shape in training:', inp.shape)
+        y_hat, _ = self.model(inp, torch.zeros(1, 12, 1, 1, 1).to(x.device))
+        y_hat = y_hat.permute(0, 1, 4, 2, 3)
+        inp = inp.permute(0, 1, 4, 2, 3)
+        #print('final shape:', y_hat.shape)
+
         #print('Forward passed succesfully')
-        loss = self.loss(y_hat, y)
+        loss = self.loss(inp[:, 1:, ...], y_hat)
 
         #print('Calculated loss:', loss)
 
@@ -51,11 +58,17 @@ class MutiOut(BaseModel):
     
     def validation_step(self, batch):
         x, y = batch
-        #x = torch.concat([x, y[:, :11, ...]], axis=1)
-        #y = y[:, 11:, ...]
 
-        y = y[:, self.out_idx]
-        y_hat = self.model(x)
+        inp = torch.cat([
+            x, 
+            y
+        ], dim=1)
+        
+        inp = inp.permute(0, 1, 3, 4, 2).contiguous()
+        #print('inp shape in val:', inp.shape)
+        y_hat, _ = self.model(inp, torch.zeros(1, 12, 1, 1, 1).to(x.device))
+        y_hat = y_hat.permute(0, 1, 4, 2, 3)[:, 11:, ...]
+    
         val_loss = self.loss(y_hat, y)
         rmse_first = self.metrics.WRMSE(y_hat[:,0], y[:,0])
         rmse_last = self.metrics.WRMSE(y_hat[:,-1], y[:,-1])

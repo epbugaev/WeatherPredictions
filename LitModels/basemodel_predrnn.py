@@ -51,13 +51,30 @@ class BaseModel(L.LightningModule):
             self.loss = self.mse_loss
 
     def forward(self, x):
-        x = self.model(x)
-        return x
+        inp = torch.cat([
+            x, 
+            torch.zeros_like(x).to(x.device),
+        ], dim=1)
+
+        inp = inp.permute(0, 1, 3, 4, 2).contiguous()
+        print('inp shape:', inp.shape)
+        y_hat, _ = self.model(inp, torch.zeros(1, 12, 1, 1, 1).to(x.device))
+        y_hat = y_hat.permute(0, 1, 4, 2, 3)[:, 11:, ...]
+
+        return y_hat
 
     def training_step(self, batch):
         x, y = batch
         
-        y_hat = self.model(x)
+        inp = torch.cat([
+            x, 
+            y
+        ], dim=1)
+        inp = inp.permute(0, 1, 3, 4, 2).contiguous()
+        y_hat, _ = self.model(inp, torch.zeros(1, 12, 1, 1, 1).to(x.device))
+        y_hat = y_hat.permute(0, 1, 4, 2, 3)
+
+
         loss = self.loss(y_hat, y)
         lr_now = self.the_optimizer.param_groups[0]['lr']
         log_dict = {"train_loss": loss, "lr": lr_now}
@@ -67,7 +84,15 @@ class BaseModel(L.LightningModule):
     
     def validation_step(self, batch):
         x, y = batch
-        y_hat = self.model(x)
+
+        inp = torch.cat([
+            x, 
+            y
+        ], dim=1)
+        inp = inp.permute(0, 1, 3, 4, 2).contiguous()
+        y_hat, _ = self.model(inp, torch.zeros(1, 12, 1, 1, 1).to(x.device))
+        y_hat = y_hat.permute(0, 1, 4, 2, 3)[:, 11:, ...]
+
         val_loss = self.loss(y_hat, y)
         rmse = self.metrics.WRMSE(y_hat, y)
         log_dict = {"val_loss": val_loss, "val_RMSE_z500": rmse[11]}
