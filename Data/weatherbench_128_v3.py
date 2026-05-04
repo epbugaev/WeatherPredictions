@@ -154,16 +154,28 @@ class WeatherBench128(Dataset):
         
 
     def get_mean_std(self):
-        mean_std = np.load("/home/epbugaev/weather_bench/1.40625deg/mean_std.npy")
-        # mean_std = np.ones([2, 110]) # Test
-        self.the_mean = mean_std[0]
-        self.the_std = mean_std[1]
-        self.data_mean_tensor = torch.from_numpy(self.the_mean[self.variables_list]).float()
-        self.data_std_tensor = torch.from_numpy(self.the_std[self.variables_list]).float()
+        import json
+
+        mean_std_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "example_data",
+            "mean_std.json",
+        )
+
+        with open(mean_std_path, "r") as f:
+            mean_std = json.load(f)
+
+        # mean_std.json already contains only the 69 selected variables,
+        # in the same order as self.variables_list.
+        self.the_mean = np.array(mean_std["mean"], dtype=np.float32)
+        self.the_std = np.array(mean_std["std"], dtype=np.float32)
+
+        self.data_mean_tensor = torch.from_numpy(self.the_mean).float()
+        self.data_std_tensor = torch.from_numpy(self.the_std).float()
 
    
     def normalization(self, sample):
-        return (sample[self.variables_list] - self.the_mean[self.variables_list, None, None]) / self.the_std[self.variables_list, None, None]
+        return (sample[self.variables_list] - self.the_mean[:, None, None]) / self.the_std[:, None, None]
 
     def __len__(self):
         return self.length

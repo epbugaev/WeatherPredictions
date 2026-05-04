@@ -18,10 +18,12 @@ import datetime
 import os
 import random
 import string
+import sys
 
 from utils.metrics import Metrics
 from lightning.pytorch.loggers import CometLogger
 
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def load_config(path):
     with open(path) as f:

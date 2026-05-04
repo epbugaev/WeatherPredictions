@@ -47,7 +47,7 @@ data:
 
 training:
   litmodel: mutiout_f
-  lr: 5e-4
+  lr: 0.0005
   eta_min: 0.0
   max_epoch: 20
   loss_type: MAE
@@ -61,7 +61,7 @@ trainer:
   static_graph: true
 
 logging:
-  checkpoint_base: /home/epbugaev/checkpoints/
-  comet_api_key: ""
+  checkpoint_base: /home/ebugaev/checkpoints/
+  comet_api_key: "D75wgJ5A8n5yvnTcrdgLGpuYy"
   comet_project: WeatherPredictions
   log_code_file: null
