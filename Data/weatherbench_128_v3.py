@@ -63,6 +63,18 @@ class WeatherBench128(Dataset):
         
 
         self.cut = cut
+        if self.cut is None:
+            self.lat_slice = slice(None)
+            self.lon_slice = slice(None)
+            self.spatial_shape = (128, 256)
+        else:
+            self.lat_slice = slice(self.cut[0][0], self.cut[0][1])
+            self.lon_slice = slice(self.cut[1][0], self.cut[1][1])
+            self.spatial_shape = (
+                self.cut[0][1] - self.cut[0][0],
+                self.cut[1][1] - self.cut[1][0],
+            )
+
         self.preload = {}
         self.num_preload = num_preload
         
@@ -109,16 +121,26 @@ class WeatherBench128(Dataset):
 
         right_bound_hours = max(hour + 1, min(7861, hour + self.num_preload))
 
-        res = np.zeros([right_bound_hours - hour, 110, 128, 256])
+        height, width = self.spatial_shape
+        res = np.empty([right_bound_hours - hour, 110, height, width], dtype=np.float32)
 
         for ind, key in enumerate(match_set): 
             start_id = ids[ind]
             end_id = ids[ind + 1]
 
             if end_id - start_id == 1:
-                res[:, start_id, :, :] = match_set_files[key][match_set[key]][hour:right_bound_hours, :, :]
+                res[:, start_id, :, :] = match_set_files[key][match_set[key]][
+                    hour:right_bound_hours,
+                    self.lat_slice,
+                    self.lon_slice,
+                ]
             else:
-                res[:, start_id:end_id, :, :] = match_set_files[key][match_set[key]][hour:right_bound_hours, 0:13, :, :]
+                res[:, start_id:end_id, :, :] = match_set_files[key][match_set[key]][
+                    hour:right_bound_hours,
+                    0:13,
+                    self.lat_slice,
+                    self.lon_slice,
+                ]
 
         for cur_hour in range(hour, right_bound_hours): 
             self.preload[year + '-' + str(cur_hour)] = res[cur_hour - hour, ...]
@@ -190,9 +212,6 @@ class WeatherBench128(Dataset):
             sample_x = self.normalization(sample_x)
             sample_x = torch.from_numpy(sample_x).float()
 
-            if self.cut is not None:
-                sample_x = sample_x[..., self.cut[0][0]:self.cut[0][1], self.cut[1][0]:self.cut[1][1]]
-
             x_sequence.append(sample_x)
 
         # Stack X sequence
@@ -212,9 +231,6 @@ class WeatherBench128(Dataset):
                 sample_y = self.normalization(sample_y)
                 sample_y = torch.from_numpy(sample_y).float()
 
-                if self.cut is not None:
-                    sample_y = sample_y[..., self.cut[0][0]:self.cut[0][1], self.cut[1][0]:self.cut[1][1]]
-                    
                 y_sequence.append(sample_y)
             
             # Stack this target sequence
