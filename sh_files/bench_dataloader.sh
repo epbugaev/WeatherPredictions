@@ -72,6 +72,55 @@ export PROFILE_TRACE_DIR="${TRACE_DIR}"
 cp "${CFG_PATH}" "${TRACE_DIR}/config_snapshot.yaml"
 git rev-parse HEAD > "${TRACE_DIR}/git_sha.txt" 2>/dev/null || echo unknown > "${TRACE_DIR}/git_sha.txt"
 
+# Optional staging step: copy the netCDF tree for the configured year range
+# from Lustre (/home/fratnikov/...) to local NVMe under /tmp, then patch the
+# config snapshot to point ``data.input_folder`` at the staged path. Activate
+# by setting ``STAGE_DATA=1`` (default off). ``STAGE_YEARS`` overrides the
+# default 2000-2004 window. Used to test the §2.4 hypothesis: that 24
+# small-file reads per sample on Lustre dominate ``data_wait``.
+ACTIVE_CFG="${CFG_PATH}"
+STAGE_DIR=""
+if [[ "${STAGE_DATA:-0}" = "1" ]]; then
+  STAGE_DIR="/tmp/${USER:-$(id -un)}/era5_stage_${JOBID}"
+  mkdir -p "${STAGE_DIR}"
+  STAGE_YEARS="${STAGE_YEARS:-2000 2001 2002 2003 2004}"
+  STAGE_VARS="2m_temperature 10m_u_component_of_wind 10m_v_component_of_wind \
+total_cloud_cover total_precipitation toa_incident_solar_radiation \
+geopotential temperature specific_humidity relative_humidity \
+u_component_of_wind v_component_of_wind vorticity potential_vorticity"
+  STAGE_SRC="${STAGE_SRC:-/home/fratnikov/weather_bench/1.40625deg}"
+
+  STAGE_START=$(date +%s)
+  echo "[bench-stage] years=${STAGE_YEARS} src=${STAGE_SRC} dst=${STAGE_DIR}"
+  for var in ${STAGE_VARS}; do
+    (
+      mkdir -p "${STAGE_DIR}/${var}"
+      for year in ${STAGE_YEARS}; do
+        src_file="${STAGE_SRC}/${var}/${var}_${year}_1.40625deg.nc"
+        if [[ -f "${src_file}" ]]; then
+          cp "${src_file}" "${STAGE_DIR}/${var}/"
+        fi
+      done
+    ) &
+  done
+  wait
+  STAGE_END=$(date +%s)
+  STAGE_SECS=$((STAGE_END - STAGE_START))
+  STAGE_SIZE=$(du -sh "${STAGE_DIR}" 2>/dev/null | cut -f1)
+  echo "[bench-stage] done in ${STAGE_SECS}s, size=${STAGE_SIZE}"
+
+  python3 - <<PYEOF
+import yaml
+snap = "${TRACE_DIR}/config_snapshot.yaml"
+with open(snap) as f:
+    cfg = yaml.safe_load(f)
+cfg.setdefault("data", {})["input_folder"] = "${STAGE_DIR}/"
+with open(snap, "w") as f:
+    yaml.safe_dump(cfg, f, sort_keys=False)
+PYEOF
+  ACTIVE_CFG="${TRACE_DIR}/config_snapshot.yaml"
+fi
+
 export OMP_NUM_THREADS=4
 export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
@@ -84,12 +133,15 @@ NGPUS="${NGPUS:-${SLURM_GPUS_ON_NODE:-1}}"
 # Background GPU sampler. ``dmon`` outputs one row per second per GPU.
 nvidia-smi dmon -s pucvmet -d 1 -o T > "${TRACE_DIR}/dmon.csv" 2>&1 &
 DMON_PID=$!
-trap 'kill ${DMON_PID} 2>/dev/null || true' EXIT
+# Combined cleanup: kill dmon and (when staged) remove the /tmp copy so /tmp
+# stays usable for subsequent jobs on this node.
+trap 'kill ${DMON_PID} 2>/dev/null || true; [[ -n "${STAGE_DIR}" ]] && rm -rf "${STAGE_DIR}" 2>/dev/null || true' EXIT
 
 echo "[bench] tag=${BENCH_TAG} config=${BENCH_CONFIG} steps=${BENCH_MAX_STEPS} trace=${TRACE_DIR}"
 echo "[bench] env: BENCH_MAX_STEPS=${BENCH_MAX_STEPS} PROFILE_TRACE_DIR=${PROFILE_TRACE_DIR}"
 echo "[bench] cwd=$(pwd) REPO_ROOT=${REPO_ROOT} host=$(hostname)"
 echo "[bench] python=$(command -v python) git_sha=$(cat "${TRACE_DIR}/git_sha.txt")"
+echo "[bench] active_config=${ACTIVE_CFG} stage_data=${STAGE_DATA:-0} stage_dir=${STAGE_DIR:-<none>}"
 
 # Call torchrun inline (no need to re-source _shell_contract via launch_train.sh).
 python -m torch.distributed.run \
@@ -97,7 +149,7 @@ python -m torch.distributed.run \
     --nproc_per_node "${NGPUS}" \
     --rdzv_backend=c10d \
     --rdzv_endpoint "127.0.0.1:${MASTER_PORT}" \
-    train.py --config "${CFG_PATH}" 2>&1 | tee "${TRACE_DIR}/bench.log"
+    train.py --config "${ACTIVE_CFG}" 2>&1 | tee "${TRACE_DIR}/bench.log"
 
 echo "[bench] done: ${TRACE_DIR}"
 ls -la "${TRACE_DIR}"
