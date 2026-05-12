@@ -39,10 +39,16 @@
 set -euo pipefail
 
 # Resolve repo + activate environment via the project-wide contract.
-# It sets REPO_ROOT (using SLURM_SUBMIT_DIR when available), cd's there,
-# sources .env (so $COMET_API_KEY etc. are visible to python), and activates
-# the conda environment.
-_sc_here="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# SLURM copies the batch script into /var/spool/slurmd/jobNNN/, so
+# $BASH_SOURCE points at the spool copy — relying on $(dirname $0) breaks.
+# Use $SLURM_SUBMIT_DIR (where ``sbatch`` was issued; SLURM also makes it the
+# job's initial CWD) when present, fall back to $BASH_SOURCE for interactive
+# ``bash sh_files/bench_dataloader.sh`` runs.
+if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+  _sc_here="${SLURM_SUBMIT_DIR}/sh_files"
+else
+  _sc_here="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+fi
 # shellcheck source=sh_files/_shell_contract.sh
 source "${_sc_here}/_shell_contract.sh" "${_sc_here}"
 
