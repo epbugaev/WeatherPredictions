@@ -1,5 +1,9 @@
 # refer to the code from HorNet, Thanks!
 # https://github.com/raoyongming/HorNet
+#
+# Brought into this project via OpenSTL (https://github.com/chengtan9907/OpenSTL);
+# kept here as part of WeatherPredictions. No modifications to layer math;
+# only file path and package name were changed.
 
 import torch
 import torch.nn as nn
@@ -24,7 +28,7 @@ class gnconv(nn.Module):
             self.dwconv = get_dwconv(sum(self.dims), 7, True)
         else:
             self.dwconv = gflayer(sum(self.dims), h=h, w=w)
-        
+
         self.proj_out = nn.Conv2d(dim, dim, 1)
 
         self.pws = nn.ModuleList(
@@ -51,9 +55,9 @@ class gnconv(nn.Module):
         return x
 
 class LayerNorm(nn.Module):
-    r""" LayerNorm that supports two data formats: channels_last (default) or channels_first. 
-    The ordering of the dimensions in the inputs. channels_last corresponds to inputs with 
-    shape (batch_size, height, width, channels) while channels_first corresponds to inputs 
+    r""" LayerNorm that supports two data formats: channels_last (default) or channels_first.
+    The ordering of the dimensions in the inputs. channels_last corresponds to inputs with
+    shape (batch_size, height, width, channels) while channels_first corresponds to inputs
     with shape (batch_size, channels, height, width).
     """
     def __init__(self, normalized_shape, eps=1e-6, data_format="channels_last"):
@@ -63,9 +67,9 @@ class LayerNorm(nn.Module):
         self.eps = eps
         self.data_format = data_format
         if self.data_format not in ["channels_last", "channels_first"]:
-            raise NotImplementedError 
+            raise NotImplementedError
         self.normalized_shape = (normalized_shape, )
-    
+
     def forward(self, x):
         if self.data_format == "channels_last":
             return F.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)

@@ -1,5 +1,9 @@
 # refer to the code from MogaNet, Thanks!
 # https://github.com/Westlake-AI/MogaNet/blob/main/models/moganet.py
+#
+# Brought into this project via OpenSTL (https://github.com/chengtan9907/OpenSTL);
+# kept here as part of WeatherPredictions. No modifications to layer math;
+# only file path and package name were changed.
 
 import torch
 import torch.nn as nn

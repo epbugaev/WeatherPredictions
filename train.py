@@ -1,268 +1,239 @@
-"""Unified training script driven by YAML config files.
+"""Unified training entry point driven by YAML config files.
 
-Usage:
-    python train.py --config configs/simvp.yaml
-    python train.py --config configs/simvp.yaml --gpus_per_node 8 --nodes 1
+Run with ``torchrun`` for single- or multi-GPU/multi-node training::
+
+    torchrun --standalone --nproc_per_node=1 train.py --config configs/simvp.yaml
+    torchrun --nnodes=2 --nproc_per_node=8 train.py --config configs/simvp.yaml
+
+``train.py`` reads the YAML, looks up the model / dataset / strategy by their
+registry keys (no local imports, no model-specific if-chains) and hands
+everything to ``trainer.Trainer.fit``. DDP, AMP, checkpointing, early stopping
+and Comet logging all live in dedicated ``utils`` modules.
 """
 
-import comet_ml
+from __future__ import annotations
 
-import yaml
-import lightning as L
-from lightning.pytorch.callbacks.early_stopping import EarlyStopping
-from lightning.pytorch.callbacks import ModelCheckpoint
-from lightning.pytorch.strategies import DDPStrategy
-from torch.utils.data import DataLoader, Subset
-from argparse import ArgumentParser
+import argparse
 import datetime
 import os
 import random
 import string
-import sys
+from typing import Any
 
+import torch
+import yaml
+from torch.utils.data import DataLoader, Subset
+
+import Data  # noqa: F401  — registers datasets in utils.registry.DATASETS
+import Models  # noqa: F401  — registers models in utils.registry.MODELS
+import training_strategies  # noqa: F401  — registers strategies in utils.registry.STRATEGIES
+from trainer import Trainer, TrainerConfig
+from utils.distributed import cleanup_distributed, setup_distributed
+from utils.experiment import build_experiment
 from utils.metrics import Metrics
-from lightning.pytorch.loggers import CometLogger
+from utils.registry import get_dataset, get_model, get_strategy
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-def load_config(path):
+def load_config(path: str) -> dict[str, Any]:
+    """Read a YAML config file into a plain dict."""
     with open(path) as f:
         return yaml.safe_load(f)
 
 
-def build_model(model_cfg):
-    """Instantiate a model from the config's model section."""
-    model_type = model_cfg["type"]
-    params = model_cfg.get("params", {})
+def build_dataset(data_cfg: dict[str, Any], split: str):
+    """Build the dataset for ``split`` from the YAML ``data`` section.
 
-    if model_type == "SimVP":
-        from Models.SimVP import SimVP_Model
-        if "in_shape" in params:
-            params["in_shape"] = tuple(params["in_shape"])
-        return SimVP_Model(**params)
+    Args:
+        data_cfg: ``data`` block from the YAML config.
+        split: ``"train"`` or ``"val"``; split-level keys override common ones.
 
-    elif model_type == "WeatherGFT":
-        from Models.WeatherGFT import GFT
-        return GFT(**params)
-
-    elif model_type == "WeatherGFTSingle":
-        from Models.WeatherGFTSingle import GFT
-        return GFT(**params)
-
-    elif model_type == "PredFormerGFT":
-        from Models.PredFormerGFT import PredFormer_Model
-        return PredFormer_Model(params)
-
-    elif model_type == "PredFormer":
-        from Models.PredFormer import PredFormer_Model
-        return PredFormer_Model(params)
-
-    elif model_type == "PI-IAM4VP":
-        from Models.PI_IAM4VP import IAM4VP
-        return IAM4VP(**params)
-
-    elif model_type == "PredRNN":
-        from Models.PredRNN import PredRNN_Model
-        configs = params.pop("configs", {})
-        if "in_shape" in configs:
-            configs["in_shape"] = tuple(configs["in_shape"])
-        if "num_hidden" in params:
-            params["num_hidden"] = tuple(params["num_hidden"])
-        return PredRNN_Model(configs=configs, **params)
-
-    else:
-        raise ValueError(f"Unknown model type: {model_type}")
-
-
-def build_dataset(data_cfg, split):
-    """Build a dataset for the given split ('train' or 'val').
-
-    Parameters from the split sub-key override common data-level parameters.
+    Returns:
+        A ``torch.utils.data.Dataset`` instance.
     """
     version = data_cfg.get("dataset_version", "v3")
     split_cfg = data_cfg.get(split, {})
 
-    params = {
+    params: dict[str, Any] = {
         "start_time": split_cfg["start_time"],
         "end_time": split_cfg["end_time"],
         "include_target": split_cfg.get("include_target", data_cfg.get("include_target", False)),
         "lead_time": split_cfg.get("lead_time", data_cfg.get("lead_time", 1)),
         "interval": split_cfg.get("interval", data_cfg.get("interval", 1)),
-        "muti_target_steps": split_cfg.get("muti_target_steps", data_cfg.get("muti_target_steps", 1)),
+        "muti_target_steps": split_cfg.get(
+            "muti_target_steps", data_cfg.get("muti_target_steps", 1)
+        ),
+        "start_time_x": data_cfg.get("start_time_x", 0),
+        "end_time_x": data_cfg.get("end_time_x", 1),
+        "start_time_y": data_cfg.get("start_time_y", 0),
+        "end_time_y": data_cfg.get("end_time_y", 1),
     }
 
     cut = split_cfg.get("cut", data_cfg.get("cut"))
     if cut is not None:
         params["cut"] = cut
 
-    if version == "v3":
-        from Data.weatherbench_128_v3 import WeatherBench128
-        params["start_time_x"] = data_cfg.get("start_time_x", 0)
-        params["end_time_x"] = data_cfg.get("end_time_x", 1)
-        params["start_time_y"] = data_cfg.get("start_time_y", 0)
-        params["end_time_y"] = data_cfg.get("end_time_y", 1)
-    elif version == "v2":
-        from Data.weatherbench_128_v2 import WeatherBench128
-    elif version == "v1":
-        from Data.weatherbench_128 import WeatherBench128
-    else:
-        raise ValueError(f"Unknown dataset version: {version}")
-
-    return WeatherBench128(**params)
+    return get_dataset(version)(**params)
 
 
-def build_litmodel(training_cfg, model, metrics, steps_per_epoch):
-    """Wrap the model in a LightningModule training wrapper."""
+def build_optimizer_and_scheduler(
+    model: torch.nn.Module,
+    training_cfg: dict[str, Any],
+    steps_per_epoch: int,
+) -> tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LRScheduler]:
+    """Build AdamW + CosineAnnealingLR matching the legacy BaseModel.
+
+    The original LitModels used ``betas=(0.9, 0.9)`` and ``weight_decay=0.0``;
+    those values are preserved here to maintain numerical parity. The
+    scheduler's ``T_max`` is ``(steps_per_epoch + 1) * max_epoch`` exactly as
+    in ``LitModels/basemodel.py``.
+    """
+    lr = training_cfg.get("lr", 1e-4)
+    eta_min = training_cfg.get("eta_min", 0.0)
+    max_epoch = training_cfg.get("max_epoch", 20)
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=lr, weight_decay=0.0, betas=(0.9, 0.9)
+    )
+    total_steps = (steps_per_epoch + 1) * max_epoch
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=total_steps, eta_min=eta_min
+    )
+    return optimizer, scheduler
+
+
+def build_strategy(training_cfg: dict[str, Any]):
+    """Instantiate the ``StepStrategy`` indicated by ``training.litmodel``."""
     litmodel_type = training_cfg.get("litmodel", "mutiout_f")
-
-    kwargs = {
-        "model": model,
-        "lr": training_cfg.get("lr", 1e-4),
-        "eta_min": training_cfg.get("eta_min", 0.0),
-        "max_epoch": training_cfg.get("max_epoch", 20),
-        "steps_per_epoch": steps_per_epoch,
-        "loss_type": training_cfg.get("loss_type", "MAE"),
-        "metrics": metrics,
-    }
-
-    extra = training_cfg.get("extra_kwargs", {})
-    kwargs.update(extra)
-
-    if litmodel_type == "mutiout_f":
-        from LitModels.mutiout_f import MutiOut
-    elif litmodel_type == "multiout_double":
-        from LitModels.multiout_double import MutiOut
-    elif litmodel_type == "mutiout":
-        from LitModels.mutiout import MutiOut
-    elif litmodel_type == "mutiout_imvp":
-        from LitModels.mutiout_imvp import MutiOut
-    elif litmodel_type == "mutiout_imvp_small_world":
-        from LitModels.mutiout_imvp_small_world import MutiOut
-    elif litmodel_type == "mutiout_predrnn":
-        from LitModels.mutiout_predrnn import MutiOut
-    else:
-        raise ValueError(f"Unknown litmodel type: {litmodel_type}")
-
-    return MutiOut(**kwargs)
+    extra = dict(training_cfg.get("extra_kwargs", {}))
+    extra["loss_type"] = training_cfg.get("loss_type", "MAE")
+    strategy_cls = get_strategy(litmodel_type)
+    return strategy_cls(**extra)
 
 
-def train(config, devices, num_nodes, config_path=None):
-    # ── Model ──
-    torch_model = build_model(config["model"])
+def _make_run_id() -> str:
+    """Compose the run-id used as the checkpoint subdir name."""
+    return (
+        datetime.datetime.now().strftime("%Y-%m-%d-%H:%M")
+        + "".join(random.choices(string.ascii_lowercase + string.digits, k=5))
+    )
 
-    # ── Data ──
+
+def train(config: dict[str, Any], config_path: str | None = None) -> None:
+    """End-to-end training routine driven entirely by ``config``."""
+    dist_info = setup_distributed()
+    is_main = dist_info.rank == 0
+
+    model = get_model(config["model"]["type"])(**config["model"].get("params", {}))
+
     data_cfg = config["data"]
     train_data = build_dataset(data_cfg, "train")
     valid_data = build_dataset(data_cfg, "val")
 
-    # Optional subset sampling (e.g. PredRNN takes every Nth sample)
     train_subset_step = data_cfg.get("train", {}).get("subset_step")
     if train_subset_step:
         indices = list(range(0, len(train_data), train_subset_step))[:-5]
-        train_data_raw = train_data
         train_data = Subset(train_data, indices)
 
     train_cfg = data_cfg.get("train", {})
     val_cfg = data_cfg.get("val", {})
     num_workers = data_cfg.get("num_workers", 4)
 
+    train_sampler = (
+        torch.utils.data.distributed.DistributedSampler(
+            train_data,
+            shuffle=train_cfg.get("shuffle", True),
+            num_replicas=dist_info.world_size,
+            rank=dist_info.rank,
+        )
+        if dist_info.is_distributed
+        else None
+    )
+    val_sampler = (
+        torch.utils.data.distributed.DistributedSampler(
+            valid_data,
+            shuffle=False,
+            num_replicas=dist_info.world_size,
+            rank=dist_info.rank,
+        )
+        if dist_info.is_distributed
+        else None
+    )
+
     train_loader = DataLoader(
         train_data,
         batch_size=train_cfg.get("batch_size", 16),
-        shuffle=train_cfg.get("shuffle", True),
+        shuffle=(train_sampler is None) and train_cfg.get("shuffle", True),
+        sampler=train_sampler,
         num_workers=num_workers,
     )
     valid_loader = DataLoader(
         valid_data,
         batch_size=val_cfg.get("batch_size", 16),
-        shuffle=val_cfg.get("shuffle", False),
+        shuffle=False,
+        sampler=val_sampler,
         num_workers=num_workers,
     )
 
-    # ── LitModel ──
     training_cfg = config["training"]
-    world_size = devices * num_nodes
-    steps_per_epoch = len(train_loader) // world_size
+    steps_per_epoch = len(train_loader) // max(dist_info.world_size, 1)
 
-    # Metrics need mean/std tensors — handle Subset wrapper
     metrics_source = train_data.dataset if isinstance(train_data, Subset) else train_data
     metrics = Metrics(metrics_source.data_mean_tensor, metrics_source.data_std_tensor)
 
-    lit_model = build_litmodel(training_cfg, torch_model, metrics, steps_per_epoch)
+    optimizer, scheduler = build_optimizer_and_scheduler(model, training_cfg, steps_per_epoch)
+    strategy = build_strategy(training_cfg)
 
-    # ── Checkpoint & callbacks ──
     exp_cfg = config.get("experiment", {})
     logging_cfg = config.get("logging", {})
-
     exp_name = exp_cfg.get("name", "experiment")
     checkpoint_base = logging_cfg.get("checkpoint_base", "./checkpoints/")
-    run_id = (
-        datetime.datetime.now().strftime("%Y-%m-%d-%H:%M")
-        + "".join(random.choices(string.ascii_lowercase + string.digits, k=5))
-    )
-    save_path = os.path.join(checkpoint_base, exp_name, run_id)
+    checkpoint_dir = os.path.join(checkpoint_base, exp_name, _make_run_id())
 
-    checkpoint_callback = ModelCheckpoint(
-        dirpath=save_path,
-        monitor="val_loss",
-        save_last=True,
-        save_top_k=1,
-        mode="min",
-        save_on_train_epoch_end=True,
-        filename="{epoch:02d}-{val_loss:.4f}",
-    )
-    early_stopping_callback = EarlyStopping(
-        monitor="val_loss",
-        mode="min",
-        patience=training_cfg.get("early_stopping_patience", 5),
-        check_finite=True,
-    )
-
-    # ── Comet ML ──
-    comet_api_key = logging_cfg.get("comet_api_key", "")
-    os.environ["COMET_API_KEY"] = comet_api_key
-    os.environ["COMET_EXPERIMENT_KEY"] = "".join(
-        random.choices(string.ascii_lowercase + string.digits, k=50)
-    )
-    comet_ml.login()
-
-    comet_project = logging_cfg.get("comet_project", "WeatherPredictions")
-    logger = CometLogger(project_name=comet_project, experiment_name=exp_name)
-
+    experiment = build_experiment(logging_cfg, experiment_name=exp_name, is_main=is_main)
     log_code_file = logging_cfg.get("log_code_file")
-    if log_code_file:
-        logger.experiment.log_code(file_name=log_code_file)
+    if log_code_file and is_main:
+        experiment.log_code(log_code_file)
 
-    # ── Trainer ──
     trainer_cfg = config.get("trainer", {})
-    trainer = L.Trainer(
-        default_root_dir="./",
-        log_every_n_steps=trainer_cfg.get("log_every_n_steps", 5),
-        precision=trainer_cfg.get("precision", 32),
+    cfg = TrainerConfig(
         max_epochs=training_cfg.get("max_epoch", 20),
-        logger=logger,
-        accelerator="gpu",
-        devices=devices,
-        num_nodes=num_nodes,
-        strategy=DDPStrategy(static_graph=trainer_cfg.get("static_graph", True)),
-        callbacks=[checkpoint_callback, early_stopping_callback],
+        precision=trainer_cfg.get("precision", 32),
+        log_every_n_steps=trainer_cfg.get("log_every_n_steps", 5),
+        static_graph=trainer_cfg.get("static_graph", True),
+        find_unused_parameters=trainer_cfg.get("find_unused_parameters", False),
+        early_stopping_patience=training_cfg.get("early_stopping_patience", 5),
+        checkpoint_dir=checkpoint_dir,
+        float32_matmul_precision=trainer_cfg.get("float32_matmul_precision"),
     )
 
-    trainer.print(f"[config] {os.path.abspath(config_path) if config_path else 'N/A'}")
-    trainer.print(f"[experiment] {exp_name}")
-    trainer.print(f"[checkpoint path] {save_path}")
+    if is_main:
+        print(f"[config] {os.path.abspath(config_path) if config_path else 'N/A'}")
+        print(f"[experiment] {exp_name}")
+        print(f"[checkpoint path] {checkpoint_dir}")
+        print(f"[distributed] world_size={dist_info.world_size} rank={dist_info.rank}")
 
-    trainer.fit(model=lit_model, train_dataloaders=train_loader, val_dataloaders=valid_loader)
+    trainer = Trainer(cfg=cfg, dist_info=dist_info)
+    trainer.fit(
+        model=model,
+        train_loader=train_loader,
+        val_loader=valid_loader,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        strategy=strategy,
+        experiment=experiment,
+        metrics=metrics,
+        full_config=config,
+    )
 
-    trainer.print("train over")
+    experiment.close()
+    cleanup_distributed()
 
 
 if __name__ == "__main__":
-    parser = ArgumentParser()
+    parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config file")
-    parser.add_argument("--gpus_per_node", type=int, default=1)
-    parser.add_argument("--nodes", type=int, default=1)
+    parser.add_argument("--gpus_per_node", type=int, default=None, help="(legacy, ignored)")
+    parser.add_argument("--nodes", type=int, default=None, help="(legacy, ignored)")
     args = parser.parse_args()
 
     config = load_config(args.config)
-    train(config, devices=args.gpus_per_node, num_nodes=args.nodes, config_path=args.config)
+    train(config, config_path=args.config)

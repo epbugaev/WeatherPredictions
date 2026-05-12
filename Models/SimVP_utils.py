@@ -8,7 +8,7 @@ from timm.models.mlp_mixer import MixerBlock
 from timm.models.swin_transformer import SwinTransformerBlock, window_partition, window_reverse
 from timm.models.vision_transformer import Block as ViTBlock
 
-from Models.layers_openstl import (HorBlock, ChannelAggregationFFN, MultiOrderGatedAggregation,
+from Models.blocks import (HorBlock, ChannelAggregationFFN, MultiOrderGatedAggregation,
                      PoolFormerBlock, CBlock, SABlock, MixMlp, VANBlock)
 
 import torch

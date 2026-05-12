@@ -1,5 +1,9 @@
 # refer to the code from PoolFormer, Thanks!
 # https://github.com/sail-sg/poolformer/blob/main/models/poolformer.py
+#
+# Brought into this project via OpenSTL (https://github.com/chengtan9907/OpenSTL);
+# kept here as part of WeatherPredictions. No modifications to layer math;
+# only file path and package name were changed.
 
 import torch
 import torch.nn as nn
@@ -34,7 +38,7 @@ class Mlp(nn.Module):
     Implementation of MLP with 1*1 convolutions.
     Input: tensor with shape [B, C, H, W]
     """
-    def __init__(self, in_features, hidden_features=None, 
+    def __init__(self, in_features, hidden_features=None,
                  out_features=None, act_layer=nn.GELU, drop=0.):
         super().__init__()
         out_features = out_features or in_features
@@ -82,7 +86,7 @@ class PoolFormerBlock(nn.Module):
         self.token_mixer = Pooling(pool_size=pool_size)
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, 
+        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim,
                        act_layer=act_layer, drop=drop)
         # The following two techniques are useful to train deep PoolFormers.
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()

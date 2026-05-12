@@ -1,5 +1,9 @@
 # refer to the code from VAN, Thanks!
 # https://github.com/Visual-Attention-Network/VAN-Classification
+#
+# Brought into this project via OpenSTL (https://github.com/chengtan9907/OpenSTL);
+# kept here as part of WeatherPredictions. No modifications to layer math;
+# only file path and package name were changed.
 
 import math
 import torch
@@ -66,7 +70,7 @@ class LKA(nn.Module):
 
 
     def forward(self, x):
-        u = x.clone()        
+        u = x.clone()
         attn = self.conv0(x)
         attn = self.conv_spatial(attn)
         attn = self.conv1(attn)

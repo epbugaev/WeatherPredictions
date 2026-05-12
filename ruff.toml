@@ -1,0 +1,11 @@
+line-length = 100
+
+[lint]
+select = ["F", "E", "W", "B", "I", "T100"]
+
+[lint.per-file-ignores]
+# CLI entry points and the trainer legitimately print runtime status to stdout.
+"trainer.py" = ["T201"]
+"train.py" = ["T201"]
+"train/_common.py" = ["T201"]
+"utils/checkpointing.py" = ["T201"]
