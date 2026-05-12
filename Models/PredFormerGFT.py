@@ -710,8 +710,7 @@ class PredFormer_Model(nn.Module):
 
         # Patch Embedding для входа x
         x_embed = self.to_patch_embedding(x) # [B, T, num_patches, dim]
-        print('x_embed shape:', x_embed.shape, mask_embed.shape)
-        x_combined = x_embed + mask_embed       
+        x_combined = x_embed + mask_embed
 
         # Position Embedding
         x_combined += self.pos_embedding.to(x.device)
