@@ -38,9 +38,13 @@
 
 set -euo pipefail
 
+# Resolve repo + activate environment via the project-wide contract.
+# It sets REPO_ROOT (using SLURM_SUBMIT_DIR when available), cd's there,
+# sources .env (so $COMET_API_KEY etc. are visible to python), and activates
+# the conda environment.
 _sc_here="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-REPO_ROOT="$(cd "${_sc_here}/.." && pwd)"
-cd "${REPO_ROOT}"
+# shellcheck source=sh_files/_shell_contract.sh
+source "${_sc_here}/_shell_contract.sh" "${_sc_here}"
 
 BENCH_CONFIG="${BENCH_CONFIG:-bench_predformer_usa}"
 BENCH_TAG="${BENCH_TAG:-step1_cold}"
@@ -48,7 +52,7 @@ export BENCH_MAX_STEPS="${BENCH_MAX_STEPS:-60}"
 
 CFG_PATH="configs/${BENCH_CONFIG}.yaml"
 if [[ ! -f "${CFG_PATH}" ]]; then
-  echo "[bench] config not found: ${CFG_PATH}" >&2
+  echo "[bench] config not found: ${CFG_PATH} (cwd=$(pwd) REPO_ROOT=${REPO_ROOT:-<unset>})" >&2
   exit 1
 fi
 
@@ -68,6 +72,9 @@ export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 # Avoid port clash with concurrent production launch_train (29500).
 export MASTER_PORT="${MASTER_PORT:-29501}"
 
+NNODES="${NNODES:-${SLURM_JOB_NUM_NODES:-1}}"
+NGPUS="${NGPUS:-${SLURM_GPUS_ON_NODE:-1}}"
+
 # Background GPU sampler. ``dmon`` outputs one row per second per GPU.
 nvidia-smi dmon -s pucvmet -d 1 -o T > "${TRACE_DIR}/dmon.csv" 2>&1 &
 DMON_PID=$!
@@ -75,8 +82,16 @@ trap 'kill ${DMON_PID} 2>/dev/null || true' EXIT
 
 echo "[bench] tag=${BENCH_TAG} config=${BENCH_CONFIG} steps=${BENCH_MAX_STEPS} trace=${TRACE_DIR}"
 echo "[bench] env: BENCH_MAX_STEPS=${BENCH_MAX_STEPS} PROFILE_TRACE_DIR=${PROFILE_TRACE_DIR}"
+echo "[bench] cwd=$(pwd) REPO_ROOT=${REPO_ROOT} host=$(hostname)"
+echo "[bench] python=$(command -v python) git_sha=$(cat "${TRACE_DIR}/git_sha.txt")"
 
-bash "${_sc_here}/launch_train.sh" "${BENCH_CONFIG}" 2>&1 | tee "${TRACE_DIR}/bench.log"
+# Call torchrun inline (no need to re-source _shell_contract via launch_train.sh).
+python -m torch.distributed.run \
+    --nnodes "${NNODES}" \
+    --nproc_per_node "${NGPUS}" \
+    --rdzv_backend=c10d \
+    --rdzv_endpoint "127.0.0.1:${MASTER_PORT}" \
+    train.py --config "${CFG_PATH}" 2>&1 | tee "${TRACE_DIR}/bench.log"
 
 echo "[bench] done: ${TRACE_DIR}"
 ls -la "${TRACE_DIR}"
