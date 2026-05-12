@@ -205,6 +205,14 @@ class PredFormer_Model(nn.Module):
         self.soil_mask = torch.Tensor(np.array(self.ds.slt)) # shape = [H, W]
         self.lsm_mask = torch.Tensor(np.array(self.ds.lsm)) # shape = [H, W]
         self.static_masks = torch.stack([self.orography_mask, self.soil_mask, self.lsm_mask], dim=0).unsqueeze(0) # [1, 3, H, W]
+        cut = model_config.get('cut')
+        if cut is not None:
+            self.static_masks = self.static_masks[..., cut[0][0]:cut[0][1], cut[1][0]:cut[1][1]]
+        if self.static_masks.shape[-2:] != (self.image_height, self.image_width):
+            raise ValueError(
+                f"Static mask shape {tuple(self.static_masks.shape[-2:])} does not match "
+                f"configured image shape {(self.image_height, self.image_width)}"
+            )
         self.num_masks = 3 # Определяем количество масок
 
         assert self.image_height % self.patch_size == 0, 'Image height must be divisible by the patch size.'
