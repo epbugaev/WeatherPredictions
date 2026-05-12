@@ -3,4 +3,21 @@ channels:
   - defaults
 dependencies:
   - python=3.10
-prefix: /home/ebugaev/.conda/envs/weatherpred-gft-fix
+  - pip
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cu124
+      - torch==2.6.0+cu124
+      - torchvision==0.21.0+cu124
+      - triton==3.2.0
+      - numpy==1.26.0
+      - pandas==2.2.3
+      - matplotlib==3.10.8
+      - xarray==2024.7.0
+      - h5netcdf==1.6.1
+      - PyYAML==6.0.2
+      - timm==0.6.11
+      - einops==0.8.2
+      - fairscale==0.4.13
+      - comet_ml==3.55.0
+      - tqdm==4.67.3
+      - wandb==0.18.7
