@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange
 from torch import nn
-from timm.models.layers import trunc_normal_
+from timm.layers import trunc_normal_
 
 
 class LayerNorm(nn.Module):
