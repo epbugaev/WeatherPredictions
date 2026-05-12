@@ -138,11 +138,7 @@ def create_loader_(dataset,
         worker_init_fn=partial(worker_init, worker_seeding=worker_seeding),
         persistent_workers=persistent_workers
     )
-    try:
-        loader = loader_class(dataset, **loader_args)
-    except TypeError:
-        loader_args.pop('persistent_workers')  # only in Pytorch 1.7+
-        loader = loader_class(dataset, **loader_args)
+    loader = loader_class(dataset, **loader_args)
 
     if use_prefetcher:
         loader = PrefetchLoader(
@@ -221,11 +217,7 @@ def create_loader(dataset,
         worker_init_fn=partial(worker_init, worker_seeding=worker_seeding),
         persistent_workers=persistent_workers
     )
-    try:
-        loader = loader_class(dataset, **loader_args)
-    except TypeError:
-        loader_args.pop('persistent_workers')  # only in Pytorch 1.7+
-        loader = loader_class(dataset, **loader_args)
+    loader = loader_class(dataset, **loader_args)
 
     return loader
 
