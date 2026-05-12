@@ -4,6 +4,7 @@ logs
 notebooks/
 example_data/
 checkpoints/
+bench_logs/
 *.ipynb_checkpoints
 pics/
 __pycache__/
@@ -26,6 +27,7 @@ job/*.out
 *.txt
 *.csv
 *.sh
+!sh_files/*.sh
 wandb/
 build/
 develop-eggs/

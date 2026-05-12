@@ -7,6 +7,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `sh_files/bench_dataloader.sh` — SLURM submit script for diagnostic
+  dataloader benchmarks. Exports `BENCH_MAX_STEPS` and `PROFILE_TRACE_DIR`
+  so `trainer.py` runs a short profiled epoch and exits before validation
+  / checkpoint writes. Writes `trace.json` (torch.profiler), `dmon.csv`
+  (`nvidia-smi dmon`), `bench.log`, `config_snapshot.yaml` and `git_sha.txt`
+  to `bench_logs/<TS>_<host>_<jobid>_<tag>/`.
+- `configs/bench_predformer_usa.yaml` — short bench config: `max_epoch=1`,
+  logging silenced (`log_every_n_steps=1000`), early-stopping disabled,
+  trimmed val date range. Paired with `BENCH_MAX_STEPS` for a hard
+  step-count cap.
+- `bench_logs/` — gitignored output directory for bench artefacts.
 - `trainer.py` with a pure-PyTorch `Trainer` (DDP via `DistributedDataParallel`,
   AMP-ready via `torch.amp`, step-cadenced LR scheduler, EarlyStopping, top-1
   and `last.pt` checkpointing).
@@ -57,6 +68,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `normalization_x/_y`, `from_numpy_x/_y`, `stack_x/_y`) so per-phase
   cost is visible in profiler traces. Tags are no-ops when the profiler
   is disabled.
+- `trainer.py`: when `PROFILE_TRACE_DIR` is set, the train loop is wrapped
+  in `torch.profiler.profile` (Chrome trace dumped after
+  warmup=10 + active=40 steps). When `BENCH_MAX_STEPS` is set, the loop
+  breaks after that many steps and `fit()` skips validation and
+  checkpoint writes. Both env vars default unset, so production behaviour
+  is unchanged.
 
 ### Fixed
 

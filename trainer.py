@@ -13,6 +13,7 @@ schedule, matching the previous training configuration).
 from __future__ import annotations
 
 import os
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
 
@@ -20,7 +21,13 @@ import torch
 from torch import nn
 from torch.amp.autocast_mode import autocast
 from torch.amp.grad_scaler import GradScaler
-from torch.profiler import record_function
+from torch.profiler import (
+    ProfilerActivity,
+    profile,
+    record_function,
+    schedule,
+    tensorboard_trace_handler,
+)
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
@@ -34,6 +41,18 @@ from utils.metrics import Metrics
 # Sentinel returned by ``next(iter, default)`` when the loader is exhausted.
 # Used in the training loop to mark end-of-iteration without try/except (LBYL).
 _END_OF_LOADER = object()
+
+# Bench-mode env vars, exported by ``sh_files/bench_dataloader.sh``:
+#   BENCH_MAX_STEPS:  if > 0, the training loop breaks after this many
+#                     optimisation steps and ``fit()`` skips validation and
+#                     checkpoint writes.
+#   PROFILE_TRACE_DIR: if set, the training loop is wrapped in
+#                     ``torch.profiler.profile``; the chrome-trace JSON is
+#                     written to this directory after warmup+active steps.
+# Both default unset, leaving production behaviour unchanged.
+_BENCH_MAX_STEPS = int(os.environ.get("BENCH_MAX_STEPS", "0"))
+_PROFILE_TRACE_DIR = os.environ.get("PROFILE_TRACE_DIR") or None
+_BENCH_MODE = bool(_BENCH_MAX_STEPS) or bool(_PROFILE_TRACE_DIR)
 
 
 def _precision_to_amp(precision: int | str) -> tuple[bool, torch.dtype]:
@@ -165,6 +184,16 @@ class Trainer:
                 global_step=global_step,
             )
 
+            if _BENCH_MODE:
+                if self.dist.rank == 0:
+                    print(
+                        f"[bench] mode active "
+                        f"(BENCH_MAX_STEPS={_BENCH_MAX_STEPS}, "
+                        f"PROFILE_TRACE_DIR={_PROFILE_TRACE_DIR}); "
+                        f"skipping validation and checkpointing"
+                    )
+                break
+
             val_metrics = self._validate(
                 model=model,
                 loader=val_loader,
@@ -225,55 +254,84 @@ class Trainer:
         ``optimizer_step``, ``scheduler_step``, ``log_metrics``) to make
         per-phase timing visible in profiler traces. Tags are no-ops when
         the profiler is disabled.
+
+        Bench-mode shortcuts (driven by ``BENCH_MAX_STEPS`` /
+        ``PROFILE_TRACE_DIR`` env vars; both unset in production):
+
+        * if ``PROFILE_TRACE_DIR`` is set, the whole loop runs inside a
+          ``torch.profiler.profile`` context that dumps a Chrome-tracing
+          JSON to that directory after warmup+active iterations;
+        * if ``BENCH_MAX_STEPS`` is set, the loop breaks after that many
+          optimisation steps (no extra epochs, no validation — see
+          ``fit()`` for the rank-0 short-circuit).
         """
         model.train()
-        loader_iter = iter(loader)
-        while True:
-            with record_function("data_wait"):
-                batch = next(loader_iter, _END_OF_LOADER)
-            if batch is _END_OF_LOADER:
-                break
 
-            with record_function("to_device"):
-                batch = _to_device(batch, self.dist.device)
-            ctx = StepContext(
-                device=self.dist.device,
-                optimizer=optimizer,
-                scaler=scaler,
-                experiment=experiment,
-                metrics=metrics,
-                global_step=global_step,
-                epoch=epoch,
-                is_main_process=self.dist.rank == 0,
+        prof_ctx = nullcontext()
+        if _PROFILE_TRACE_DIR:
+            prof_ctx = profile(
+                activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                schedule=schedule(wait=0, warmup=10, active=40, repeat=1),
+                on_trace_ready=tensorboard_trace_handler(_PROFILE_TRACE_DIR),
+                record_shapes=False,
+                profile_memory=False,
+                with_stack=False,
             )
 
-            if strategy.manual_optimization:
-                with record_function("train_step_manual"):
-                    step_metrics = strategy.train_step(model, batch, ctx)
-            else:
-                with record_function("zero_grad"):
-                    optimizer.zero_grad(set_to_none=True)
-                with record_function("forward"):
-                    with autocast(
-                        device_type=self.dist.device.type,
-                        dtype=self.amp_dtype,
-                        enabled=self.amp_enabled,
-                    ):
+        with prof_ctx as prof:
+            loader_iter = iter(loader)
+            while True:
+                with record_function("data_wait"):
+                    batch = next(loader_iter, _END_OF_LOADER)
+                if batch is _END_OF_LOADER:
+                    break
+
+                with record_function("to_device"):
+                    batch = _to_device(batch, self.dist.device)
+                ctx = StepContext(
+                    device=self.dist.device,
+                    optimizer=optimizer,
+                    scaler=scaler,
+                    experiment=experiment,
+                    metrics=metrics,
+                    global_step=global_step,
+                    epoch=epoch,
+                    is_main_process=self.dist.rank == 0,
+                )
+
+                if strategy.manual_optimization:
+                    with record_function("train_step_manual"):
                         step_metrics = strategy.train_step(model, batch, ctx)
-                with record_function("backward"):
-                    loss = step_metrics["loss"]
-                    scaler.scale(loss).backward()
-                with record_function("optimizer_step"):
-                    scaler.step(optimizer)
-                    scaler.update()
+                else:
+                    with record_function("zero_grad"):
+                        optimizer.zero_grad(set_to_none=True)
+                    with record_function("forward"):
+                        with autocast(
+                            device_type=self.dist.device.type,
+                            dtype=self.amp_dtype,
+                            enabled=self.amp_enabled,
+                        ):
+                            step_metrics = strategy.train_step(model, batch, ctx)
+                    with record_function("backward"):
+                        loss = step_metrics["loss"]
+                        scaler.scale(loss).backward()
+                    with record_function("optimizer_step"):
+                        scaler.step(optimizer)
+                        scaler.update()
 
-            with record_function("scheduler_step"):
-                scheduler.step()
-            global_step += 1
+                with record_function("scheduler_step"):
+                    scheduler.step()
+                global_step += 1
 
-            if global_step % self.cfg.log_every_n_steps == 0:
-                with record_function("log_metrics"):
-                    self._log_train_metrics(step_metrics, experiment, global_step)
+                if prof is not None:
+                    prof.step()
+
+                if _BENCH_MAX_STEPS and global_step >= _BENCH_MAX_STEPS:
+                    break
+
+                if global_step % self.cfg.log_every_n_steps == 0:
+                    with record_function("log_metrics"):
+                        self._log_train_metrics(step_metrics, experiment, global_step)
 
         return global_step
 
