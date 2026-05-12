@@ -5,9 +5,8 @@ dependencies:
   - python=3.10
   - pip
   - pip:
-      - --extra-index-url https://download.pytorch.org/whl/cu124
-      - torch==2.6.0+cu124
-      - torchvision==0.21.0+cu124
+      - torch==2.6.0
+      - torchvision==0.21.0
       - triton==3.2.0
       - numpy==1.26.0
       - pandas==2.2.3
