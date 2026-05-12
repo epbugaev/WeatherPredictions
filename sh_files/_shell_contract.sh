@@ -45,7 +45,6 @@ fi
 export REPO_ROOT
 cd "${REPO_ROOT}" || return 1 2>/dev/null || exit 1
 export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
-export PYTHONNOUSERSITE=1
 
 mkdir -p "${REPO_ROOT}/logs"
 

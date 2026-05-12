@@ -63,7 +63,7 @@ echo "[launch_train] python=$(command -v python)"
 MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 MASTER_PORT="${MASTER_PORT:-29500}"
 
-exec torchrun \
+exec python -m torch.distributed.run \
   --nnodes "${NNODES}" \
   --nproc_per_node "${NGPUS}" \
   --rdzv_backend=c10d \
