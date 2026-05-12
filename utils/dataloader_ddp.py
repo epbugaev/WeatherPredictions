@@ -342,16 +342,8 @@ class WeatherBenchDataset(Dataset):
 
     def _load_data_xarray(self, data_name, levels):
         """Loading full data with xarray"""
-        try:
-            dataset = xr.open_mfdataset(self.data_root+'/{}/{}*.nc'.format(
-                data_map[data_name], data_map[data_name]), combine='by_coords')
-        except (AttributeError, ValueError):
-            assert False and 'Please install xarray and its dependency (e.g., netcdf4), ' \
-                                'pip install xarray==0.19.0,' \
-                                'pip install netcdf4 h5netcdf dask'
-        except OSError:
-            print("OSError: Invalid path {}/{}/*.nc".format(self.data_root, data_map[data_name]))
-            assert False
+        dataset = xr.open_mfdataset(self.data_root+'/{}/{}*.nc'.format(
+            data_map[data_name], data_map[data_name]), combine='by_coords')
 
         if 'time' not in dataset.indexes:
             dataset = dataset.expand_dims(dim={"time": 1}, axis=0)

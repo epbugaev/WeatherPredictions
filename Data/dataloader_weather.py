@@ -338,16 +338,8 @@ class WeatherBenchDataset(Dataset):
     def _load_data_xarray(self, data_name, single_variant=True):
         """Loading full data with xarray"""
         if data_name != 'uv10':
-            try:
-                dataset = xr.open_mfdataset(self.data_root+'/{}/{}*.nc'.format(
-                    data_map[data_name], data_map[data_name]), combine='by_coords')
-            except (AttributeError, ValueError):
-                assert False and 'Please install xarray and its dependency (e.g., netcdf4), ' \
-                                    'pip install xarray==0.19.0,' \
-                                    'pip install netcdf4 h5netcdf dask'
-            except OSError:
-                print("OSError: Invalid path {}/{}/*.nc".format(self.data_root, data_map[data_name]))
-                assert False
+            dataset = xr.open_mfdataset(self.data_root+'/{}/{}*.nc'.format(
+                data_map[data_name], data_map[data_name]), combine='by_coords')
             with dask.config.set(**{'array.slicing.split_large_chunks': True}):
                 dataset = dataset.sel(time=slice(*self.training_time))
                 dataset = dataset.isel(time=slice(None, -1, self.step))
@@ -368,16 +360,8 @@ class WeatherBenchDataset(Dataset):
         elif data_name == 'uv10':
             input_datasets = []
             for key in ['u10', 'v10']:
-                try:
-                    dataset = xr.open_mfdataset(self.data_root+'/{}/{}*.nc'.format(
-                        data_map[key], data_map[key]), combine='by_coords')
-                except (AttributeError, ValueError):
-                    assert False and 'Please install xarray and its dependency (e.g., netcdf4), ' \
-                                     'pip install xarray==0.19.0,' \
-                                     'pip install netcdf4 h5netcdf dask'
-                except OSError:
-                    print("OSError: Invalid path {}/{}/*.nc".format(self.data_root, data_map[key]))
-                    assert False
+                dataset = xr.open_mfdataset(self.data_root+'/{}/{}*.nc'.format(
+                    data_map[key], data_map[key]), combine='by_coords')
                 with dask.config.set(**{'array.slicing.split_large_chunks': True}):
                     dataset = dataset.sel(time=slice(*self.training_time))
                     dataset = dataset.isel(time=slice(None, -1, self.step))
@@ -606,16 +590,8 @@ class WeatherBenchDataset2(Dataset):
 
     def _load_data_xarray(self, data_name, levels):
         """Loading full data with xarray"""
-        try:
-            dataset = xr.open_mfdataset(self.data_root+'/{}/{}*.nc'.format(
-                data_map2[data_name], data_map2[data_name]), combine='by_coords')
-        except (AttributeError, ValueError):
-            assert False and 'Please install xarray and its dependency (e.g., netcdf4), ' \
-                                'pip install xarray==0.19.0,' \
-                                'pip install netcdf4 h5netcdf dask'
-        except OSError:
-            print("OSError: Invalid path {}/{}/*.nc".format(self.data_root, data_map2[data_name]))
-            assert False
+        dataset = xr.open_mfdataset(self.data_root+'/{}/{}*.nc'.format(
+            data_map2[data_name], data_map2[data_name]), combine='by_coords')
 
         with dask.config.set(**{'array.slicing.split_large_chunks': True}):
             if 'time' not in dataset.indexes:
