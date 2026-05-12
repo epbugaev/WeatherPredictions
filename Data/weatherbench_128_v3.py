@@ -1,27 +1,31 @@
+import json
 import os
 import numpy as np
 import torch
 import pandas as pd
 import h5netcdf
+from torch.profiler import record_function
 from torch.utils.data import Dataset, DataLoader
 
 
 class WeatherBench128(Dataset):
-    def __init__(self, 
-                 start_time: str='2000-01-01 00:00:00', 
+    def __init__(self,
+                 start_time: str='2000-01-01 00:00:00',
                  end_time: str='2000-01-05 23:00:00',
                  include_target: bool=False,
-                 lead_time: int=6, 
+                 lead_time: int=6,
                  interval: int=6,
                  muti_target_steps: int=1,
                  # New parameters for time sequences
                  start_time_x: int=0,
                  end_time_x: int=1,
                  start_time_y: int=0,
-                 end_time_y: int=1, 
-                 cut=None, 
-                 num_preload=12):
-        
+                 end_time_y: int=1,
+                 cut=None,
+                 num_preload=12,
+                 data_folder: str='/home/fratnikov/weather_bench/npy/1.40625deg/',
+                 input_folder: str='/home/fratnikov/weather_bench/1.40625deg/'):
+
         self.variables_list = [
         0, 1, 2, 4 ,
         6 ,7 ,8 ,9 ,10,11,12,13,14,15,16,17,18,
@@ -29,7 +33,11 @@ class WeatherBench128(Dataset):
         45,46,47,48,49,50,51,52,53,54,55,56,57,
         58,59,60,61,62,63,64,65,66,67,68,69,70,
         71,72,73,74,75,76,77,78,79,80,81,82,83]
-        self.data_folder = '/home/fratnikov/weather_bench/npy/1.40625deg/' #"/home/fa.buzaev/data_to_egor"
+        # ``data_folder`` is the dir whose basename pattern (YYYY-HHHH.npy) the
+        # loader parses to extract year/hour; ``input_folder`` is the parent dir
+        # of per-variable netCDF subfolders actually opened by ``custom_np_load``.
+        self.data_folder = data_folder
+        self.input_folder = input_folder
         self.start_time = start_time
         self.end_time = end_time
         self.include_target = include_target
@@ -83,7 +91,7 @@ class WeatherBench128(Dataset):
 
 
     def custom_np_load(self, file_path):
-        input_folder = '/home/fratnikov/weather_bench/1.40625deg/'
+        input_folder = self.input_folder
         match_set = {
                 '2m_temperature': 't2m', 
                 '10m_u_component_of_wind': 'u10', 
@@ -176,8 +184,6 @@ class WeatherBench128(Dataset):
         
 
     def get_mean_std(self):
-        import json
-
         mean_std_path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "example_data",
@@ -203,20 +209,28 @@ class WeatherBench128(Dataset):
         return self.length
 
     def __getitem__(self, index):
-        # Load a sequence of X inputs
+        # Load a sequence of X inputs.
+        # ``record_function`` tags are temporary: they let torch.profiler
+        # break down per-phase cost (disk read vs normalization vs
+        # numpy->tensor conversion) for the baseline measurement; remove
+        # after diagnostics.
         x_sequence = []
         for i in range(self.start_time_x, self.end_time_x + 1):
             current_index = index + i
             file_path = self.x_file_list[current_index]
-            sample_x = self.custom_np_load(file_path)
-            sample_x = self.normalization(sample_x)
-            sample_x = torch.from_numpy(sample_x).float()
+            with record_function("custom_np_load_x"):
+                sample_x = self.custom_np_load(file_path)
+            with record_function("normalization_x"):
+                sample_x = self.normalization(sample_x)
+            with record_function("from_numpy_x"):
+                sample_x = torch.from_numpy(sample_x).float()
 
             x_sequence.append(sample_x)
 
         # Stack X sequence
-        sample_x_sequence = torch.stack(x_sequence, dim=0)  # [T, C, H, W]
-        
+        with record_function("stack_x"):
+            sample_x_sequence = torch.stack(x_sequence, dim=0)  # [T, C, H, W]
+
         # Load a sequence of Y targets
         y_sequences = []
         for steps in range(self.muti_target_steps):
@@ -227,14 +241,18 @@ class WeatherBench128(Dataset):
                 y_time = x_time + pd.Timedelta(hours=(steps+1)*self.lead_time)
                 y_file_path = os.path.join(self.data_folder,
                                           str(y_time.year)+'-{:04d}'.format(self.idx_in_year(y_time))+'.npy')
-                sample_y = self.custom_np_load(y_file_path)
-                sample_y = self.normalization(sample_y)
-                sample_y = torch.from_numpy(sample_y).float()
+                with record_function("custom_np_load_y"):
+                    sample_y = self.custom_np_load(y_file_path)
+                with record_function("normalization_y"):
+                    sample_y = self.normalization(sample_y)
+                with record_function("from_numpy_y"):
+                    sample_y = torch.from_numpy(sample_y).float()
 
                 y_sequence.append(sample_y)
-            
+
             # Stack this target sequence
-            stacked_y_sequence = torch.stack(y_sequence, dim=0)  # [T, C, H, W]
+            with record_function("stack_y"):
+                stacked_y_sequence = torch.stack(y_sequence, dim=0)  # [T, C, H, W]
             y_sequences.append(stacked_y_sequence)
         
         if self.muti_target_steps > 1:

@@ -72,6 +72,16 @@ def build_dataset(data_cfg: dict[str, Any], split: str):
     if cut is not None:
         params["cut"] = cut
 
+    # Optional storage-path overrides (e.g. point at staged $SLURM_TMPDIR
+    # instead of the shared FS default). Forwarded only when set so
+    # datasets that don't accept them stay backward-compatible.
+    data_folder = data_cfg.get("data_folder")
+    if data_folder is not None:
+        params["data_folder"] = data_folder
+    input_folder = data_cfg.get("input_folder")
+    if input_folder is not None:
+        params["input_folder"] = input_folder
+
     return get_dataset(version)(**params)
 
 
@@ -136,6 +146,9 @@ def train(config: dict[str, Any], config_path: str | None = None) -> None:
     train_cfg = data_cfg.get("train", {})
     val_cfg = data_cfg.get("val", {})
     num_workers = data_cfg.get("num_workers", 4)
+    pin_memory = data_cfg.get("pin_memory", torch.cuda.is_available())
+    persistent_workers = data_cfg.get("persistent_workers", num_workers > 0)
+    prefetch_factor = data_cfg.get("prefetch_factor", 2)
 
     train_sampler = (
         torch.utils.data.distributed.DistributedSampler(
@@ -158,19 +171,31 @@ def train(config: dict[str, Any], config_path: str | None = None) -> None:
         else None
     )
 
+    # ``persistent_workers`` and ``prefetch_factor`` are only valid when
+    # ``num_workers > 0``; passing them with 0 workers raises in PyTorch.
+    loader_kwargs: dict[str, Any] = {
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+    }
+    if num_workers > 0:
+        loader_kwargs["persistent_workers"] = persistent_workers
+        loader_kwargs["prefetch_factor"] = prefetch_factor
+
     train_loader = DataLoader(
         train_data,
         batch_size=train_cfg.get("batch_size", 16),
         shuffle=(train_sampler is None) and train_cfg.get("shuffle", True),
         sampler=train_sampler,
-        num_workers=num_workers,
+        drop_last=train_cfg.get("drop_last", True),
+        **loader_kwargs,
     )
     valid_loader = DataLoader(
         valid_data,
         batch_size=val_cfg.get("batch_size", 16),
         shuffle=False,
         sampler=val_sampler,
-        num_workers=num_workers,
+        drop_last=val_cfg.get("drop_last", False),
+        **loader_kwargs,
     )
 
     training_cfg = config["training"]

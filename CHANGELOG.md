@@ -40,6 +40,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   names preserved; attribution to upstream repositories kept in the file headers.
 - Rephrased `README.md` to credit upstream sources directly without framing the
   project as a fork of OpenSTL.
+- `train.py`: `DataLoader` now reads `pin_memory`, `persistent_workers`,
+  `prefetch_factor` and per-split `drop_last` from the YAML `data` block.
+  Previously these keys were silently ignored, forcing the defaults
+  (`pin_memory=False`, `persistent_workers=False`) regardless of what the
+  config specified.
+- `Data/weatherbench_128_v3.WeatherBench128` accepts `data_folder` and
+  `input_folder` as `__init__` kwargs (previously hardcoded to
+  `/home/fratnikov/weather_bench/...`); `train.build_dataset` forwards them
+  from `data.data_folder` / `data.input_folder` when set, leaving the
+  defaults intact for existing configs.
+- `trainer.py` and `Data/weatherbench_128_v3.py`: instrumented the
+  training-loop hot path and `__getitem__` with
+  `torch.profiler.record_function` tags (`data_wait`, `to_device`,
+  `forward`, `backward`, `optimizer_step`, `custom_np_load_x/_y`,
+  `normalization_x/_y`, `from_numpy_x/_y`, `stack_x/_y`) so per-phase
+  cost is visible in profiler traces. Tags are no-ops when the profiler
+  is disabled.
+
+### Fixed
+
+- `Data/weatherbench_128_v3.py`: moved the `import json` from inside
+  `WeatherBench128.get_mean_std` to the module top (CLAUDE.md §2 forbids
+  local imports).
 
 ### Removed
 

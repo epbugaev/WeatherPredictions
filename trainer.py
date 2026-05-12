@@ -20,6 +20,7 @@ import torch
 from torch import nn
 from torch.amp.autocast_mode import autocast
 from torch.amp.grad_scaler import GradScaler
+from torch.profiler import record_function
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
@@ -29,6 +30,10 @@ from utils.distributed import DistInfo, barrier, reduce_dict
 from utils.early_stopping import EarlyStoppingTracker
 from utils.experiment import Experiment
 from utils.metrics import Metrics
+
+# Sentinel returned by ``next(iter, default)`` when the loader is exhausted.
+# Used in the training loop to mark end-of-iteration without try/except (LBYL).
+_END_OF_LOADER = object()
 
 
 def _precision_to_amp(precision: int | str) -> tuple[bool, torch.dtype]:
@@ -213,10 +218,24 @@ class Trainer:
         epoch: int,
         global_step: int,
     ) -> int:
-        """Run one training epoch; returns the new ``global_step``."""
+        """Run one training epoch; returns the new ``global_step``.
+
+        The loop is instrumented with ``torch.profiler.record_function`` tags
+        (``data_wait``, ``to_device``, ``forward``, ``backward``,
+        ``optimizer_step``, ``scheduler_step``, ``log_metrics``) to make
+        per-phase timing visible in profiler traces. Tags are no-ops when
+        the profiler is disabled.
+        """
         model.train()
-        for batch in loader:
-            batch = _to_device(batch, self.dist.device)
+        loader_iter = iter(loader)
+        while True:
+            with record_function("data_wait"):
+                batch = next(loader_iter, _END_OF_LOADER)
+            if batch is _END_OF_LOADER:
+                break
+
+            with record_function("to_device"):
+                batch = _to_device(batch, self.dist.device)
             ctx = StepContext(
                 device=self.dist.device,
                 optimizer=optimizer,
@@ -229,25 +248,32 @@ class Trainer:
             )
 
             if strategy.manual_optimization:
-                step_metrics = strategy.train_step(model, batch, ctx)
-            else:
-                optimizer.zero_grad(set_to_none=True)
-                with autocast(
-                    device_type=self.dist.device.type,
-                    dtype=self.amp_dtype,
-                    enabled=self.amp_enabled,
-                ):
+                with record_function("train_step_manual"):
                     step_metrics = strategy.train_step(model, batch, ctx)
-                loss = step_metrics["loss"]
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
+            else:
+                with record_function("zero_grad"):
+                    optimizer.zero_grad(set_to_none=True)
+                with record_function("forward"):
+                    with autocast(
+                        device_type=self.dist.device.type,
+                        dtype=self.amp_dtype,
+                        enabled=self.amp_enabled,
+                    ):
+                        step_metrics = strategy.train_step(model, batch, ctx)
+                with record_function("backward"):
+                    loss = step_metrics["loss"]
+                    scaler.scale(loss).backward()
+                with record_function("optimizer_step"):
+                    scaler.step(optimizer)
+                    scaler.update()
 
-            scheduler.step()
+            with record_function("scheduler_step"):
+                scheduler.step()
             global_step += 1
 
             if global_step % self.cfg.log_every_n_steps == 0:
-                self._log_train_metrics(step_metrics, experiment, global_step)
+                with record_function("log_metrics"):
+                    self._log_train_metrics(step_metrics, experiment, global_step)
 
         return global_step
 
