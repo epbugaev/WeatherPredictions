@@ -48,7 +48,7 @@ class Attention(nn.Module):
         ) if project_out else nn.Identity()
 
     def forward(self, x):
-        b, n, _, h = *x.shape, self.heads
+        h = self.heads
         qkv = self.to_qkv(x).chunk(3, dim=-1)
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h=h), qkv)
         dots = einsum('b h i d, b h j d -> b h i j', q, k) * self.scale
@@ -141,9 +141,9 @@ class PredFormerLayer(nn.Module):
                                                        mlp_dim, dropout, attn_dropout, drop_path)
 
     def forward(self, x):
-        b, t, n, _ = x.shape        
-        x_t, x_ori = x, x 
-        
+        b, t, n, _ = x.shape
+        x_t = x
+
         # t branch (first temporal)
         x_t = rearrange(x_t, 'b t n d -> b n t d')
         x_t = rearrange(x_t, 'b n t d -> (b n) t d')

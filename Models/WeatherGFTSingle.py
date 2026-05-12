@@ -430,7 +430,7 @@ class WindowAttention(nn.Module):
         if self.shifted:
             x = self.cyclic_shift(x)
 
-        b, n_h, n_w, _, h = *x.shape, self.heads # 1, 180, 360, 96, 3
+        _, n_h, n_w, _, h = *x.shape, self.heads # 1, 180, 360, 96, 3
 
         qkv = self.to_qkv(x).chunk(3, dim=-1) #3[1, 180, 360, 96]
         nw_h = n_h // self.window_size[0] # 36
