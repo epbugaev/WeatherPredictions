@@ -5,7 +5,6 @@ from einops import rearrange
 import torch.nn.functional as F
 import math
 from fairscale.nn.checkpoint.checkpoint_activations import checkpoint_wrapper
-from torch.utils.checkpoint import checkpoint
 
 
 @torch.jit.script

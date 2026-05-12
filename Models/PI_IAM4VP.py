@@ -1,9 +1,8 @@
 import torch
 import math
-import random
 from torch import nn
 
-from .imvp_modules import CircularConvSC, ConvNeXt_block, Learnable_Filter, Attention, ConvNeXt_bottle
+from .imvp_modules import CircularConvSC, ConvNeXt_block, Attention, ConvNeXt_bottle
 from .PredFormerGFT_HybridBlock import HybridBlock
 
 class SinusoidalPosEmb(nn.Module):
