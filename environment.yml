@@ -1,0 +1,6 @@
+name: weatherpred-gft-fix
+channels:
+  - defaults
+dependencies:
+  - python=3.10
+prefix: /home/ebugaev/.conda/envs/weatherpred-gft-fix
