@@ -1,5 +1,4 @@
 import torch
-import numpy as np
 
 @torch.jit.script
 def lat(j: torch.Tensor, num_lat: int) -> torch.Tensor:

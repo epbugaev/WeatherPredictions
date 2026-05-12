@@ -11,9 +11,7 @@ from functools import partial
 from itertools import repeat
 from typing import Callable
 import tqdm
-import torch.distributed as dist
 from torch.cuda.amp import autocast
-from torch.nn.parallel import DistributedDataParallel as DDP
 
 
 def expand_to_chs(x, n):
