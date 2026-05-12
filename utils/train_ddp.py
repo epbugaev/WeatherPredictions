@@ -342,12 +342,10 @@ if __name__ == "__main__":
     print(f"World size: {world_size}")
     try:
         torch.multiprocessing.spawn(
-        train,
-        args=(world_size,args_for_train),
-        nprocs=world_size,
-        join=True
-    )
-    except Exception as e:
-        print(f"Error in multiprocessing: {e}")
-        # Корректное завершение процессов
-        cleanup()   
+            train,
+            args=(world_size, args_for_train),
+            nprocs=world_size,
+            join=True,
+        )
+    finally:
+        cleanup()
