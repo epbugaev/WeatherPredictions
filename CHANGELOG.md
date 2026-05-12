@@ -63,6 +63,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `Data/weatherbench_128_v3.py`: moved the `import json` from inside
   `WeatherBench128.get_mean_std` to the module top (CLAUDE.md §2 forbids
   local imports).
+- `configs/*.yaml`: removed the committed `logging.comet_api_key` field
+  (the literal API key was leaked in repo history). The Comet API key is
+  now read from `$COMET_API_KEY`, loaded by
+  `sh_files/_shell_contract.sh` from a gitignored `.env`. The leaked key
+  must be rotated in Comet — git history still contains it.
+- `configs/*.yaml`: retargeted `logging.checkpoint_base` from the previous
+  user-specific paths (`/home/ebugaev/checkpoints/`,
+  `/home/epbugaev/checkpoints/`) to `/home/fa.buzaev/WeatherPredictions/checkpoints/`,
+  which is gitignored via the existing top-level `checkpoints/` rule. The
+  old paths caused `PermissionError` on `os.makedirs` at the first
+  checkpoint save under the current user.
+- `utils/experiment.build_experiment` docstring updated to document the
+  env-based API-key flow.
 
 ### Removed
 

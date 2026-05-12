@@ -106,7 +106,10 @@ def build_experiment(
 
     Args:
         logging_cfg: ``logging`` section from the YAML config; reads
-            ``comet_api_key`` and ``comet_project``.
+            ``comet_project``. The Comet API key is taken from
+            ``$COMET_API_KEY`` (see ``.env`` and ``sh_files/_shell_contract.sh``);
+            ``logging.comet_api_key`` is read only as a legacy override
+            and should be left unset in committed configs.
         experiment_name: Display name (taken from ``experiment.name`` in YAML).
         is_main: Only main-rank processes create a real Comet experiment.
 
