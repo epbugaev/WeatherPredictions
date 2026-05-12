@@ -245,23 +245,3 @@ class MidMetaNet(nn.Module):
 
         y = z.reshape(B, T, C, H, W)
         return y
-
-
-
-if __name__ == "__main__":
-    import os
-    import json
-    import matplotlib.pyplot as plt
-    import matplotlib.colors as colors
-    import numpy as np
-    # from thop import profile
-
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-    print(device)
-
-    model = SimVP_Model(in_shape=(12, 69, 32, 64)).to(device)
-
-    inp = torch.randn(1, 12, 69, 32, 64).to(device) 
-    
-    pred = model(inp)
-    print(pred.shape)
