@@ -50,6 +50,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `python -m utils.checkpointing convert <src.ckpt> <dst.pt>`.
 - `train/_common.run_legacy_training` helper used by every script under
   `train/` and `train/dev/` to share the Trainer boilerplate.
+- `utils/normalize.WeatherNormalize` — `nn.Module` that owns per-channel
+  `mean`/`std` as `register_buffer`. Single source of truth for ERA5
+  z-score normalisation: round-trips through `state_dict`, follows
+  `.to(device)` and DDP replication, and stays fp32 under autocast.
+- `Data.weatherbench_128_v4.WeatherBench128V4` — raw-memmap dataset that
+  returns un-normalised float32 tensors. Subclass of `WeatherBench128Memmap`
+  overriding only `__getitem__`; reuses parent's time list, valid_idx,
+  mean/std loading and memmap mmap. Registered as `v4` via
+  `Data/__init__.py`. Numerical equivalence with `v3_memmap` confirmed
+  bitwise via `tools/verify_v4_normalize.py`.
+- `tools/verify_v4_normalize.py` — equivalence test: reads one sample from
+  `v3_memmap` (normalise-in-dataset) and `v4` + `WeatherNormalize`, asserts
+  bit-exact match.
+- `configs/predformer_usa_v4.yaml` — production PredFormer-USA config that
+  uses the v4 dataset and trainer-side normalisation.
+- `sh_files/train_PredFormer_USA_2gpu_v4.sh` — 2-GPU DDP launcher with
+  STAGE_MEMMAP staging that targets the v4 config.
 
 ### Changed
 
@@ -92,12 +109,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   breaks after that many steps and `fit()` skips validation and
   checkpoint writes. Both env vars default unset, so production behaviour
   is unchanged.
+- `trainer.Trainer.fit`: new optional `normalize: nn.Module | None` kwarg.
+  When provided (v4 datasets), it is moved to the trainer's device once
+  and applied to every batch right after `_to_device`, so strategies and
+  models keep seeing normalised tensors. `_normalize_batch` walks
+  tuples/lists/dicts to preserve batch structure.
+- `train.py`: optional `training.seed` field — when set to a non-negative
+  int, fixes model init / sampler / worker RNGs via `torch.manual_seed`
+  and `torch.cuda.manual_seed_all`. Default unset = non-deterministic init.
+  Used for A/B-style numerical comparisons (v3_memmap vs v4).
+- `train.py`: AdamW now uses `fused=True` on CUDA (single fused kernel for
+  grad update + momentum + weight decay; ~3-5% on `optimizer.step`).
+- `trainer.py`: `GradScaler` is now gated on `amp_dtype == float16`.
+  bf16 has fp32's dynamic range and needs no loss scaling — keeping
+  scaler enabled for bf16 was adding per-step no-op overhead.
+- `configs/predformer_usa_v4.yaml`: `trainer.precision` switched from
+  `32` to `bf16` for A100's native bf16 tensor cores
+  (~2-3x speedup on forward+backward, frees ~40 GB of activation memory).
 
 ### Fixed
 
 - `Data/weatherbench_128_v3.py`: moved the `import json` from inside
   `WeatherBench128.get_mean_std` to the module top (CLAUDE.md §2 forbids
   local imports).
+- `Data/weatherbench_128_v4.py`: silenced the `"NumPy array is not
+  writable"` `UserWarning` raised by `torch.from_numpy` on read-only
+  memmap views. The view is never written to (a fresh contiguous buffer
+  is allocated by `torch.stack`), so the warning was noise that flooded
+  stderr on every worker startup.
+- `configs/predformer_usa_v4.yaml`: set `pin_memory: false`. PyTorch's
+  pin_memory thread leaked sockets after ~5 epochs under bf16
+  (job 3990855: `RuntimeError: Pin memory thread exited unexpectedly`).
+  Blocking H2D copies cost ~5-10 ms/step versus bf16 compute ~100 ms/step
+  — under 10% slowdown, well worth the stability.
 - `configs/*.yaml`: removed the committed `logging.comet_api_key` field
   (the literal API key was leaked in repo history). The Comet API key is
   now read from `$COMET_API_KEY`, loaded by

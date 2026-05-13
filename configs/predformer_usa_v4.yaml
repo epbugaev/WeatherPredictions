@@ -40,7 +40,11 @@ data:
   start_time_y: 12
   end_time_y: 23
   num_workers: 4
-  pin_memory: true
+  # pin_memory disabled: PyTorch's pin_memory thread leaked sockets after
+  # ~5 epochs under bf16 (job 3990855 crashed with "Pin memory thread
+  # exited unexpectedly"). With bf16 compute ~100 ms/step, the blocking
+  # H2D copy (~5-10 ms/step) is well under 10% — not worth the instability.
+  pin_memory: false
   persistent_workers: true
   prefetch_factor: 2
   train:

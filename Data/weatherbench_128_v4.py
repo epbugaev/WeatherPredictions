@@ -18,11 +18,24 @@ loading, memmap mmap, year->row offset map.
 
 from __future__ import annotations
 
+import warnings
+
 import pandas as pd
 import torch
 from torch.profiler import record_function
 
 from Data.weatherbench_128_v3 import WeatherBench128Memmap
+
+# The memmap is opened read-only, so the np.memmap view's WRITEABLE flag is
+# False; torch.from_numpy then emits a UserWarning per worker reminding us
+# that writes would be undefined. We never write to these tensors (torch.stack
+# below allocates a fresh contiguous buffer, and WeatherNormalize returns a
+# new tensor) — so the warning is pure noise. Silence it once on import.
+warnings.filterwarnings(
+    "ignore",
+    message=r".*NumPy array is not writable.*",
+    category=UserWarning,
+)
 
 
 class WeatherBench128V4(WeatherBench128Memmap):
