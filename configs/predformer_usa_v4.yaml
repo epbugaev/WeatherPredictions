@@ -50,14 +50,18 @@ data:
   persistent_workers: false
   prefetch_factor: 2
   train:
+    # bf16 freed ~30 GB of activation memory (was 74 GB at batch=90 fp32,
+    # 46 GB at batch=90 bf16). Bumped 90 -> 144 (+60%) to convert that
+    # headroom into wall-time. Expected memory at batch=144 ≈ 73 GB,
+    # leaving ~12 GB safety margin on the 85 GB A100.
     start_time: "2000-01-01 00:00:00"
     end_time: "2003-12-30 00:00:00"
-    batch_size: 90
+    batch_size: 144
     shuffle: true
   val:
     start_time: "2004-01-01 00:00:00"
     end_time: "2004-12-30 00:00:00"
-    batch_size: 90
+    batch_size: 144
     shuffle: false
 
 training:
@@ -76,6 +80,13 @@ trainer:
   static_graph: true
   num_sanity_val_steps: 0
   float32_matmul_precision: high
+  # bf16 has fp32's dynamic range but reduced precision; gradient
+  # explosion via attention/softmax outliers is still possible on long
+  # runs. clip at 1.0 keeps the optimiser in well-conditioned territory.
+  grad_clip_norm: 1.0
+  # Skip backward+step on NaN/Inf loss (one bad sample shouldn't poison
+  # the rest of training). Default-on; left explicit to document intent.
+  skip_non_finite_loss: true
 
 logging:
   checkpoint_base: /home/fa.buzaev/WeatherPredictions/checkpoints/

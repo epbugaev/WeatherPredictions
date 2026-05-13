@@ -257,6 +257,8 @@ def train(config: dict[str, Any], config_path: str | None = None) -> None:
         early_stopping_patience=training_cfg.get("early_stopping_patience", 5),
         checkpoint_dir=checkpoint_dir,
         float32_matmul_precision=trainer_cfg.get("float32_matmul_precision"),
+        grad_clip_norm=trainer_cfg.get("grad_clip_norm"),
+        skip_non_finite_loss=trainer_cfg.get("skip_non_finite_loss", True),
     )
 
     if is_main:

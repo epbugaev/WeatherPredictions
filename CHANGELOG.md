@@ -126,6 +126,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `configs/predformer_usa_v4.yaml`: `trainer.precision` switched from
   `32` to `bf16` for A100's native bf16 tensor cores
   (~2-3x speedup on forward+backward, frees ~40 GB of activation memory).
+- `configs/predformer_usa_v4.yaml`: `data.train.batch_size` and
+  `data.val.batch_size` bumped 90 -> 144 (+60%) using the activation
+  headroom freed by bf16. Expected memory ~73 GB / 85 GB.
+- `trainer.TrainerConfig`: new `grad_clip_norm: float | None` and
+  `skip_non_finite_loss: bool` (default True). When `grad_clip_norm`
+  is set, the training loop calls `clip_grad_norm_` after unscaling
+  gradients and before `optimizer.step()`. When `skip_non_finite_loss`
+  is True, batches whose forward produces NaN/Inf loss are skipped
+  (no backward, no step) — defends bf16 runs against a single bad
+  sample poisoning the optimiser state for the rest of training.
+- `configs/predformer_usa_v4.yaml`: `trainer.grad_clip_norm: 1.0` and
+  `trainer.skip_non_finite_loss: true` to harden bf16 training.
 
 ### Fixed
 

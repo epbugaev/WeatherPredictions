@@ -91,6 +91,13 @@ class TrainerConfig:
         checkpoint_dir: Directory where ``best.pt`` and ``last.pt`` are written.
         float32_matmul_precision: Optional ``torch.set_float32_matmul_precision``
             value (e.g. ``"high"``). ``None`` leaves the default.
+        grad_clip_norm: If set, clip the global gradient norm to this value
+            before ``optimizer.step()``. Defends against gradient explosion
+            under bf16/fp16 AMP. ``None`` disables clipping.
+        skip_non_finite_loss: When True, batches whose forward produces a
+            ``NaN``/``Inf`` loss are skipped (no backward, no optimizer
+            step). The scheduler still advances so the cosine schedule
+            stays aligned across ranks. A warning is printed from rank 0.
     """
 
     max_epochs: int
@@ -101,6 +108,8 @@ class TrainerConfig:
     early_stopping_patience: int = 5
     checkpoint_dir: str = "./checkpoints"
     float32_matmul_precision: str | None = None
+    grad_clip_norm: float | None = None
+    skip_non_finite_loss: bool = True
 
 
 class Trainer:
@@ -327,9 +336,45 @@ class Trainer:
                             enabled=self.amp_enabled,
                         ):
                             step_metrics = strategy.train_step(model, batch, ctx)
+                    loss = step_metrics["loss"]
+                    # NaN/Inf guard: under bf16/fp16 a single bad sample or
+                    # exploding gradient can poison the optimiser state for
+                    # the rest of training. Detect, skip backward+step, but
+                    # still advance the scheduler so cosine stays aligned
+                    # across ranks. All ranks see the same `loss` (same data
+                    # rank-locally), so no cross-rank all_reduce needed here.
+                    if self.cfg.skip_non_finite_loss and not torch.isfinite(loss):
+                        if self.dist.rank == 0:
+                            print(
+                                f"[trainer] step {global_step}: non-finite loss "
+                                f"{loss.item()!r}, skipping backward/optimizer.step"
+                            )
+                        with record_function("scheduler_step"):
+                            scheduler.step()
+                        global_step += 1
+                        if prof is not None:
+                            prof.step()
+                        if _BENCH_MAX_STEPS and global_step >= _BENCH_MAX_STEPS:
+                            break
+                        continue
                     with record_function("backward"):
-                        loss = step_metrics["loss"]
                         scaler.scale(loss).backward()
+                    if self.cfg.grad_clip_norm is not None:
+                        with record_function("clip_grad"):
+                            # ``unscale_`` is a no-op when the scaler is
+                            # disabled (bf16), and unscales gradients to the
+                            # real scale when it's enabled (fp16) so clipping
+                            # sees pre-scaled values.
+                            scaler.unscale_(optimizer)
+                            inner_model = (
+                                model.module
+                                if isinstance(model, nn.parallel.DistributedDataParallel)
+                                else model
+                            )
+                            torch.nn.utils.clip_grad_norm_(
+                                inner_model.parameters(),
+                                max_norm=self.cfg.grad_clip_norm,
+                            )
                     with record_function("optimizer_step"):
                         scaler.step(optimizer)
                         scaler.update()
