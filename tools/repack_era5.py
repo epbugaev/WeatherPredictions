@@ -37,12 +37,75 @@ import numpy as np
 # ``Data.weatherbench_128_v3.WeatherBench128.variables_list`` so the on-disk
 # layout matches the in-memory layout used by every downstream model.
 VARIABLES_LIST = [
-    0, 1, 2, 4,
-    6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
-    19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
-    45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57,
-    58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70,
-    71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83,
+    0,
+    1,
+    2,
+    4,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31,
+    45,
+    46,
+    47,
+    48,
+    49,
+    50,
+    51,
+    52,
+    53,
+    54,
+    55,
+    56,
+    57,
+    58,
+    59,
+    60,
+    61,
+    62,
+    63,
+    64,
+    65,
+    66,
+    67,
+    68,
+    69,
+    70,
+    71,
+    72,
+    73,
+    74,
+    75,
+    76,
+    77,
+    78,
+    79,
+    80,
+    81,
+    82,
+    83,
 ]
 
 # (long name on disk, short name inside the netCDF file, number of levels).
@@ -80,16 +143,19 @@ def repack(
     start_year: int,
     end_year: int,
     cut: Sequence[int],
+    res_suffix: str = "1.40625deg",
 ) -> None:
     """Pack the configured year range into a single memmap.
 
     Args:
-        src: Root dir holding ``<variable>/<variable>_<year>_1.40625deg.nc``.
+        src: Root dir holding ``<variable>/<variable>_<year>_<res_suffix>.nc``.
         dst_dat: Output path for the binary memmap file.
         dst_meta: Output path for the metadata JSON.
         start_year: First (inclusive) year to pack.
         end_year: Last (inclusive) year to pack.
         cut: Four ints ``[lat0, lat1, lon0, lon1]`` slicing the global grid.
+        res_suffix: Resolution suffix in netCDF file names (default
+            ``"1.40625deg"``; pass ``"5.625deg"`` for the coarser grid).
     """
     lat0, lat1, lon0, lon1 = cut
     H = lat1 - lat0
@@ -110,7 +176,7 @@ def repack(
         year_start = time.perf_counter()
         raw = np.empty((n_hours, TOTAL_RAW_CHANNELS, H, W), dtype=np.float32)
         for var_idx, (var_name, short, levels) in enumerate(VARIABLE_ORDER):
-            path = os.path.join(src, var_name, f"{var_name}_{y}_1.40625deg.nc")
+            path = os.path.join(src, var_name, f"{var_name}_{y}_{res_suffix}.nc")
             with h5netcdf.File(path, "r") as f:
                 dat = f[short]
                 actual = dat.shape[0]
@@ -121,14 +187,12 @@ def repack(
                         f"expected {n_hours}; the tail will stay zero"
                     )
                 if levels == 1:
-                    raw[:n_read, IDS[var_idx], :, :] = dat[
-                        :n_read, lat0:lat1, lon0:lon1
-                    ]
+                    raw[:n_read, IDS[var_idx], :, :] = dat[:n_read, lat0:lat1, lon0:lon1]
                 else:
-                    raw[:n_read, IDS[var_idx]:IDS[var_idx + 1], :, :] = dat[
+                    raw[:n_read, IDS[var_idx] : IDS[var_idx + 1], :, :] = dat[
                         :n_read, 0:13, lat0:lat1, lon0:lon1
                     ]
-        arr[row_offset:row_offset + n_hours] = raw[:, sel, :, :]
+        arr[row_offset : row_offset + n_hours] = raw[:, sel, :, :]
         row_offset += n_hours
         print(
             f"[repack] {y} written ({n_hours} rows, total {row_offset}/{T}) "
@@ -163,11 +227,24 @@ def main() -> None:
     parser.add_argument("--start-year", type=int, default=2000)
     parser.add_argument("--end-year", type=int, default=2004)
     parser.add_argument("--cut", type=int, nargs=4, default=[75, 107, 164, 228])
+    parser.add_argument(
+        "--res-suffix",
+        default="1.40625deg",
+        help='Resolution suffix in netCDF filenames (e.g. "1.40625deg" or "5.625deg").',
+    )
     args = parser.parse_args()
 
     dst_dat = os.path.join(args.dst, args.prefix + ".dat")
     dst_meta = os.path.join(args.dst, args.prefix + ".meta.json")
-    repack(args.src, dst_dat, dst_meta, args.start_year, args.end_year, args.cut)
+    repack(
+        args.src,
+        dst_dat,
+        dst_meta,
+        args.start_year,
+        args.end_year,
+        args.cut,
+        res_suffix=args.res_suffix,
+    )
 
 
 if __name__ == "__main__":

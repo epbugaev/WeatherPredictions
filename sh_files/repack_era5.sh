@@ -11,6 +11,14 @@
 #   sbatch sh_files/repack_era5.sh
 #   REPACK_END=2010 sbatch sh_files/repack_era5.sh
 #   REPACK_DST=/scratch/era5_memmap REPACK_PREFIX=full_50yr ... sbatch ...
+#
+# Full globe at 5.625deg, 2000-2018 (~95 GB output):
+#   REPACK_PREFIX=predformer_globe_2000_2018 \
+#   REPACK_START_YEAR=2000 REPACK_END_YEAR=2018 \
+#   REPACK_CUT="0 32 0 64" \
+#   REPACK_SRC=/home/fratnikov/weather_bench/5.625deg \
+#   REPACK_RES_SUFFIX=5.625deg \
+#   sbatch sh_files/repack_era5.sh
 # =============================================================================
 #SBATCH --partition=rocky
 #SBATCH --qos=rocky
@@ -19,7 +27,7 @@
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
-#SBATCH --time=01:00:00
+#SBATCH --time=02:00:00
 #SBATCH --job-name=repack_era5
 #SBATCH --output=logs/slurm-%x-%j.out
 #SBATCH --error=logs/slurm-%x-%j.err
@@ -40,10 +48,11 @@ START_YEAR="${REPACK_START_YEAR:-2000}"
 END_YEAR="${REPACK_END_YEAR:-2004}"
 CUT="${REPACK_CUT:-75 107 164 228}"
 SRC="${REPACK_SRC:-/home/fratnikov/weather_bench/1.40625deg}"
+RES_SUFFIX="${REPACK_RES_SUFFIX:-1.40625deg}"
 
 mkdir -p "${DST}"
 
-echo "[repack] src=${SRC} dst=${DST}/${PREFIX} years=${START_YEAR}-${END_YEAR} cut=${CUT}"
+echo "[repack] src=${SRC} dst=${DST}/${PREFIX} years=${START_YEAR}-${END_YEAR} cut=${CUT} res=${RES_SUFFIX}"
 echo "[repack] python=$(command -v python) host=$(hostname)"
 
 python tools/repack_era5.py \
@@ -52,7 +61,8 @@ python tools/repack_era5.py \
   --prefix "${PREFIX}" \
   --start-year "${START_YEAR}" \
   --end-year "${END_YEAR}" \
-  --cut ${CUT}
+  --cut ${CUT} \
+  --res-suffix "${RES_SUFFIX}"
 
 echo "[repack] artefacts:"
 ls -la "${DST}/${PREFIX}".dat "${DST}/${PREFIX}".meta.json

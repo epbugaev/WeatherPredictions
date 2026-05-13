@@ -136,6 +136,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   in `sh_files/train_PredFormer_USA_2gpu_v4.sh`.
 - `sh_files/train_PredFormer_USA_2gpu_v4.sh`: `--cpus-per-task` 16 -> 32
   (16 CPU/rank, type_e nodes have 128 CPU available).
+- `configs/predformer_globe_v4.yaml` — full-globe production config on
+  the 5.625deg (32x64) grid, 2000-2017 train / 2018 val (19 years
+  total). Same model/optimiser recipe as `predformer_usa_v4.yaml`; only
+  the grid (no cut) and `memmap_path` differ.
+- `sh_files/train_PredFormer_Globe_2gpu_v4.sh` — 2-GPU DDP launcher
+  with STAGE_MEMMAP staging targeting the globe config.
+- `tools/repack_era5.py` — new `--res-suffix` flag (default `1.40625deg`,
+  pass `5.625deg` for the coarser grid) so the same packer handles both
+  WeatherBench resolutions.
+- `sh_files/repack_era5.sh` — accepts new `REPACK_RES_SUFFIX` env
+  (forwarded to `--res-suffix`); `--time` raised 1h -> 2h to fit the
+  19-year globe pack.
 - `train.build_optimizer_and_scheduler`: optional linear LR warmup via
   `training.warmup_ratio` (fraction of total steps) and
   `training.warmup_start_factor` (default `1e-3`). When `warmup_ratio > 0`
