@@ -6,7 +6,7 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --ntasks=1
 #SBATCH --nodes=1
-#SBATCH --time=2-18:00:00
+#SBATCH --time=6-00:00:00
 #SBATCH --constraint="type_e|type_f"
 #SBATCH --output=logs/slurm-%x-%j.out
 #SBATCH --error=logs/slurm-%x-%j.err

@@ -145,6 +145,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the basin found in epoch 1 (job 3991270 anomaly: val_loss 0.5707 -> 0.624).
 - `configs/predformer_usa_v4.yaml`: `training.warmup_ratio: 0.05` and
   `training.warmup_start_factor: 0.001` to stabilise batch=144 + bf16.
+- `configs/predformer_usa_v4.yaml`: `training.max_epoch` 20 -> 2000 and
+  `training.early_stopping_patience` 5 -> 100 for long production
+  runs. Job 3991527 showed val_loss still falling at epoch 20
+  (0.1968 -> 0.1951) — room to converge further.
+- `sh_files/train_PredFormer_USA_2gpu_v4.sh`: `#SBATCH --time` 2-18:00:00
+  -> 6-00:00:00 to fit the 2000-epoch run (~2.1 min/epoch × 2000 ≈ 70 h).
 - `trainer.TrainerConfig`: new `grad_clip_norm: float | None` and
   `skip_non_finite_loss: bool` (default True). When `grad_clip_norm`
   is set, the training loop calls `clip_grad_norm_` after unscaling

@@ -72,16 +72,19 @@ training:
   litmodel: mutiout_f
   lr: 0.0005
   eta_min: 0.0
-  max_epoch: 20
+  max_epoch: 2000
   loss_type: MAE
   # Without warmup, batch=144 + lr=0.0005 + bf16 produced non-monotonic
   # training: val_loss=0.5707 on epoch 1 then jumped to 0.624 and never
   # recovered (job 3991270). Linear warmup over the first 5% of total
-  # steps (≈1 epoch at max_epoch=20) lets the optimiser ease into the
-  # cosine schedule.
+  # steps (≈100 epochs at max_epoch=2000) lets the optimiser ease into
+  # the cosine schedule.
   warmup_ratio: 0.05
   warmup_start_factor: 0.001
-  early_stopping_patience: 5
+  # Long training run: patience 100 epochs (job 3991527 showed val_loss
+  # still falling at epoch 20). With ~2.1 min/epoch this still
+  # short-circuits within ~3.5 hours of plateau.
+  early_stopping_patience: 100
   extra_kwargs:
     muti_out_nums: 6
 
