@@ -137,11 +137,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   memmap views. The view is never written to (a fresh contiguous buffer
   is allocated by `torch.stack`), so the warning was noise that flooded
   stderr on every worker startup.
-- `configs/predformer_usa_v4.yaml`: set `pin_memory: false`. PyTorch's
-  pin_memory thread leaked sockets after ~5 epochs under bf16
+- `configs/predformer_usa_v4.yaml`: set `persistent_workers: false`
+  while keeping `pin_memory: true`. PyTorch's pin_memory thread leaked
+  sockets when workers were persistent, crashing at epoch ~5 under bf16
   (job 3990855: `RuntimeError: Pin memory thread exited unexpectedly`).
-  Blocking H2D copies cost ~5-10 ms/step versus bf16 compute ~100 ms/step
-  — under 10% slowdown, well worth the stability.
+  Disabling pin_memory entirely (job 3990956) dropped GPU util from
+  78% to 58%, so we keep pin_memory and instead recreate workers each
+  epoch — the ~30-60 sec startup is amortised over a ~3-min epoch.
 - `configs/*.yaml`: removed the committed `logging.comet_api_key` field
   (the literal API key was leaked in repo history). The Comet API key is
   now read from `$COMET_API_KEY`, loaded by
