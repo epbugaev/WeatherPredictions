@@ -73,14 +73,13 @@ def build_dataset(data_cfg: dict[str, Any], split: str):
         params["cut"] = cut
 
     # Optional storage-path overrides (e.g. point at staged $SLURM_TMPDIR
-    # instead of the shared FS default). Forwarded only when set so
-    # datasets that don't accept them stay backward-compatible.
-    data_folder = data_cfg.get("data_folder")
-    if data_folder is not None:
-        params["data_folder"] = data_folder
-    input_folder = data_cfg.get("input_folder")
-    if input_folder is not None:
-        params["input_folder"] = input_folder
+    # instead of the shared FS default, or at a memmap produced by
+    # ``tools/repack_era5.py``). Forwarded only when set so the underlying
+    # dataset class doesn't see kwargs it doesn't accept.
+    for key in ("data_folder", "input_folder", "memmap_path", "memmap_meta_path"):
+        value = data_cfg.get(key)
+        if value is not None:
+            params[key] = value
 
     return get_dataset(version)(**params)
 

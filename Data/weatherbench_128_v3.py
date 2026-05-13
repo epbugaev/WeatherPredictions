@@ -264,3 +264,95 @@ class WeatherBench128(Dataset):
             
         # self.preload = {} # This is useful if you run out of RAM
         return sample_x_sequence, sample_y_all
+
+
+class WeatherBench128Memmap(WeatherBench128):
+    """Memmap-backed v3 dataset (§2.5 of the dataloader plan).
+
+    Reads from a single contiguous ``np.memmap`` produced by
+    ``tools/repack_era5.py``: shape ``(T, C_selected, H_cut, W_cut)`` already
+    channel-filtered (69 channels via ``variables_list``) and spatially
+    cropped (per the ``cut`` used at repack time). ``__getitem__`` becomes a
+    pair of row slices plus normalisation, so the parent's 24 per-sample
+    ``h5netcdf`` opens are skipped entirely.
+
+    Parent ``__init__`` still runs (time list, valid_idx, mean/std, file list
+    for ``self.data_folder``); those structures are reused, but
+    ``custom_np_load`` is never called in this branch.
+
+    Args:
+        memmap_path: Path to the ``.dat`` produced by ``tools/repack_era5.py``.
+        memmap_meta_path: Path to the matching ``.meta.json``. Defaults to
+            replacing the ``.dat`` suffix with ``.meta.json``.
+        **kwargs: Forwarded to ``WeatherBench128.__init__``.
+    """
+
+    def __init__(
+        self,
+        memmap_path: str,
+        memmap_meta_path: str | None = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        if memmap_meta_path is None:
+            memmap_meta_path = memmap_path[:-4] + ".meta.json" if memmap_path.endswith(".dat") else memmap_path + ".meta.json"
+        with open(memmap_meta_path) as f:
+            meta = json.load(f)
+        self._memmap_shape: tuple[int, ...] = tuple(meta["shape"])
+        self._memmap_dtype = np.dtype(meta["dtype"])
+        self._memmap_path = memmap_path
+        self._memmap = np.memmap(
+            memmap_path,
+            dtype=self._memmap_dtype,
+            mode="r",
+            shape=self._memmap_shape,
+        )
+        # Year -> first-row offset; idx = row_starts[year] + hour_in_year.
+        row_starts: dict[int, int] = {}
+        offset = 0
+        for y, n in zip(meta["years"], meta["hours_per_year"], strict=True):
+            row_starts[int(y)] = offset
+            offset += int(n)
+        self._memmap_row_starts = row_starts
+
+    def _memmap_row(self, timestamp: pd.Timestamp) -> int:
+        """Return the memmap row corresponding to ``timestamp``."""
+        return self._memmap_row_starts[timestamp.year] + self.idx_in_year(timestamp)
+
+    def __getitem__(self, index):
+        # Memmap branch: one slice per sample timestep, no netCDF parse, no
+        # spatial cut and no channel filter (both pre-applied at repack time).
+        x_sequence = []
+        for i in range(self.start_time_x, self.end_time_x + 1):
+            t = self.x_time_ilst[index + i]
+            with record_function("memmap_read_x"):
+                raw = np.asarray(self._memmap[self._memmap_row(t)])
+            with record_function("normalization_x"):
+                normed = (raw - self.the_mean[:, None, None]) / self.the_std[:, None, None]
+            with record_function("from_numpy_x"):
+                x_sequence.append(torch.from_numpy(normed).float())
+
+        with record_function("stack_x"):
+            sample_x_sequence = torch.stack(x_sequence, dim=0)
+
+        y_sequences = []
+        for steps in range(self.muti_target_steps):
+            y_sequence = []
+            for i in range(self.start_time_y, self.end_time_y + 1):
+                x_time = self.x_time_ilst[index + i]
+                y_time = x_time + pd.Timedelta(hours=(steps + 1) * self.lead_time)
+                with record_function("memmap_read_y"):
+                    raw = np.asarray(self._memmap[self._memmap_row(y_time)])
+                with record_function("normalization_y"):
+                    normed = (raw - self.the_mean[:, None, None]) / self.the_std[:, None, None]
+                with record_function("from_numpy_y"):
+                    y_sequence.append(torch.from_numpy(normed).float())
+
+            with record_function("stack_y"):
+                y_sequences.append(torch.stack(y_sequence, dim=0))
+
+        if self.muti_target_steps > 1:
+            sample_y_all = torch.stack(y_sequences, dim=0)
+        else:
+            sample_y_all = y_sequences[0]
+        return sample_x_sequence, sample_y_all

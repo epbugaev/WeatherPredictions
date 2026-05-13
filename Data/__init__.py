@@ -7,7 +7,12 @@ signatures; the registered factory accepts the common ``params`` dict from
 
 from Data.weatherbench_128 import WeatherBench128 as WeatherBench128V1
 from Data.weatherbench_128_v2 import WeatherBench128 as WeatherBench128V2
-from Data.weatherbench_128_v3 import WeatherBench128 as WeatherBench128V3
+from Data.weatherbench_128_v3 import (
+    WeatherBench128 as WeatherBench128V3,
+)
+from Data.weatherbench_128_v3 import (
+    WeatherBench128Memmap as WeatherBench128V3Memmap,
+)
 from utils.registry import register_dataset
 
 
@@ -30,6 +35,12 @@ def _build_v3(**params):
     return WeatherBench128V3(**params)
 
 
+def _build_v3_memmap(**params):
+    """v3_memmap reads from a pre-packed np.memmap; see ``tools/repack_era5.py``."""
+    return WeatherBench128V3Memmap(**params)
+
+
 register_dataset("v1")(_build_v1)
 register_dataset("v2")(_build_v2)
 register_dataset("v3")(_build_v3)
+register_dataset("v3_memmap")(_build_v3_memmap)

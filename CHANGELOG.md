@@ -18,6 +18,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   trimmed val date range. Paired with `BENCH_MAX_STEPS` for a hard
   step-count cap.
 - `bench_logs/` — gitignored output directory for bench artefacts.
+- `tools/repack_era5.py` — one-shot packer that turns the per-variable
+  per-year netCDF tree under `/home/fratnikov/weather_bench/1.40625deg/`
+  into a single contiguous float32 `np.memmap`. The output already has the
+  channel filter (`variables_list`, 110→69) and the spatial cut applied,
+  so `WeatherBench128Memmap.__getitem__` is a couple of row slices plus
+  normalisation — no per-sample `h5netcdf` parse, no spatial cut, no
+  channel filter.
+- `Data.weatherbench_128_v3.WeatherBench128Memmap` — subclass that reads
+  from the memmap built by `tools/repack_era5.py`. Registered as the
+  `v3_memmap` dataset version via `Data/__init__.py`.
+- `configs/bench_memmap.yaml` — bench config that points at the §2.5
+  memmap (`/home/fa.buzaev/era5_memmap/predformer_usa_2000_2004.dat`).
+- `sh_files/repack_era5.sh` — SLURM submit script that runs the packer
+  with env-driven year/cut/output overrides.
+- `train.build_dataset`: also forwards `data.memmap_path` and
+  `data.memmap_meta_path` when set (alongside the previously-added
+  `data_folder` / `input_folder` overrides), so the same path through
+  `build_dataset` works for v3 and v3_memmap without per-version code.
 - `trainer.py` with a pure-PyTorch `Trainer` (DDP via `DistributedDataParallel`,
   AMP-ready via `torch.amp`, step-cadenced LR scheduler, EarlyStopping, top-1
   and `last.pt` checkpointing).
