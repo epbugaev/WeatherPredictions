@@ -121,6 +121,47 @@ PYEOF
   ACTIVE_CFG="${TRACE_DIR}/config_snapshot.yaml"
 fi
 
+# Optional memmap staging: copy the v3_memmap .dat + .meta.json from wherever
+# the bench config points (typically Lustre /home/fa.buzaev/era5_memmap/) to
+# local NVMe under /tmp, then patch ``data.memmap_path`` in the config
+# snapshot. Activate by setting ``STAGE_MEMMAP=1`` (default off). Used to
+# isolate Lustre random-access overhead in the §2.5 path from the rest of
+# the memmap pipeline.
+if [[ "${STAGE_MEMMAP:-0}" = "1" ]]; then
+  ORIG_MEMMAP_PATH=$(python3 - <<PYEOF
+import yaml
+cfg = yaml.safe_load(open("${ACTIVE_CFG}"))
+print(cfg.get("data", {}).get("memmap_path", ""))
+PYEOF
+)
+  if [[ -z "${ORIG_MEMMAP_PATH}" ]]; then
+    echo "[bench-stage-memmap] data.memmap_path not set in ${ACTIVE_CFG}; aborting" >&2
+    exit 1
+  fi
+  STAGE_DIR="${STAGE_DIR:-/tmp/${USER:-$(id -un)}/era5_stage_${JOBID}}"
+  mkdir -p "${STAGE_DIR}"
+  STAGE_START=$(date +%s)
+  echo "[bench-stage-memmap] src=${ORIG_MEMMAP_PATH} dst=${STAGE_DIR}/"
+  cp "${ORIG_MEMMAP_PATH}" "${STAGE_DIR}/"
+  ORIG_META="${ORIG_MEMMAP_PATH%.dat}.meta.json"
+  if [[ -f "${ORIG_META}" ]]; then
+    cp "${ORIG_META}" "${STAGE_DIR}/"
+  fi
+  STAGE_SECS=$(( $(date +%s) - STAGE_START ))
+  STAGE_SIZE=$(du -sh "${STAGE_DIR}" 2>/dev/null | cut -f1)
+  echo "[bench-stage-memmap] done in ${STAGE_SECS}s, size=${STAGE_SIZE}"
+  STAGED_MEMMAP="${STAGE_DIR}/$(basename "${ORIG_MEMMAP_PATH}")"
+  python3 - <<PYEOF
+import yaml
+snap = "${ACTIVE_CFG}"
+with open(snap) as f:
+    cfg = yaml.safe_load(f)
+cfg.setdefault("data", {})["memmap_path"] = "${STAGED_MEMMAP}"
+with open(snap, "w") as f:
+    yaml.safe_dump(cfg, f, sort_keys=False)
+PYEOF
+fi
+
 export OMP_NUM_THREADS=4
 export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
