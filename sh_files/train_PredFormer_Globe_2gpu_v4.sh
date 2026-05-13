@@ -3,11 +3,11 @@
 #SBATCH --partition=rocky
 #SBATCH --qos=rocky
 #SBATCH --gres=gpu:2
-#SBATCH --cpus-per-task=32
+#SBATCH --cpus-per-task=16
 #SBATCH --ntasks=1
 #SBATCH --nodes=1
 #SBATCH --time=6-00:00:00
-#SBATCH --constraint="type_e|type_f"
+#SBATCH --constraint="type_e|type_f|type_h"
 #SBATCH --output=logs/slurm-%x-%j.out
 #SBATCH --error=logs/slurm-%x-%j.err
 # =============================================================================
