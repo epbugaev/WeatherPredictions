@@ -41,7 +41,12 @@ data:
   end_time_x: 11
   start_time_y: 12
   end_time_y: 23
-  num_workers: 8
+  # 4 workers/rank (down from 8): with v3_memmap the per-sample cost is
+  # essentially a page-cache read, so more workers stop helping while they
+  # still consume one resource_sharer socket each. 8 + persistent_workers
+  # leaked sockets over time and made pin_memory_loop crash with
+  # ``FileNotFoundError`` after ~3 epochs (job 3990403).
+  num_workers: 4
   pin_memory: true
   persistent_workers: true
   prefetch_factor: 2
