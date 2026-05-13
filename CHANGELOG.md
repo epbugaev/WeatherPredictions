@@ -136,6 +136,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   in `sh_files/train_PredFormer_USA_2gpu_v4.sh`.
 - `sh_files/train_PredFormer_USA_2gpu_v4.sh`: `--cpus-per-task` 16 -> 32
   (16 CPU/rank, type_e nodes have 128 CPU available).
+- `train.build_optimizer_and_scheduler`: optional linear LR warmup via
+  `training.warmup_ratio` (fraction of total steps) and
+  `training.warmup_start_factor` (default `1e-3`). When `warmup_ratio > 0`
+  the schedule becomes `SequentialLR(LinearLR -> CosineAnnealingLR)`;
+  otherwise the legacy pure-cosine schedule is preserved. Used at
+  larger batch sizes where a cold `lr` causes the loss to "jump off"
+  the basin found in epoch 1 (job 3991270 anomaly: val_loss 0.5707 -> 0.624).
+- `configs/predformer_usa_v4.yaml`: `training.warmup_ratio: 0.05` and
+  `training.warmup_start_factor: 0.001` to stabilise batch=144 + bf16.
 - `trainer.TrainerConfig`: new `grad_clip_norm: float | None` and
   `skip_non_finite_loss: bool` (default True). When `grad_clip_norm`
   is set, the training loop calls `clip_grad_norm_` after unscaling

@@ -97,16 +97,24 @@ def build_optimizer_and_scheduler(
     training_cfg: dict[str, Any],
     steps_per_epoch: int,
 ) -> tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LRScheduler]:
-    """Build AdamW + CosineAnnealingLR matching the legacy BaseModel.
+    """Build AdamW with optional LR warmup followed by CosineAnnealingLR.
 
     The original LitModels used ``betas=(0.9, 0.9)`` and ``weight_decay=0.0``;
     those values are preserved here to maintain numerical parity. The
     scheduler's ``T_max`` is ``(steps_per_epoch + 1) * max_epoch`` exactly as
     in ``LitModels/basemodel.py``.
+
+    When ``training.warmup_ratio`` > 0, the first ``warmup_ratio * total_steps``
+    steps run a linear warmup from ``warmup_start_factor * lr`` up to ``lr``;
+    the cosine schedule then anneals over the remaining steps. Used at larger
+    batch sizes where a cold ``lr`` is too aggressive in the first few epochs
+    and the loss "jumps off" the basin found in epoch 1.
     """
     lr = training_cfg.get("lr", 1e-4)
     eta_min = training_cfg.get("eta_min", 0.0)
     max_epoch = training_cfg.get("max_epoch", 20)
+    warmup_ratio = float(training_cfg.get("warmup_ratio", 0.0))
+    warmup_start_factor = float(training_cfg.get("warmup_start_factor", 1e-3))
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=lr,
@@ -115,9 +123,28 @@ def build_optimizer_and_scheduler(
         fused=torch.cuda.is_available(),
     )
     total_steps = (steps_per_epoch + 1) * max_epoch
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=total_steps, eta_min=eta_min
-    )
+    if warmup_ratio > 0.0:
+        warmup_steps = max(1, int(total_steps * warmup_ratio))
+        warmup = torch.optim.lr_scheduler.LinearLR(
+            optimizer,
+            start_factor=warmup_start_factor,
+            end_factor=1.0,
+            total_iters=warmup_steps,
+        )
+        cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=max(1, total_steps - warmup_steps),
+            eta_min=eta_min,
+        )
+        scheduler = torch.optim.lr_scheduler.SequentialLR(
+            optimizer,
+            schedulers=[warmup, cosine],
+            milestones=[warmup_steps],
+        )
+    else:
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=total_steps, eta_min=eta_min
+        )
     return optimizer, scheduler
 
 
