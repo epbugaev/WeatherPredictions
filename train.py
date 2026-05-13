@@ -108,7 +108,11 @@ def build_optimizer_and_scheduler(
     eta_min = training_cfg.get("eta_min", 0.0)
     max_epoch = training_cfg.get("max_epoch", 20)
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=lr, weight_decay=0.0, betas=(0.9, 0.9)
+        model.parameters(),
+        lr=lr,
+        weight_decay=0.0,
+        betas=(0.9, 0.9),
+        fused=torch.cuda.is_available(),
     )
     total_steps = (steps_per_epoch + 1) * max_epoch
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -128,9 +132,8 @@ def build_strategy(training_cfg: dict[str, Any]):
 
 def _make_run_id() -> str:
     """Compose the run-id used as the checkpoint subdir name."""
-    return (
-        datetime.datetime.now().strftime("%Y-%m-%d-%H:%M")
-        + "".join(random.choices(string.ascii_lowercase + string.digits, k=5))
+    return datetime.datetime.now().strftime("%Y-%m-%d-%H:%M") + "".join(
+        random.choices(string.ascii_lowercase + string.digits, k=5)
     )
 
 

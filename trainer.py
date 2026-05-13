@@ -166,11 +166,12 @@ class Trainer:
                 find_unused_parameters=self.cfg.find_unused_parameters,
             )
 
-        self._normalize = (
-            normalize.to(self.dist.device) if normalize is not None else None
-        )
+        self._normalize = normalize.to(self.dist.device) if normalize is not None else None
 
-        scaler = GradScaler(enabled=self.amp_enabled)
+        # GradScaler is only meaningful for fp16 AMP — bf16 has fp32's dynamic
+        # range and never overflows, so no loss scaling is needed. Keeping it
+        # enabled for bf16 adds per-step overhead from no-op scale/unscale calls.
+        scaler = GradScaler(enabled=(self.amp_enabled and self.amp_dtype == torch.float16))
         early_stopping = EarlyStoppingTracker(
             patience=self.cfg.early_stopping_patience,
             mode="min",
@@ -411,9 +412,7 @@ class Trainer:
         global_step: int,
     ) -> None:
         """Reduce per-batch metrics and log on rank 0."""
-        detached = {
-            k: v.detach().to(self.dist.device).float() for k, v in step_metrics.items()
-        }
+        detached = {k: v.detach().to(self.dist.device).float() for k, v in step_metrics.items()}
         reduced = reduce_dict(detached, self.dist, average=True)
         if self.dist.rank == 0:
             payload = {
