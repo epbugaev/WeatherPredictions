@@ -31,6 +31,7 @@ from trainer import Trainer, TrainerConfig
 from utils.distributed import cleanup_distributed, setup_distributed
 from utils.experiment import build_experiment
 from utils.metrics import Metrics
+from utils.normalize import WeatherNormalize
 from utils.registry import get_dataset, get_model, get_strategy
 
 
@@ -210,6 +211,15 @@ def train(config: dict[str, Any], config_path: str | None = None) -> None:
     metrics_source = train_data.dataset if isinstance(train_data, Subset) else train_data
     metrics = Metrics(metrics_source.data_mean_tensor, metrics_source.data_std_tensor)
 
+    # WeatherNormalize is the single source of truth for per-channel mean/std
+    # in the model pipeline. The trainer applies it to every batch right after
+    # ``_to_device`` (so v4 ``__getitem__`` can return raw tensors), and the
+    # buffers round-trip through ``state_dict`` together with the model.
+    normalize = WeatherNormalize(
+        mean=torch.as_tensor(metrics_source.the_mean, dtype=torch.float32),
+        std=torch.as_tensor(metrics_source.the_std, dtype=torch.float32),
+    )
+
     optimizer, scheduler = build_optimizer_and_scheduler(model, training_cfg, steps_per_epoch)
     strategy = build_strategy(training_cfg)
 
@@ -253,6 +263,7 @@ def train(config: dict[str, Any], config_path: str | None = None) -> None:
         experiment=experiment,
         metrics=metrics,
         full_config=config,
+        normalize=normalize,
     )
 
     experiment.close()

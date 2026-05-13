@@ -133,6 +133,7 @@ class Trainer:
         experiment: Experiment,
         metrics: Metrics,
         full_config: dict[str, Any],
+        normalize: nn.Module | None = None,
     ) -> None:
         """Train the model.
 
@@ -149,6 +150,12 @@ class Trainer:
             metrics: Domain metrics helper (used by strategies through the
                 ``StepContext``).
             full_config: YAML config dict, persisted with each checkpoint.
+            normalize: Optional pre-model module (e.g.
+                ``utils.normalize.WeatherNormalize``). When provided, it is
+                moved to the trainer's device once and applied to every batch
+                right after ``_to_device`` so strategies/models always see
+                normalized tensors. Required for v4 datasets that return raw
+                memmap values.
         """
         model = model.to(self.dist.device)
         if self.dist.is_distributed:
@@ -158,6 +165,10 @@ class Trainer:
                 static_graph=self.cfg.static_graph,
                 find_unused_parameters=self.cfg.find_unused_parameters,
             )
+
+        self._normalize = (
+            normalize.to(self.dist.device) if normalize is not None else None
+        )
 
         scaler = GradScaler(enabled=self.amp_enabled)
         early_stopping = EarlyStoppingTracker(
@@ -288,6 +299,9 @@ class Trainer:
 
                 with record_function("to_device"):
                     batch = _to_device(batch, self.dist.device)
+                if self._normalize is not None:
+                    with record_function("normalize"):
+                        batch = _normalize_batch(batch, self._normalize)
                 ctx = StepContext(
                     device=self.dist.device,
                     optimizer=optimizer,
@@ -354,6 +368,8 @@ class Trainer:
         count = 0
         for batch in loader:
             batch = _to_device(batch, self.dist.device)
+            if self._normalize is not None:
+                batch = _normalize_batch(batch, self._normalize)
             ctx = StepContext(
                 device=self.dist.device,
                 optimizer=optimizer,
@@ -469,4 +485,20 @@ def _to_device(batch: Any, device: torch.device) -> Any:
         return type(batch)(moved)
     if isinstance(batch, dict):
         return {k: _to_device(v, device) for k, v in batch.items()}
+    return batch
+
+
+def _normalize_batch(batch: Any, normalize: nn.Module) -> Any:
+    """Apply ``normalize`` to all tensors in ``batch``, preserving structure.
+
+    Used by v4 datasets that return raw memmap rows: the trainer moves the
+    batch to device then z-scores it once before strategies/models see it.
+    """
+    if isinstance(batch, torch.Tensor):
+        return normalize(batch)
+    if isinstance(batch, (tuple, list)):
+        normed = [_normalize_batch(item, normalize) for item in batch]
+        return type(batch)(normed)
+    if isinstance(batch, dict):
+        return {k: _normalize_batch(v, normalize) for k, v in batch.items()}
     return batch

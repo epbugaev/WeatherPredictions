@@ -13,6 +13,7 @@ from Data.weatherbench_128_v3 import (
 from Data.weatherbench_128_v3 import (
     WeatherBench128Memmap as WeatherBench128V3Memmap,
 )
+from Data.weatherbench_128_v4 import WeatherBench128V4
 from utils.registry import register_dataset
 
 
@@ -40,7 +41,13 @@ def _build_v3_memmap(**params):
     return WeatherBench128V3Memmap(**params)
 
 
+def _build_v4(**params):
+    """v4: raw memmap, normalisation lives in the trainer (WeatherNormalize)."""
+    return WeatherBench128V4(**params)
+
+
 register_dataset("v1")(_build_v1)
 register_dataset("v2")(_build_v2)
 register_dataset("v3")(_build_v3)
 register_dataset("v3_memmap")(_build_v3_memmap)
+register_dataset("v4")(_build_v4)
