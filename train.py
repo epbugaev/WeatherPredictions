@@ -72,11 +72,18 @@ def build_dataset(data_cfg: dict[str, Any], split: str):
     if cut is not None:
         params["cut"] = cut
 
-    # Optional storage-path overrides (e.g. point at staged $SLURM_TMPDIR
-    # instead of the shared FS default, or at a memmap produced by
-    # ``tools/repack_era5.py``). Forwarded only when set so the underlying
-    # dataset class doesn't see kwargs it doesn't accept.
+    # Optional storage-path overrides. Forwarded only when set, so the
+    # underlying dataset class doesn't see kwargs it doesn't accept.
+    # Environment variables (``DATA_FOLDER_OVERRIDE`` etc.) take precedence
+    # over the YAML value — used by submit scripts that stage data to local
+    # NVMe and need to redirect Dataset reads to the staged copy without
+    # rewriting the committed YAML.
     for key in ("data_folder", "input_folder", "memmap_path", "memmap_meta_path"):
+        env_key = key.upper() + "_OVERRIDE"
+        env_value = os.environ.get(env_key)
+        if env_value:
+            params[key] = env_value
+            continue
         value = data_cfg.get(key)
         if value is not None:
             params[key] = value
