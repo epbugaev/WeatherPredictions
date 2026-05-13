@@ -139,6 +139,16 @@ def train(config: dict[str, Any], config_path: str | None = None) -> None:
     dist_info = setup_distributed()
     is_main = dist_info.rank == 0
 
+    # Optional reproducibility: set ``training.seed`` in the YAML config to a
+    # non-negative int to fix model init / DistributedSampler / DataLoader
+    # worker seeds. Used for A/B-style numerical comparisons (e.g. v3_memmap
+    # vs v4 with WeatherNormalize). Default unset — non-deterministic init.
+    seed = config.get("training", {}).get("seed")
+    if seed is not None:
+        torch.manual_seed(int(seed))
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(int(seed))
+
     model = get_model(config["model"]["type"])(**config["model"].get("params", {}))
 
     data_cfg = config["data"]
