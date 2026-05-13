@@ -129,6 +129,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `configs/predformer_usa_v4.yaml`: `data.train.batch_size` and
   `data.val.batch_size` bumped 90 -> 144 (+60%) using the activation
   headroom freed by bf16. Expected memory ~73 GB / 85 GB.
+- `configs/predformer_usa_v4.yaml`: `num_workers` 4 -> 8 and
+  `prefetch_factor` 2 -> 4 to feed the bigger batch. With 4 workers,
+  batch=144 was throughput-capped at 30 samples/sec (vs 41.8 at
+  batch=90) — collate dominated CPU. Pairs with `--cpus-per-task=32`
+  in `sh_files/train_PredFormer_USA_2gpu_v4.sh`.
+- `sh_files/train_PredFormer_USA_2gpu_v4.sh`: `--cpus-per-task` 16 -> 32
+  (16 CPU/rank, type_e nodes have 128 CPU available).
 - `trainer.TrainerConfig`: new `grad_clip_norm: float | None` and
   `skip_non_finite_loss: bool` (default True). When `grad_clip_norm`
   is set, the training loop calls `clip_grad_norm_` after unscaling

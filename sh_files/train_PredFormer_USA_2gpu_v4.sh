@@ -3,7 +3,7 @@
 #SBATCH --partition=rocky
 #SBATCH --qos=rocky
 #SBATCH --gres=gpu:2
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=32
 #SBATCH --ntasks=1
 #SBATCH --nodes=1
 #SBATCH --time=2-18:00:00

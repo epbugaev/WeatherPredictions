@@ -39,7 +39,11 @@ data:
   end_time_x: 11
   start_time_y: 12
   end_time_y: 23
-  num_workers: 4
+  # 8 workers / rank × 2 ranks = 16 workers, paired with
+  # --cpus-per-task=32 (16 CPU/rank). At batch=144 the per-batch
+  # collate (torch.stack of 144 (12,69,32,64) tensors) is non-trivial;
+  # 4 workers throughput-capped batch=144 to 30 samples/sec.
+  num_workers: 8
   # pin_memory + persistent_workers=False: PyTorch's pin_memory thread
   # leaks sockets across epochs, crashing at epoch ~5 (job 3990855:
   # "Pin memory thread exited unexpectedly"). Disabling pin_memory entirely
@@ -48,7 +52,7 @@ data:
   # startup, acceptable.
   pin_memory: true
   persistent_workers: false
-  prefetch_factor: 2
+  prefetch_factor: 4
   train:
     # bf16 freed ~30 GB of activation memory (was 74 GB at batch=90 fp32,
     # 46 GB at batch=90 bf16). Bumped 90 -> 144 (+60%) to convert that
