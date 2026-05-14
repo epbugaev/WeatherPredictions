@@ -1,0 +1,65 @@
+experiment:
+  name: PredRNN-USA
+
+model:
+  type: PredRNN
+  params:
+    num_layers: 4
+    num_hidden: [128, 128, 128, 128]
+    configs:
+      in_shape: [12, 69, 32, 64]
+      patch_size: 1
+      filter_size: 3
+      stride: 1
+      layer_norm: true
+      pre_seq_length: 12
+      aft_seq_length: 12
+      reverse_scheduled_sampling: 0
+
+data:
+  dataset_version: v3
+  cut: [[75, 107], [164, 228]]
+  include_target: false
+  lead_time: 1
+  interval: 1
+  muti_target_steps: 1
+  start_time_x: 0
+  end_time_x: 11
+  start_time_y: 12
+  end_time_y: 23
+  num_workers: 4
+  pin_memory: true
+  train:
+    start_time: "2000-01-01 00:00:00"
+    end_time: "2000-02-15 00:00:00"
+    batch_size: 4
+    shuffle: true
+    subset_step: 23
+  val:
+    start_time: "2000-02-16 00:00:00"
+    end_time: "2000-02-25 00:00:00"
+    batch_size: 4
+    shuffle: false
+
+training:
+  litmodel: mutiout_predrnn
+  lr: 1e-4
+  eta_min: 0.0
+  max_epoch: 1
+  loss_type: MAE
+  early_stopping_patience: 5
+  extra_kwargs:
+    muti_out_nums: 6
+    time_prediction: 6
+
+trainer:
+  precision: 32
+  log_every_n_steps: 5
+  static_graph: true
+  num_sanity_val_steps: 0
+  float32_matmul_precision: high
+
+logging:
+  checkpoint_base: /home/fa.buzaev/WeatherPredictions/checkpoints/
+  comet_project: WeatherPredictions
+  log_code_file: null

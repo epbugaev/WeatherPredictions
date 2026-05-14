@@ -18,6 +18,7 @@ from typing import Any
 from Models.PI_IAM4VP import IAM4VP
 from Models.PredFormer import PredFormer_Model as PredFormer_Model_v1
 from Models.PredFormerGFT import PredFormer_Model as PredFormer_Model_GFT
+from Models.PredFormerGFT_HybridBlock import PredFormer_Model as PredFormer_Model_GFT_Hybrid
 from Models.SimVP import SimVP_Model
 from Models.WeatherGFT import GFT as WeatherGFT
 from Models.WeatherGFTSingle import GFT as WeatherGFTSingle
@@ -53,11 +54,17 @@ def _build_predformer_gft(**params):
     return PredFormer_Model_GFT(params)
 
 
+def _build_predformer_gft_hybrid(**params):
+    """``PredFormerGFT_HybridBlock`` (USA-crop): params dict positionally."""
+    return PredFormer_Model_GFT_Hybrid(params)
+
+
 register_model("SimVP")(_build_simvp)
 register_model("WeatherGFT")(WeatherGFT)
 register_model("WeatherGFTSingle")(WeatherGFTSingle)
 register_model("PredFormer")(_build_predformer)
 register_model("PredFormerGFT")(_build_predformer_gft)
+register_model("PredFormerGFT_HybridBlock")(_build_predformer_gft_hybrid)
 register_model("PI-IAM4VP")(IAM4VP)
 
 
