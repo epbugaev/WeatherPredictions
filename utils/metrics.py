@@ -224,11 +224,14 @@ class Metrics:
         data_std: 1-D тензор per-channel std, форма `(C,)`. Может быть None.
     """
 
-    def __init__(self, data_mean=None, data_std=None):
+    def __init__(
+        self, data_mean: torch.Tensor | None = None, data_std: torch.Tensor | None = None
+    ) -> None:
+        """Сохраняет per-channel статистики; перенос на нужный device — лениво в методах."""
         self.data_mean = data_mean
         self.data_std = data_std
 
-    def MSE(self, pred, gt):
+    def MSE(self, pred: torch.Tensor, gt: torch.Tensor) -> float:
         """Скалярный MSE по всему тензору.
 
         Args:
@@ -241,7 +244,7 @@ class Metrics:
         sample_mse = torch.mean((pred - gt) ** 2)
         return sample_mse.item()
 
-    def Bias(self, pred, gt):
+    def Bias(self, pred: torch.Tensor, gt: torch.Tensor) -> list[float]:
         """Bias `(pred - gt)`, взвешенный по широте, в физических единицах.
 
         Args:
@@ -254,7 +257,7 @@ class Metrics:
         data_std = self.data_std.to(gt.device)
         return (type_weighted_bias_torch(pred - gt) * data_std).tolist()
 
-    def Activity(self, pred, clim_time_mean_daily):
+    def Activity(self, pred: torch.Tensor, clim_time_mean_daily: torch.Tensor) -> list[float]:
         """Activity предсказания относительно климатологии, в физических единицах.
 
         Args:
@@ -266,11 +269,9 @@ class Metrics:
         """
         clim_time_mean_daily = clim_time_mean_daily.to(pred.device)
         data_std = self.data_std.to(pred.device)
-        return (
-            type_weighted_activity_torch(pred - clim_time_mean_daily) * data_std
-        ).tolist()
+        return (type_weighted_activity_torch(pred - clim_time_mean_daily) * data_std).tolist()
 
-    def WRMSE(self, pred, gt):
+    def WRMSE(self, pred: torch.Tensor, gt: torch.Tensor) -> list[float] | list[list[float]]:
         """Lat-weighted RMSE по каналам, в физических единицах.
 
         Args:
@@ -283,7 +284,9 @@ class Metrics:
         data_std = self.data_std.to(gt.device)
         return (weighted_rmse_torch(pred, gt) * data_std).tolist()
 
-    def WACC(self, pred, gt, clim_time_mean_daily):
+    def WACC(
+        self, pred: torch.Tensor, gt: torch.Tensor, clim_time_mean_daily: torch.Tensor
+    ) -> list[float]:
         """Lat-weighted ACC по каналам относительно климатологии.
 
         Args:
@@ -297,7 +300,7 @@ class Metrics:
         clim_time_mean_daily = clim_time_mean_daily.to(gt.device)
         return (weighted_acc_torch(pred - clim_time_mean_daily, gt - clim_time_mean_daily)).tolist()
 
-    def RQE(self, pred, gt):
+    def RQE(self, pred: torch.Tensor, gt: torch.Tensor) -> list[list[float]]:
         """Relative Quantile Error на хвостах распределений по выбранным каналам.
 
         Берёт `pred` и `gt` в z-score, обратно-нормализует через `data_mean/std`,
