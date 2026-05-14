@@ -52,9 +52,14 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--memmap-path", default="/home/fa.buzaev/era5_memmap/predformer_globe_2000_2018.dat")
     p.add_argument("--memmap-meta-path", default=None)
-    p.add_argument("--mean-std-path", default="/home/epbugaev/weather_bench/1.40625deg/mean_std.npy")
-    p.add_argument("--H", type=int, default=128)
-    p.add_argument("--W", type=int, default=256)
+    p.add_argument(
+        "--mean-std-path",
+        default="",
+        help="Per-channel mean/std (.npy or .json). Pass empty (default) if memmap already stores raw "
+        "physical units (v3/v4 memmap convention). Pass a path only if memmap holds normalised data.",
+    )
+    p.add_argument("--H", type=int, default=32, help="Grid height. Default matches predformer_globe memmap (32).")
+    p.add_argument("--W", type=int, default=64, help="Grid width. Default matches predformer_globe memmap (64).")
     p.add_argument("--year", type=int, default=2005)
     p.add_argument("--horizon-hours", type=int, default=72)
     p.add_argument("--block-dt-seconds", type=float, default=300.0)

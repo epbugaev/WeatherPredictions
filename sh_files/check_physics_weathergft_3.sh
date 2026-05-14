@@ -28,7 +28,7 @@ _sc_here="${REPO_ROOT_FOR_CONTRACT}/sh_files"
 source "${_sc_here}/_shell_contract.sh" "${_sc_here}"
 
 MEMMAP_PATH="${MEMMAP_PATH:-/home/fa.buzaev/era5_memmap/predformer_globe_2000_2018.dat}"
-MEAN_STD_PATH="${MEAN_STD_PATH:-/home/epbugaev/weather_bench/1.40625deg/mean_std.npy}"
+MEAN_STD_PATH="${MEAN_STD_PATH:-}"
 HORIZON="${HORIZON_HOURS:-72}"
 BLOCK_DT="${BLOCK_DT_SECONDS:-300}"
 YEAR="${YEAR:-2005}"
