@@ -1,7 +1,9 @@
+target-version = "py310"
 line-length = 100
+extend-exclude = ["Research/"]
 
 [lint]
-select = ["F", "E", "W", "B", "I", "T100"]
+select = ["F", "E", "W", "B", "I", "UP", "SIM", "T100", "T201"]
 
 [lint.per-file-ignores]
 # CLI entry points and the trainer legitimately print runtime status to stdout.
@@ -9,3 +11,11 @@ select = ["F", "E", "W", "B", "I", "T100"]
 "train.py" = ["T201"]
 "train/_common.py" = ["T201"]
 "utils/checkpointing.py" = ["T201"]
+# Models/dev/ — archival snapshots; tolerate a few bugbear/simplify quirks
+# from the original sources so a one-shot lint pass doesn't fight the archive.
+"Models/dev/*.py" = ["B007", "SIM117"]
+
+[format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = false
