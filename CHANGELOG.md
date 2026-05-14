@@ -247,6 +247,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `Models/openstl_utils.py` (was empty, no imports).
 - `train/dev/train_PredFormer_v0.py` (broken: depended on a non-existent
   `PredFormer/openstl/` path).
+- `utils.metrics.weighted_latitude_weighting_factor_torch`: dead helper
+  (no callers across the codebase).
+- `utils.metrics.type_weighted_{bias,activity}_torch{,_channels}`: removed
+  the `metric_type="all"` parameter (was unused, only kept "for
+  compatibility"). Internal callers in `Metrics.Bias`/`Metrics.Activity`
+  updated accordingly.
 
 ### Migration notes
 

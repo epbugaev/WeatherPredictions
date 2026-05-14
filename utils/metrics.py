@@ -22,30 +22,12 @@ def lat(j: torch.Tensor, num_lat: int) -> torch.Tensor:
     return 90.0 - j * 180.0 / float(num_lat - 1)
 
 
-def weighted_latitude_weighting_factor_torch(
-    j: torch.Tensor, real_num_lat: int, num_lat: int, s: torch.Tensor
-) -> torch.Tensor:
-    """Cos(lat)-вес, отнормированный на `s`, с множителем `real_num_lat`.
-
-    Args:
-        j: индексы широты.
-        real_num_lat: фактическое число строк (для denormalization, может отличаться от `num_lat`).
-        num_lat: число точек, по которым считаются широты (передаётся в `lat`).
-        s: предвычисленная сумма `cos(lat)` для нормировки.
-
-    Returns:
-        Тензор весов формы `j`.
-    """
-    return real_num_lat * torch.cos(3.1416 / 180.0 * lat(j, num_lat)) / s
-
-
 # @torch.jit.script
-def type_weighted_bias_torch_channels(pred: torch.Tensor, metric_type="all") -> torch.Tensor:
+def type_weighted_bias_torch_channels(pred: torch.Tensor) -> torch.Tensor:
     """Bias по каналам, взвешенный по широте (исторический quirk: `pred.shape[2]` = `num_lat`).
 
     Args:
         pred: разность `pred - gt`, форма `(B, C, H, W)`.
-        metric_type: совместимость с другими `type_weighted_*` (не используется).
 
     Returns:
         Тензор формы `(B, C)`: среднее по spatial-осям, взвешенное по широте.
@@ -65,27 +47,25 @@ def type_weighted_bias_torch_channels(pred: torch.Tensor, metric_type="all") -> 
 
 
 # @torch.jit.script
-def type_weighted_bias_torch(pred: torch.Tensor, metric_type="all") -> torch.Tensor:
+def type_weighted_bias_torch(pred: torch.Tensor) -> torch.Tensor:
     """Bias по каналам, усреднённый по батчу.
 
     Args:
         pred: разность `pred - gt`, форма `(B, C, H, W)`.
-        metric_type: совместимость (не используется).
 
     Returns:
         Тензор формы `(C,)`.
     """
-    result = type_weighted_bias_torch_channels(pred, metric_type=metric_type)
+    result = type_weighted_bias_torch_channels(pred)
     return torch.mean(result, dim=0)
 
 
 # @torch.jit.script
-def type_weighted_activity_torch_channels(pred: torch.Tensor, metric_type="all") -> torch.Tensor:
+def type_weighted_activity_torch_channels(pred: torch.Tensor) -> torch.Tensor:
     """Activity (взвешенный RMS вокруг среднего) по каналам.
 
     Args:
         pred: тензор формы `(B, C, H, W)` или `(B, T, C, H, W)`.
-        metric_type: совместимость (не используется).
 
     Returns:
         Тензор формы `(B, C)` или `(B, T, C)`.
@@ -100,17 +80,16 @@ def type_weighted_activity_torch_channels(pred: torch.Tensor, metric_type="all")
     return result
 
 
-def type_weighted_activity_torch(pred: torch.Tensor, metric_type="all") -> torch.Tensor:
+def type_weighted_activity_torch(pred: torch.Tensor) -> torch.Tensor:
     """Activity по каналам, усреднённый по батчу.
 
     Args:
         pred: тензор формы `(B, C, H, W)` или `(B, T, C, H, W)`.
-        metric_type: совместимость (не используется).
 
     Returns:
         Тензор формы `(C,)` или `(T, C)`.
     """
-    result = type_weighted_activity_torch_channels(pred, metric_type=metric_type)
+    result = type_weighted_activity_torch_channels(pred)
     return torch.mean(result, dim=0)
 
 
@@ -281,7 +260,7 @@ class Metrics:
             Список длины `C`.
         """
         data_std = self.data_std.to(gt.device)
-        return (type_weighted_bias_torch(pred - gt, metric_type="all") * data_std).tolist()
+        return (type_weighted_bias_torch(pred - gt) * data_std).tolist()
 
     def Activity(self, pred, clim_time_mean_daily):
         """Activity предсказания относительно климатологии, в физических единицах.
@@ -296,7 +275,7 @@ class Metrics:
         clim_time_mean_daily = clim_time_mean_daily.to(pred.device)
         data_std = self.data_std.to(pred.device)
         return (
-            type_weighted_activity_torch(pred - clim_time_mean_daily, metric_type="all") * data_std
+            type_weighted_activity_torch(pred - clim_time_mean_daily) * data_std
         ).tolist()
 
     def WRMSE(self, pred, gt):
