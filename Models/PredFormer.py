@@ -681,47 +681,4 @@ class PredFormer_Model(nn.Module):
         x = x.permute(0, 1, 4, 2, 5, 3, 6).reshape(B, T, C, H, W)
         
         return x
-
-
-
-# model_config = {
-#     # image h w c
-#     'height': 128,
-#     'width': 256,
-#     'num_channels': 69,
-#     # video length in and out
-#     'pre_seq': 12,
-#     'after_seq': 12,
-#     # patch size
-#     'patch_size': 8,
-#     'dim': 256, 
-#     'heads': 8,
-#     'dim_head': 32,
-#     # dropout
-#     'dropout': 0.0,
-#     'attn_dropout': 0.0,
-#     'drop_path': 0.0,
-#     'scale_dim': 4,
-#     # depth
-#     'depth': 1,
-#     'Ndepth': 24,
-#     'path_to_constants': '/home/user/mamba_x_predformer/PredFormer/constants_1.40625deg.nc',
-# }
-
-# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# print(f"Using device: {device}")
-# print("Start testing PredFormer model")
-# model = PredFormer_Model(model_config).to(device)
-# # Count and print the total number of parameters in the model
-# total_params = sum(p.numel() for p in model.parameters())
-# trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-# print(f"Total parameters: {total_params:,}")
-# print(f"Trainable parameters: {trainable_params:,}")
-# print(f"Model size: {total_params * 4 / (1024 * 1024):.2f} MB")
-
-# print("Model loaded successfully")
-# x = torch.rand(1, 12, 69, 128, 256).to(device)
-# print("Input tensor created successfully")
-# output = model(x)
-# print("Output tensor created successfully")
 # print(output.shape)  # [B, T, C, H, W]
