@@ -5,7 +5,7 @@ import torch.nn as nn
 from timm.layers import DropPath, trunc_normal_
 from timm.models.convnext import ConvNeXtBlock
 from timm.models.mlp_mixer import MixerBlock
-from timm.models.swin_transformer import SwinTransformerBlock, window_partition, window_reverse
+from timm.models.swin_transformer import SwinTransformerBlock
 from timm.models.vision_transformer import Block as ViTBlock
 
 from Models.blocks import (HorBlock, ChannelAggregationFFN, MultiOrderGatedAggregation,
@@ -42,7 +42,6 @@ class gnconv(nn.Module):
         )
 
         self.scale = s
-        print('[gnconv]', order, 'order with dims=', self.dims, 'scale=%.4f'%self.scale)
 
     def forward(self, x, mask=None, dummy=False):
         fused_x = self.proj_in(x)
@@ -254,10 +253,9 @@ class AttentionModule(nn.Module):
         self.conv1 = nn.Conv2d(dim, 2*dim, 1)
 
     def forward(self, x):
-        u = x.clone()
         attn = self.conv0(x)           # depth-wise conv
         attn = self.conv_spatial(attn) # depth-wise dilation convolution
-        
+
         f_g = self.conv1(attn)
         split_dim = f_g.shape[1] // 2
         f_x, g_x = torch.split(f_g, split_dim, dim=1)

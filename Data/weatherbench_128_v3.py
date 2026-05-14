@@ -5,7 +5,7 @@ import torch
 import pandas as pd
 import h5netcdf
 from torch.profiler import record_function
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 
 
 class WeatherBench128(Dataset):

@@ -36,7 +36,6 @@ class gnconv(nn.Module):
         )
 
         self.scale = s
-        print('[gnconv]', order, 'order with dims=', self.dims, 'scale=%.4f'%self.scale)
 
     def forward(self, x, mask=None, dummy=False):
         fused_x = self.proj_in(x)
