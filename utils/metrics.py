@@ -34,14 +34,7 @@ def type_weighted_bias_torch(pred: torch.Tensor, metric_type="all") -> torch.Ten
 # @torch.jit.script
 def type_weighted_activity_torch_channels(pred: torch.Tensor, metric_type="all") -> torch.Tensor:
     #takes in arrays of size [n, c, h, w]  and returns latitude-weighted rmse for each chann
-    num_lat = pred.shape[-2]
-    #num_long = target.shape[2]
-    lat_t = torch.arange(start=0, end=num_lat, device=pred.device)
-    s = torch.sum(torch.cos(3.1416/180. * lat(lat_t, num_lat)))
-    if len(pred.shape) == 5:
-        weight = torch.reshape(latitude_weighting_factor_torch(lat_t, num_lat, s), (1, 1, 1, -1, 1))
-    else:
-        weight = torch.reshape(latitude_weighting_factor_torch(lat_t, num_lat, s), (1, 1, -1, 1))
+    weight = _lat_weight(pred)
     result = torch.sqrt(torch.mean(weight * (pred - torch.mean(weight * pred, dim=(-1, -2), keepdim=True)) ** 2, dim=(-1, -2)))
     return result
 
@@ -54,15 +47,21 @@ def latitude_weighting_factor_torch(j: torch.Tensor, num_lat: int, s: torch.Tens
     return num_lat * torch.cos(3.1416/180. * lat(j, num_lat)) / s
 
 @torch.jit.script
-def weighted_rmse_torch_channels(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    #takes in arrays of size [n, c, h, w] or [n, t, c, h, w] and returns latitude-weighted rmse for each chann
+def _lat_weight(pred: torch.Tensor) -> torch.Tensor:
+    # cos(lat)-нормированные веса, готовые к broadcast по pred:
+    # форма (1,1,1,-1,1) для (B,T,C,H,W) и (1,1,-1,1) для (B,C,H,W).
     num_lat = pred.shape[-2]
     lat_t = torch.arange(start=0, end=num_lat, device=pred.device)
     s = torch.sum(torch.cos(3.1416/180. * lat(lat_t, num_lat)))
-    if len(pred.shape) == 5:
-        weight = torch.reshape(latitude_weighting_factor_torch(lat_t, num_lat, s), (1, 1, 1, -1, 1))
-    else:
-        weight = torch.reshape(latitude_weighting_factor_torch(lat_t, num_lat, s), (1, 1, -1, 1))
+    factor = latitude_weighting_factor_torch(lat_t, num_lat, s)
+    if pred.dim() == 5:
+        return torch.reshape(factor, (1, 1, 1, -1, 1))
+    return torch.reshape(factor, (1, 1, -1, 1))
+
+@torch.jit.script
+def weighted_rmse_torch_channels(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    #takes in arrays of size [n, c, h, w] or [n, t, c, h, w] and returns latitude-weighted rmse for each chann
+    weight = _lat_weight(pred)
     result = torch.sqrt(torch.mean(weight * (pred - target)**2., dim=(-1,-2)))
     return result
 
@@ -74,14 +73,7 @@ def weighted_rmse_torch(pred: torch.Tensor, target: torch.Tensor) -> torch.Tenso
 @torch.jit.script
 def weighted_acc_torch_channels(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     #takes in arrays of size [n, c, h, w]  and returns latitude-weighted acc
-    num_lat = pred.shape[-2]
-    lat_t = torch.arange(start=0, end=num_lat, device=pred.device)
-    s = torch.sum(torch.cos(3.1416/180. * lat(lat_t, num_lat)))
-    if len(pred.shape) == 5:
-        weight = torch.reshape(latitude_weighting_factor_torch(lat_t, num_lat, s), (1, 1, 1, -1, 1))
-    else:
-        weight = torch.reshape(latitude_weighting_factor_torch(lat_t, num_lat, s), (1, 1, -1, 1))
-    weight = torch.reshape(latitude_weighting_factor_torch(lat_t, num_lat, s), (1, 1, -1, 1))
+    weight = _lat_weight(pred)
     result = torch.sum(weight * pred * target, dim=(-1,-2)) / torch.sqrt(torch.sum(weight * pred * pred, dim=(-1,-2)) * torch.sum(weight * target *
     target, dim=(-1,-2)))
     return result
