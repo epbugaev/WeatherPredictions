@@ -11,13 +11,14 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from Data.weatherbench_128_v3 import WeatherBench128
 from Models.PI_IAM4VP import IAM4VP
 from train._common import run_legacy_training
+from utils.regions import USA_CROP
 
 
 def train_model() -> None:
     """Construct IAM4VP and train with the per-timestep manual-backward strategy."""
     torch_model = IAM4VP()
 
-    cut = [[128 - 92, 128 - 60], [256 - 131, 256 - 67]]
+    cut = USA_CROP
     common = dict(
         include_target=False,
         lead_time=1,

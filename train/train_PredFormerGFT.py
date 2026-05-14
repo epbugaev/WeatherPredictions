@@ -11,6 +11,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from Data.weatherbench_128_v3 import WeatherBench128
 from Models.PredFormerGFT import PredFormer_Model
 from train._common import run_legacy_training
+from utils.regions import USA_CROP
 
 _CONSTANTS_PATH = "/home/fratnikov/weather_bench/1.40625deg/constants/constants_1.40625deg.nc"
 
@@ -37,7 +38,7 @@ def train_model() -> None:
     }
     torch_model = PredFormer_Model(model_config)
 
-    cut = [[128 - 92, 128 - 60], [256 - 131, 256 - 67]]
+    cut = USA_CROP
     common = dict(
         include_target=False,
         lead_time=1,
