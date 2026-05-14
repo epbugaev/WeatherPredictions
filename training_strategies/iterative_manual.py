@@ -62,9 +62,7 @@ class IterativeManualStep(StepStrategy):
         pred_list: list[torch.Tensor] = []
 
         for idx_time in range(self.time_prediction):
-            t = torch.tensor(
-                (idx_time + 1) * 100, device=ctx.device
-            ).repeat(x.shape[0])
+            t = torch.tensor((idx_time + 1) * 100, device=ctx.device).repeat(x.shape[0])
             prediction = model(x, pred_list, t)
             pred_list.append(prediction.detach())
 
@@ -91,9 +89,7 @@ class IterativeManualStep(StepStrategy):
         pred_list: list[torch.Tensor] = []
 
         for idx_time in range(self.time_prediction):
-            t = torch.tensor(
-                (idx_time + 1) * 100, device=ctx.device
-            ).repeat(x.shape[0])
+            t = torch.tensor((idx_time + 1) * 100, device=ctx.device).repeat(x.shape[0])
             prediction = model(x, pred_list, t)
             pred_list.append(prediction.detach())
             total_loss = total_loss + self.loss(prediction, y[:, idx_time])

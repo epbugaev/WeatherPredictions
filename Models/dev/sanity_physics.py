@@ -32,10 +32,10 @@ if str(REPO_ROOT) not in sys.path:
 
 from utils.old_physics import make_predformergft_ops, make_weathergft_ops
 from utils.physics import (
+    WENO5,
+    FiniteDifference,
     Grid,
     GridConfig,
-    FiniteDifference,
-    WENO5,
     PurePDEKernel,
     cfl_number,
     geostrophic_residual,
@@ -69,9 +69,13 @@ def check_fd4_equivalence(H: int = 32, W: int = 64) -> None:
     """
     old = make_weathergft_ops(latents_size=(H, W))
     grid = Grid(GridConfig(H=H, W=W, lat_scheme="arange")).to(DEVICE)
-    new = FiniteDifference(grid, boundary_x="periodic", boundary_y="periodic", boundary_z="periodic")
+    new = FiniteDifference(
+        grid, boundary_x="periodic", boundary_y="periodic", boundary_z="periodic"
+    )
 
-    field = torch.randn(2, 13, H, W, generator=torch.Generator().manual_seed(42), dtype=DTYPE).to(DEVICE)
+    field = torch.randn(2, 13, H, W, generator=torch.Generator().manual_seed(42), dtype=DTYPE).to(
+        DEVICE
+    )
 
     for name, (old_fn, new_fn) in {
         "d_x": (old.d_x, new.d_x),
@@ -93,7 +97,9 @@ def check_weno5_equivalence(H: int = 32, W: int = 64) -> None:
     grid = Grid(GridConfig(H=H, W=W, lat_scheme="linear_minus90_90")).to(DEVICE)
     new = WENO5(grid, boundary="reflect", boundary_z="periodic")
 
-    field = torch.randn(2, 13, H, W, generator=torch.Generator().manual_seed(7), dtype=DTYPE).to(DEVICE)
+    field = torch.randn(2, 13, H, W, generator=torch.Generator().manual_seed(7), dtype=DTYPE).to(
+        DEVICE
+    )
 
     for name, (old_fn, new_fn) in {
         "d_x": (lambda x: old.d_x_weno(x, boundary="reflect"), new.d_x),
@@ -115,7 +121,9 @@ def check_integral_z_equivalence(H: int = 32, W: int = 64) -> None:
     grid = Grid(GridConfig(H=H, W=W, lat_scheme="arange")).to(DEVICE)
     from utils.physics import integral_z as new_integral_z
 
-    field = torch.randn(2, 13, H, W, generator=torch.Generator().manual_seed(13), dtype=DTYPE).to(DEVICE)
+    field = torch.randn(2, 13, H, W, generator=torch.Generator().manual_seed(13), dtype=DTYPE).to(
+        DEVICE
+    )
     out_old = old.integral_z(field)
     out_new = new_integral_z(field, grid.M_z)
     diff = (out_old - out_new).abs().max().item()
@@ -144,7 +152,9 @@ def check_pure_kernel_smoke(H: int, W: int, stencil: str, coriolis: str, time_sc
     has_nan = any(torch.isnan(v).any().item() for v in next_state.values())
     has_inf = any(torch.isinf(v).any().item() for v in next_state.values())
     status = "OK" if not (has_nan or has_inf) else "FAIL"
-    print(f"  [{status}] PurePDEKernel step ({H}x{W}, stencil={stencil}, coriolis={coriolis}, time={time_scheme}): NaN={has_nan}, Inf={has_inf}")
+    print(
+        f"  [{status}] PurePDEKernel step ({H}x{W}, stencil={stencil}, coriolis={coriolis}, time={time_scheme}): NaN={has_nan}, Inf={has_inf}"
+    )
 
     # Metrics shape check
     next_packed = {k: next_state[k] for k in ("u", "v", "t", "q", "z")}
@@ -155,13 +165,19 @@ def check_pure_kernel_smoke(H: int, W: int, stencil: str, coriolis: str, time_sc
     geo = geostrophic_residual(kernel, state["u"], state["v"], state["z"])
     cfl = cfl_number(kernel, state["u"], state["v"], dt=300.0)
 
-    print(f"        residual |u|max = {resid['u'].abs().max():.3e}, "
-          f"|t|max = {resid['t'].abs().max():.3e}")
-    print(f"        ∇·v |max| = {div.abs().max():.3e}, "
-          f"KE max = {ke.max():.3e}, "
-          f"PV |max| = {pv.abs().max():.3e}")
-    print(f"        geostrophic u_residual |max| = {geo['u_residual'].abs().max():.3e}, "
-          f"v_residual |max| = {geo['v_residual'].abs().max():.3e}")
+    print(
+        f"        residual |u|max = {resid['u'].abs().max():.3e}, "
+        f"|t|max = {resid['t'].abs().max():.3e}"
+    )
+    print(
+        f"        ∇·v |max| = {div.abs().max():.3e}, "
+        f"KE max = {ke.max():.3e}, "
+        f"PV |max| = {pv.abs().max():.3e}"
+    )
+    print(
+        f"        geostrophic u_residual |max| = {geo['u_residual'].abs().max():.3e}, "
+        f"v_residual |max| = {geo['v_residual'].abs().max():.3e}"
+    )
     print(f"        CFL max = {cfl['cfl_x'].max():.3e} (x), {cfl['cfl_y'].max():.3e} (y)")
 
 
@@ -183,7 +199,9 @@ def main() -> None:
 
     print("\n=== PurePDEKernel smoke (128x256 global) ===")
     check_pure_kernel_smoke(H=128, W=256, stencil="fd4", coriolis="spherical", time_scheme="euler")
-    check_pure_kernel_smoke(H=128, W=256, stencil="weno5", coriolis="spherical", time_scheme="euler")
+    check_pure_kernel_smoke(
+        H=128, W=256, stencil="weno5", coriolis="spherical", time_scheme="euler"
+    )
 
     print("\nDone.")
 

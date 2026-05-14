@@ -1,44 +1,48 @@
 import math
-import torch
-import torch.nn as nn
 
+import torch
+import torch.fft
+import torch.nn as nn
+import torch.nn.functional as F
 from timm.layers import DropPath, trunc_normal_
 from timm.models.convnext import ConvNeXtBlock
 from timm.models.mlp_mixer import MixerBlock
 from timm.models.swin_transformer import SwinTransformerBlock
 from timm.models.vision_transformer import Block as ViTBlock
 
-from Models.blocks import (HorBlock, ChannelAggregationFFN, MultiOrderGatedAggregation,
-                     PoolFormerBlock, CBlock, SABlock, MixMlp, VANBlock)
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from timm.layers import DropPath
-import torch.fft
+from Models.blocks import (
+    CBlock,
+    ChannelAggregationFFN,
+    HorBlock,
+    MixMlp,
+    MultiOrderGatedAggregation,
+    PoolFormerBlock,
+    SABlock,
+    VANBlock,
+)
 
 
 def get_dwconv(dim, kernel, bias):
-    return nn.Conv2d(dim, dim, kernel_size=kernel, padding=(kernel-1)//2 ,bias=bias, groups=dim)
+    return nn.Conv2d(dim, dim, kernel_size=kernel, padding=(kernel - 1) // 2, bias=bias, groups=dim)
 
 
 class gnconv(nn.Module):
     def __init__(self, dim, order=5, gflayer=None, h=14, w=8, s=1.0):
         super().__init__()
         self.order = order
-        self.dims = [dim // 2 ** i for i in range(order)]
+        self.dims = [dim // 2**i for i in range(order)]
         self.dims.reverse()
-        self.proj_in = nn.Conv2d(dim, 2*dim, 1)
+        self.proj_in = nn.Conv2d(dim, 2 * dim, 1)
 
         if gflayer is None:
             self.dwconv = get_dwconv(sum(self.dims), 7, True)
         else:
             self.dwconv = gflayer(sum(self.dims), h=h, w=w)
-        
+
         self.proj_out = nn.Conv2d(dim, dim, 1)
 
         self.pws = nn.ModuleList(
-            [nn.Conv2d(self.dims[i], self.dims[i+1], 1) for i in range(order-1)]
+            [nn.Conv2d(self.dims[i], self.dims[i + 1], 1) for i in range(order - 1)]
         )
 
         self.scale = s
@@ -52,19 +56,21 @@ class gnconv(nn.Module):
         dw_list = torch.split(dw_abc, self.dims, dim=1)
         x = pwa * dw_list[0]
 
-        for i in range(self.order -1):
-            x = self.pws[i](x) * dw_list[i+1]
+        for i in range(self.order - 1):
+            x = self.pws[i](x) * dw_list[i + 1]
 
         x = self.proj_out(x)
 
         return x
 
+
 class LayerNorm(nn.Module):
-    r""" LayerNorm that supports two data formats: channels_last (default) or channels_first. 
-    The ordering of the dimensions in the inputs. channels_last corresponds to inputs with 
-    shape (batch_size, height, width, channels) while channels_first corresponds to inputs 
+    r"""LayerNorm that supports two data formats: channels_last (default) or channels_first.
+    The ordering of the dimensions in the inputs. channels_last corresponds to inputs with
+    shape (batch_size, height, width, channels) while channels_first corresponds to inputs
     with shape (batch_size, channels, height, width).
     """
+
     def __init__(self, normalized_shape, eps=1e-6, data_format="channels_last"):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(normalized_shape))
@@ -72,9 +78,9 @@ class LayerNorm(nn.Module):
         self.eps = eps
         self.data_format = data_format
         if self.data_format not in ["channels_last", "channels_first"]:
-            raise NotImplementedError 
-        self.normalized_shape = (normalized_shape, )
-    
+            raise NotImplementedError
+        self.normalized_shape = (normalized_shape,)
+
     def forward(self, x):
         if self.data_format == "channels_last":
             return F.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
@@ -87,64 +93,80 @@ class LayerNorm(nn.Module):
 
 
 class HorBlock(nn.Module):
-    """ HorNet block """
+    """HorNet block"""
 
-    def __init__(self, dim, order=4, mlp_ratio=4, drop_path=0., init_value=1e-6, gnconv=gnconv):
+    def __init__(self, dim, order=4, mlp_ratio=4, drop_path=0.0, init_value=1e-6, gnconv=gnconv):
         super().__init__()
 
-        self.norm1 = LayerNorm(dim, eps=1e-6, data_format='channels_first')
+        self.norm1 = LayerNorm(dim, eps=1e-6, data_format="channels_first")
         self.gnconv = gnconv(dim, order)  # depthwise conv
         self.norm2 = LayerNorm(dim, eps=1e-6)
-        self.pwconv1 = nn.Linear(dim, int(mlp_ratio * dim))  # pointwise/1x1 convs, implemented with linear layers
+        self.pwconv1 = nn.Linear(
+            dim, int(mlp_ratio * dim)
+        )  # pointwise/1x1 convs, implemented with linear layers
         self.act = nn.GELU()
         self.pwconv2 = nn.Linear(int(mlp_ratio * dim), dim)
         self.gamma1 = nn.Parameter(init_value * torch.ones(dim), requires_grad=True)
-        self.gamma2 = nn.Parameter(init_value * torch.ones((dim)), requires_grad=True)
-        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.gamma2 = nn.Parameter(init_value * torch.ones(dim), requires_grad=True)
+        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
     def forward(self, x):
-        B, C, H, W  = x.shape
+        B, C, H, W = x.shape
         gamma1 = self.gamma1.view(C, 1, 1)
         x = x + self.drop_path(gamma1 * self.gnconv(self.norm1(x)))
 
         input = x
-        x = x.permute(0, 2, 3, 1) # (N, C, H, W) -> (N, H, W, C)
+        x = x.permute(0, 2, 3, 1)  # (N, C, H, W) -> (N, H, W, C)
         x = self.norm2(x)
         x = self.pwconv1(x)
         x = self.act(x)
         x = self.pwconv2(x)
         if self.gamma2 is not None:
             x = self.gamma2 * x
-        x = x.permute(0, 3, 1, 2) # (N, H, W, C) -> (N, C, H, W)
+        x = x.permute(0, 3, 1, 2)  # (N, H, W, C) -> (N, C, H, W)
 
         x = input + self.drop_path(x)
         return x
 
 
 class BasicConv2d(nn.Module):
-
-    def __init__(self,
-                 in_channels,
-                 out_channels,
-                 kernel_size=3,
-                 stride=1,
-                 padding=0,
-                 dilation=1,
-                 upsampling=False,
-                 act_norm=False,
-                 act_inplace=True):
-        super(BasicConv2d, self).__init__()
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        kernel_size=3,
+        stride=1,
+        padding=0,
+        dilation=1,
+        upsampling=False,
+        act_norm=False,
+        act_inplace=True,
+    ):
+        super().__init__()
         self.act_norm = act_norm
         if upsampling is True:
-            self.conv = nn.Sequential(*[
-                nn.Conv2d(in_channels, out_channels*4, kernel_size=kernel_size,
-                          stride=1, padding=padding, dilation=dilation),
-                nn.PixelShuffle(2)
-            ])
+            self.conv = nn.Sequential(
+                *[
+                    nn.Conv2d(
+                        in_channels,
+                        out_channels * 4,
+                        kernel_size=kernel_size,
+                        stride=1,
+                        padding=padding,
+                        dilation=dilation,
+                    ),
+                    nn.PixelShuffle(2),
+                ]
+            )
         else:
             self.conv = nn.Conv2d(
-                in_channels, out_channels, kernel_size=kernel_size,
-                stride=stride, padding=padding, dilation=dilation)
+                in_channels,
+                out_channels,
+                kernel_size=kernel_size,
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+            )
 
         self.norm = nn.GroupNorm(2, out_channels)
         self.act = nn.SiLU(inplace=act_inplace)
@@ -153,7 +175,7 @@ class BasicConv2d(nn.Module):
 
     def _init_weights(self, m):
         if isinstance(m, (nn.Conv2d)):
-            trunc_normal_(m.weight, std=.02)
+            trunc_normal_(m.weight, std=0.02)
             nn.init.constant_(m.bias, 0)
 
     def forward(self, x):
@@ -164,23 +186,31 @@ class BasicConv2d(nn.Module):
 
 
 class ConvSC(nn.Module):
-
-    def __init__(self,
-                 C_in,
-                 C_out,
-                 kernel_size=3,
-                 downsampling=False,
-                 upsampling=False,
-                 act_norm=True,
-                 act_inplace=True):
-        super(ConvSC, self).__init__()
+    def __init__(
+        self,
+        C_in,
+        C_out,
+        kernel_size=3,
+        downsampling=False,
+        upsampling=False,
+        act_norm=True,
+        act_inplace=True,
+    ):
+        super().__init__()
 
         stride = 2 if downsampling is True else 1
         padding = (kernel_size - stride + 1) // 2
 
-        self.conv = BasicConv2d(C_in, C_out, kernel_size=kernel_size, stride=stride,
-                                upsampling=upsampling, padding=padding,
-                                act_norm=act_norm, act_inplace=act_inplace)
+        self.conv = BasicConv2d(
+            C_in,
+            C_out,
+            kernel_size=kernel_size,
+            stride=stride,
+            upsampling=upsampling,
+            padding=padding,
+            act_norm=act_norm,
+            act_inplace=act_inplace,
+        )
 
     def forward(self, x):
         y = self.conv(x)
@@ -188,24 +218,30 @@ class ConvSC(nn.Module):
 
 
 class GroupConv2d(nn.Module):
-
-    def __init__(self,
-                 in_channels,
-                 out_channels,
-                 kernel_size=3,
-                 stride=1,
-                 padding=0,
-                 groups=1,
-                 act_norm=False,
-                 act_inplace=True):
-        super(GroupConv2d, self).__init__()
-        self.act_norm=act_norm
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        kernel_size=3,
+        stride=1,
+        padding=0,
+        groups=1,
+        act_norm=False,
+        act_inplace=True,
+    ):
+        super().__init__()
+        self.act_norm = act_norm
         if in_channels % groups != 0:
-            groups=1
+            groups = 1
         self.conv = nn.Conv2d(
-            in_channels, out_channels, kernel_size=kernel_size,
-            stride=stride, padding=padding, groups=groups)
-        self.norm = nn.GroupNorm(groups,out_channels)
+            in_channels,
+            out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            groups=groups,
+        )
+        self.norm = nn.GroupNorm(groups, out_channels)
         self.activate = nn.LeakyReLU(0.2, inplace=act_inplace)
 
     def forward(self, x):
@@ -218,15 +254,23 @@ class GroupConv2d(nn.Module):
 class gInception_ST(nn.Module):
     """A IncepU block for SimVP"""
 
-    def __init__(self, C_in, C_hid, C_out, incep_ker = [3,5,7,11], groups = 8):        
-        super(gInception_ST, self).__init__()
+    def __init__(self, C_in, C_hid, C_out, incep_ker=[3, 5, 7, 11], groups=8):
+        super().__init__()
         self.conv1 = nn.Conv2d(C_in, C_hid, kernel_size=1, stride=1, padding=0)
 
         layers = []
         for ker in incep_ker:
-            layers.append(GroupConv2d(
-                C_hid, C_out, kernel_size=ker, stride=1,
-                padding=ker//2, groups=groups, act_norm=True))
+            layers.append(
+                GroupConv2d(
+                    C_hid,
+                    C_out,
+                    kernel_size=ker,
+                    stride=1,
+                    padding=ker // 2,
+                    groups=groups,
+                    act_norm=True,
+                )
+            )
         self.layers = nn.Sequential(*layers)
 
     def forward(self, x):
@@ -245,16 +289,17 @@ class AttentionModule(nn.Module):
         d_k = 2 * dilation - 1
         d_p = (d_k - 1) // 2
         dd_k = kernel_size // dilation + ((kernel_size // dilation) % 2 - 1)
-        dd_p = (dilation * (dd_k - 1) // 2)
+        dd_p = dilation * (dd_k - 1) // 2
 
         self.conv0 = nn.Conv2d(dim, dim, d_k, padding=d_p, groups=dim)
         self.conv_spatial = nn.Conv2d(
-            dim, dim, dd_k, stride=1, padding=dd_p, groups=dim, dilation=dilation)
-        self.conv1 = nn.Conv2d(dim, 2*dim, 1)
+            dim, dim, dd_k, stride=1, padding=dd_p, groups=dim, dilation=dilation
+        )
+        self.conv1 = nn.Conv2d(dim, 2 * dim, 1)
 
     def forward(self, x):
-        attn = self.conv0(x)           # depth-wise conv
-        attn = self.conv_spatial(attn) # depth-wise dilation convolution
+        attn = self.conv0(x)  # depth-wise conv
+        attn = self.conv_spatial(attn)  # depth-wise dilation convolution
 
         f_g = self.conv1(attn)
         split_dim = f_g.shape[1] // 2
@@ -268,10 +313,10 @@ class SpatialAttention(nn.Module):
     def __init__(self, d_model, kernel_size=21, attn_shortcut=True):
         super().__init__()
 
-        self.proj_1 = nn.Conv2d(d_model, d_model, 1)         # 1x1 conv
-        self.activation = nn.GELU()                          # GELU
+        self.proj_1 = nn.Conv2d(d_model, d_model, 1)  # 1x1 conv
+        self.activation = nn.GELU()  # GELU
         self.spatial_gating_unit = AttentionModule(d_model, kernel_size)
-        self.proj_2 = nn.Conv2d(d_model, d_model, 1)         # 1x1 conv
+        self.proj_2 = nn.Conv2d(d_model, d_model, 1)  # 1x1 conv
         self.attn_shortcut = attn_shortcut
 
     def forward(self, x):
@@ -289,26 +334,35 @@ class SpatialAttention(nn.Module):
 class GASubBlock(nn.Module):
     """A GABlock (gSTA) for SimVP"""
 
-    def __init__(self, dim, kernel_size=21, mlp_ratio=4.,
-                 drop=0., drop_path=0.1, init_value=1e-2, act_layer=nn.GELU):
+    def __init__(
+        self,
+        dim,
+        kernel_size=21,
+        mlp_ratio=4.0,
+        drop=0.0,
+        drop_path=0.1,
+        init_value=1e-2,
+        act_layer=nn.GELU,
+    ):
         super().__init__()
         self.norm1 = nn.BatchNorm2d(dim)
         self.attn = SpatialAttention(dim, kernel_size)
-        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
         self.norm2 = nn.BatchNorm2d(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = MixMlp(
-            in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+            in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop
+        )
 
-        self.layer_scale_1 = nn.Parameter(init_value * torch.ones((dim)), requires_grad=True)
-        self.layer_scale_2 = nn.Parameter(init_value * torch.ones((dim)), requires_grad=True)
+        self.layer_scale_1 = nn.Parameter(init_value * torch.ones(dim), requires_grad=True)
+        self.layer_scale_2 = nn.Parameter(init_value * torch.ones(dim), requires_grad=True)
 
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight, std=.02)
+            trunc_normal_(m.weight, std=0.02)
             if isinstance(m, nn.Linear) and m.bias is not None:
                 nn.init.constant_(m.bias, 0)
         elif isinstance(m, nn.LayerNorm):
@@ -323,13 +377,15 @@ class GASubBlock(nn.Module):
 
     @torch.jit.ignore
     def no_weight_decay(self):
-        return {'layer_scale_1', 'layer_scale_2'}
+        return {"layer_scale_1", "layer_scale_2"}
 
     def forward(self, x):
         x = x + self.drop_path(
-            self.layer_scale_1.unsqueeze(-1).unsqueeze(-1) * self.attn(self.norm1(x)))
+            self.layer_scale_1.unsqueeze(-1).unsqueeze(-1) * self.attn(self.norm1(x))
+        )
         x = x + self.drop_path(
-            self.layer_scale_2.unsqueeze(-1).unsqueeze(-1) * self.mlp(self.norm2(x)))
+            self.layer_scale_2.unsqueeze(-1).unsqueeze(-1) * self.mlp(self.norm2(x))
+        )
         return x
 
 
@@ -373,9 +429,10 @@ class ConvMixerSubBlock(nn.Module):
 class ConvNeXtSubBlock(ConvNeXtBlock):
     """A block of ConvNeXt."""
 
-    def __init__(self, dim, mlp_ratio=4., drop=0., drop_path=0.1):
-        super().__init__(dim, mlp_ratio=mlp_ratio,
-                         drop_path=drop_path, ls_init_value=1e-6, conv_mlp=True)
+    def __init__(self, dim, mlp_ratio=4.0, drop=0.0, drop_path=0.1):
+        super().__init__(
+            dim, mlp_ratio=mlp_ratio, drop_path=drop_path, ls_init_value=1e-6, conv_mlp=True
+        )
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
@@ -391,28 +448,29 @@ class ConvNeXtSubBlock(ConvNeXtBlock):
 
     @torch.jit.ignore
     def no_weight_decay(self):
-        return {'gamma'}
+        return {"gamma"}
 
     def forward(self, x):
         x = x + self.drop_path(
-            self.gamma.reshape(1, -1, 1, 1) * self.mlp(self.norm(self.conv_dw(x))))
+            self.gamma.reshape(1, -1, 1, 1) * self.mlp(self.norm(self.conv_dw(x)))
+        )
         return x
 
 
 class HorNetSubBlock(HorBlock):
     """A block of HorNet."""
 
-    def __init__(self, dim, mlp_ratio=4., drop_path=0.1, init_value=1e-6):
+    def __init__(self, dim, mlp_ratio=4.0, drop_path=0.1, init_value=1e-6):
         super().__init__(dim, mlp_ratio=mlp_ratio, drop_path=drop_path, init_value=init_value)
         self.apply(self._init_weights)
 
     @torch.jit.ignore
     def no_weight_decay(self):
-        return {'gamma1', 'gamma2'}
+        return {"gamma1", "gamma2"}
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight, std=.02)
+            trunc_normal_(m.weight, std=0.02)
             if isinstance(m, nn.Linear) and m.bias is not None:
                 nn.init.constant_(m.bias, 0)
         elif isinstance(m, nn.LayerNorm):
@@ -429,15 +487,16 @@ class HorNetSubBlock(HorBlock):
 class MLPMixerSubBlock(MixerBlock):
     """A block of MLP-Mixer."""
 
-    def __init__(self, dim, input_resolution=None, mlp_ratio=4., drop=0., drop_path=0.1):
+    def __init__(self, dim, input_resolution=None, mlp_ratio=4.0, drop=0.0, drop_path=0.1):
         seq_len = input_resolution[0] * input_resolution[1]
-        super().__init__(dim, seq_len=seq_len,
-                         mlp_ratio=(0.5, mlp_ratio), drop_path=drop_path, drop=drop)
+        super().__init__(
+            dim, seq_len=seq_len, mlp_ratio=(0.5, mlp_ratio), drop_path=drop_path, drop=drop
+        )
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight, std=.02)
+            trunc_normal_(m.weight, std=0.02)
             if isinstance(m, nn.Linear) and m.bias is not None:
                 nn.init.constant_(m.bias, 0)
         elif isinstance(m, (nn.LayerNorm, nn.GroupNorm, nn.BatchNorm2d)):
@@ -459,23 +518,37 @@ class MLPMixerSubBlock(MixerBlock):
 class MogaSubBlock(nn.Module):
     """A block of MogaNet."""
 
-    def __init__(self, embed_dims, mlp_ratio=4., drop_rate=0., drop_path_rate=0., init_value=1e-5,
-                 attn_dw_dilation=[1, 2, 3], attn_channel_split=[1, 3, 4]):
-        super(MogaSubBlock, self).__init__()
+    def __init__(
+        self,
+        embed_dims,
+        mlp_ratio=4.0,
+        drop_rate=0.0,
+        drop_path_rate=0.0,
+        init_value=1e-5,
+        attn_dw_dilation=[1, 2, 3],
+        attn_channel_split=[1, 3, 4],
+    ):
+        super().__init__()
         self.out_channels = embed_dims
         # spatial attention
         self.norm1 = nn.BatchNorm2d(embed_dims)
         self.attn = MultiOrderGatedAggregation(
-            embed_dims, attn_dw_dilation=attn_dw_dilation, attn_channel_split=attn_channel_split)
-        self.drop_path = DropPath(drop_path_rate) if drop_path_rate > 0. else nn.Identity()
+            embed_dims, attn_dw_dilation=attn_dw_dilation, attn_channel_split=attn_channel_split
+        )
+        self.drop_path = DropPath(drop_path_rate) if drop_path_rate > 0.0 else nn.Identity()
         # channel MLP
         self.norm2 = nn.BatchNorm2d(embed_dims)
         mlp_hidden_dims = int(embed_dims * mlp_ratio)
         self.mlp = ChannelAggregationFFN(
-            embed_dims=embed_dims, mlp_hidden_dims=mlp_hidden_dims, ffn_drop=drop_rate)
+            embed_dims=embed_dims, mlp_hidden_dims=mlp_hidden_dims, ffn_drop=drop_rate
+        )
         # init layer scale
-        self.layer_scale_1 = nn.Parameter(init_value * torch.ones((1, embed_dims, 1, 1)), requires_grad=True)
-        self.layer_scale_2 = nn.Parameter(init_value * torch.ones((1, embed_dims, 1, 1)), requires_grad=True)
+        self.layer_scale_1 = nn.Parameter(
+            init_value * torch.ones((1, embed_dims, 1, 1)), requires_grad=True
+        )
+        self.layer_scale_2 = nn.Parameter(
+            init_value * torch.ones((1, embed_dims, 1, 1)), requires_grad=True
+        )
 
         self.apply(self._init_weights)
 
@@ -492,7 +565,7 @@ class MogaSubBlock(nn.Module):
 
     @torch.jit.ignore
     def no_weight_decay(self):
-        return {'layer_scale_1', 'layer_scale_2', 'sigma'}
+        return {"layer_scale_1", "layer_scale_2", "sigma"}
 
     def forward(self, x):
         x = x + self.drop_path(self.layer_scale_1 * self.attn(self.norm1(x)))
@@ -503,18 +576,19 @@ class MogaSubBlock(nn.Module):
 class PoolFormerSubBlock(PoolFormerBlock):
     """A block of PoolFormer."""
 
-    def __init__(self, dim, mlp_ratio=4., drop=0., drop_path=0.1):
-        super().__init__(dim, pool_size=3, mlp_ratio=mlp_ratio, drop_path=drop_path,
-                         drop=drop, init_value=1e-5)
+    def __init__(self, dim, mlp_ratio=4.0, drop=0.0, drop_path=0.1):
+        super().__init__(
+            dim, pool_size=3, mlp_ratio=mlp_ratio, drop_path=drop_path, drop=drop, init_value=1e-5
+        )
         self.apply(self._init_weights)
 
     @torch.jit.ignore
     def no_weight_decay(self):
-        return {'layer_scale_1', 'layer_scale_2'}
+        return {"layer_scale_1", "layer_scale_2"}
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight, std=.02)
+            trunc_normal_(m.weight, std=0.02)
             if isinstance(m, nn.Linear) and m.bias is not None:
                 nn.init.constant_(m.bias, 0)
         elif isinstance(m, (nn.LayerNorm, nn.GroupNorm, nn.BatchNorm2d)):
@@ -525,18 +599,29 @@ class PoolFormerSubBlock(PoolFormerBlock):
 class SwinSubBlock(SwinTransformerBlock):
     """A block of Swin Transformer."""
 
-    def __init__(self, dim, input_resolution=None, layer_i=0, mlp_ratio=4., drop=0., drop_path=0.1):
+    def __init__(
+        self, dim, input_resolution=None, layer_i=0, mlp_ratio=4.0, drop=0.0, drop_path=0.1
+    ):
         window_size = 7 if input_resolution[0] % 7 == 0 else max(4, input_resolution[0] // 16)
         window_size = min(8, window_size)
         shift_size = 0 if (layer_i % 2 == 0) else window_size // 2
-        super().__init__(dim, input_resolution, num_heads=8, window_size=window_size,
-                         shift_size=shift_size, mlp_ratio=mlp_ratio,
-                         drop_path=drop_path, attn_drop=drop, proj_drop=drop, qkv_bias=True)
+        super().__init__(
+            dim,
+            input_resolution,
+            num_heads=8,
+            window_size=window_size,
+            shift_size=shift_size,
+            mlp_ratio=mlp_ratio,
+            drop_path=drop_path,
+            attn_drop=drop,
+            proj_drop=drop,
+            qkv_bias=True,
+        )
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight, std=.02)
+            trunc_normal_(m.weight, std=0.02)
             if isinstance(m, nn.Linear) and m.bias is not None:
                 nn.init.constant_(m.bias, 0)
         elif isinstance(m, (nn.LayerNorm, nn.GroupNorm, nn.BatchNorm2d)):
@@ -557,29 +642,45 @@ class SwinSubBlock(SwinTransformerBlock):
         return x.reshape(B, H, W, C).permute(0, 3, 1, 2)
 
 
-def UniformerSubBlock(embed_dims, mlp_ratio=4., drop=0., drop_path=0.,
-                      init_value=1e-6, block_type='Conv'):
+def UniformerSubBlock(
+    embed_dims, mlp_ratio=4.0, drop=0.0, drop_path=0.0, init_value=1e-6, block_type="Conv"
+):
     """Build a block of Uniformer."""
 
-    assert block_type in ['Conv', 'MHSA']
-    if block_type == 'Conv':
+    assert block_type in ["Conv", "MHSA"]
+    if block_type == "Conv":
         return CBlock(dim=embed_dims, mlp_ratio=mlp_ratio, drop=drop, drop_path=drop_path)
     else:
-        return SABlock(dim=embed_dims, num_heads=8, mlp_ratio=mlp_ratio, qkv_bias=True,
-                       drop=drop, drop_path=drop_path, init_value=init_value)
+        return SABlock(
+            dim=embed_dims,
+            num_heads=8,
+            mlp_ratio=mlp_ratio,
+            qkv_bias=True,
+            drop=drop,
+            drop_path=drop_path,
+            init_value=init_value,
+        )
 
 
 class VANSubBlock(VANBlock):
     """A block of VAN."""
 
-    def __init__(self, dim, mlp_ratio=4., drop=0.,drop_path=0., init_value=1e-2, act_layer=nn.GELU):
-        super().__init__(dim=dim, mlp_ratio=mlp_ratio, drop=drop, drop_path=drop_path,
-                         init_value=init_value, act_layer=act_layer)
+    def __init__(
+        self, dim, mlp_ratio=4.0, drop=0.0, drop_path=0.0, init_value=1e-2, act_layer=nn.GELU
+    ):
+        super().__init__(
+            dim=dim,
+            mlp_ratio=mlp_ratio,
+            drop=drop,
+            drop_path=drop_path,
+            init_value=init_value,
+            act_layer=act_layer,
+        )
         self.apply(self._init_weights)
 
     @torch.jit.ignore
     def no_weight_decay(self):
-        return {'layer_scale_1', 'layer_scale_2'}
+        return {"layer_scale_1", "layer_scale_2"}
 
     def _init_weights(self, m):
         if isinstance(m, (nn.LayerNorm, nn.GroupNorm, nn.BatchNorm2d)):
@@ -596,15 +697,24 @@ class VANSubBlock(VANBlock):
 class ViTSubBlock(ViTBlock):
     """A block of Vision Transformer."""
 
-    def __init__(self, dim, mlp_ratio=4., drop=0., drop_path=0.1):
-        super().__init__(dim=dim, num_heads=8, mlp_ratio=mlp_ratio, qkv_bias=True,
-                         attn_drop=drop, proj_drop=0, drop_path=drop_path, act_layer=nn.GELU, norm_layer=nn.LayerNorm)
-        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+    def __init__(self, dim, mlp_ratio=4.0, drop=0.0, drop_path=0.1):
+        super().__init__(
+            dim=dim,
+            num_heads=8,
+            mlp_ratio=mlp_ratio,
+            qkv_bias=True,
+            attn_drop=drop,
+            proj_drop=0,
+            drop_path=drop_path,
+            act_layer=nn.GELU,
+            norm_layer=nn.LayerNorm,
+        )
+        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight, std=.02)
+            trunc_normal_(m.weight, std=0.02)
             if isinstance(m, nn.Linear) and m.bias is not None:
                 nn.init.constant_(m.bias, 0)
         elif isinstance(m, (nn.LayerNorm, nn.GroupNorm, nn.BatchNorm2d)):
@@ -621,7 +731,7 @@ class ViTSubBlock(ViTBlock):
         x = x + self.drop_path(self.attn(self.norm1(x)))
         x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x.reshape(B, H, W, C).permute(0, 3, 1, 2)
-    
+
 
 class TemporalAttention(nn.Module):
     """A Temporal Attention block for Temporal Attention Unit"""
@@ -629,10 +739,10 @@ class TemporalAttention(nn.Module):
     def __init__(self, d_model, kernel_size=21, attn_shortcut=True):
         super().__init__()
 
-        self.proj_1 = nn.Conv2d(d_model, d_model, 1)         # 1x1 conv
-        self.activation = nn.GELU()                          # GELU
+        self.proj_1 = nn.Conv2d(d_model, d_model, 1)  # 1x1 conv
+        self.activation = nn.GELU()  # GELU
         self.spatial_gating_unit = TemporalAttentionModule(d_model, kernel_size)
-        self.proj_2 = nn.Conv2d(d_model, d_model, 1)         # 1x1 conv
+        self.proj_2 = nn.Conv2d(d_model, d_model, 1)  # 1x1 conv
         self.attn_shortcut = attn_shortcut
 
     def forward(self, x):
@@ -645,7 +755,7 @@ class TemporalAttention(nn.Module):
         if self.attn_shortcut:
             x = x + shortcut
         return x
-    
+
 
 class TemporalAttentionModule(nn.Module):
     """Large Kernel Attention for SimVP"""
@@ -655,27 +765,28 @@ class TemporalAttentionModule(nn.Module):
         d_k = 2 * dilation - 1
         d_p = (d_k - 1) // 2
         dd_k = kernel_size // dilation + ((kernel_size // dilation) % 2 - 1)
-        dd_p = (dilation * (dd_k - 1) // 2)
+        dd_p = dilation * (dd_k - 1) // 2
 
         self.conv0 = nn.Conv2d(dim, dim, d_k, padding=d_p, groups=dim)
         self.conv_spatial = nn.Conv2d(
-            dim, dim, dd_k, stride=1, padding=dd_p, groups=dim, dilation=dilation)
+            dim, dim, dd_k, stride=1, padding=dd_p, groups=dim, dilation=dilation
+        )
         self.conv1 = nn.Conv2d(dim, dim, 1)
 
         self.reduction = max(dim // reduction, 4)
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Sequential(
-            nn.Linear(dim, dim // self.reduction, bias=False), # reduction
+            nn.Linear(dim, dim // self.reduction, bias=False),  # reduction
             nn.ReLU(True),
-            nn.Linear(dim // self.reduction, dim, bias=False), # expansion
-            nn.Sigmoid()
+            nn.Linear(dim // self.reduction, dim, bias=False),  # expansion
+            nn.Sigmoid(),
         )
 
     def forward(self, x):
         u = x.clone()
-        attn = self.conv0(x)           # depth-wise conv
-        attn = self.conv_spatial(attn) # depth-wise dilation convolution
-        f_x = self.conv1(attn)         # 1x1 conv
+        attn = self.conv0(x)  # depth-wise conv
+        attn = self.conv_spatial(attn)  # depth-wise dilation convolution
+        f_x = self.conv1(attn)  # 1x1 conv
         # append a se operation
         b, c, _, _ = x.size()
         se_atten = self.avg_pool(x).view(b, c)
@@ -686,9 +797,24 @@ class TemporalAttentionModule(nn.Module):
 class TAUSubBlock(GASubBlock):
     """A TAUBlock (tau) for Temporal Attention Unit"""
 
-    def __init__(self, dim, kernel_size=21, mlp_ratio=4.,
-                 drop=0., drop_path=0.1, init_value=1e-2, act_layer=nn.GELU):
-        super().__init__(dim=dim, kernel_size=kernel_size, mlp_ratio=mlp_ratio,
-                 drop=drop, drop_path=drop_path, init_value=init_value, act_layer=act_layer)
-        
+    def __init__(
+        self,
+        dim,
+        kernel_size=21,
+        mlp_ratio=4.0,
+        drop=0.0,
+        drop_path=0.1,
+        init_value=1e-2,
+        act_layer=nn.GELU,
+    ):
+        super().__init__(
+            dim=dim,
+            kernel_size=kernel_size,
+            mlp_ratio=mlp_ratio,
+            drop=drop,
+            drop_path=drop_path,
+            init_value=init_value,
+            act_layer=act_layer,
+        )
+
         self.attn = TemporalAttention(dim, kernel_size)

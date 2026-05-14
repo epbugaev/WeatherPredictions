@@ -47,24 +47,29 @@ from tools.check_physics_common import (
 )
 from utils.old_physics import make_weathergft_ops
 
-
 # Константы из Models/dev/WeatherGFT_3.py:127-148.
-L = 2.5e6              # Дж/кг
-R = 8.314              # универсальная газовая
-R_d = 287.0            # сухой воздух
-c_p = 1005.0           # Дж/(кг·К)
-sigma_sb = 5.67e-8     # Stefan-Boltzmann
+L = 2.5e6  # Дж/кг
+R = 8.314  # универсальная газовая
+R_d = 287.0  # сухой воздух
+c_p = 1005.0  # Дж/(кг·К)
+sigma_sb = 5.67e-8  # Stefan-Boltzmann
 emissivity = 0.7
-K_H = 15.0             # горизонтальная диффузия, м²/с
-K_V = 0.1              # вертикальная диффузия, м²/с
-PRECIP_THRESHOLD = 0.8 # порог rel humidity для convective precip
+K_H = 15.0  # горизонтальная диффузия, м²/с
+K_V = 0.1  # вертикальная диффузия, м²/с
+PRECIP_THRESHOLD = 0.8  # порог rel humidity для convective precip
 
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--memmap-path", default="/home/fa.buzaev/era5_memmap/predformer_globe_2000_2018.dat")
+    p.add_argument(
+        "--memmap-path", default="/home/fa.buzaev/era5_memmap/predformer_globe_2000_2018.dat"
+    )
     p.add_argument("--memmap-meta-path", default=None)
-    p.add_argument("--mean-std-path", default="", help="Empty: assume memmap holds raw physical units (v3/v4 default).")
+    p.add_argument(
+        "--mean-std-path",
+        default="",
+        help="Empty: assume memmap holds raw physical units (v3/v4 default).",
+    )
     p.add_argument("--H", type=int, default=32)
     p.add_argument("--W", type=int, default=64)
     p.add_argument("--year", type=int, default=2005)
@@ -99,7 +104,7 @@ def main() -> None:
                     = -ε·σ·T⁴·R_d·T / (c_p·p_Pa)
         Переписываем безопаснее: p в Па, T в К, итог в К/с.
         """
-        cooling_W_m2 = emissivity * sigma_sb * t_kelvin ** 4
+        cooling_W_m2 = emissivity * sigma_sb * t_kelvin**4
         # rho = p / (R_d · T) → масса воздуха на m². dT/dt = -Q / (c_p · rho · 1m).
         # В оригинале: dt_rad = -Q / (c_p · pressure_Pa / (R_d · T_abs))
         return -cooling_W_m2 / (c_p * pressure_pa / (R_d * t_kelvin))
@@ -156,7 +161,9 @@ def main() -> None:
         precip_rate, latent_heat = convective_precipitation(q, t)
         t_t = (
             (Q_adiabatic - z_z * w) / c_p
-            - u * t_x - v * t_y - w * t_z
+            - u * t_x
+            - v * t_y
+            - w * t_z
             + t_mix
             + rad_cool
             + latent_heat
@@ -185,7 +192,9 @@ def main() -> None:
             "z": state["z"] + dt * rhs_dict["z_t"],
         }
 
-    def rollout_step(state: dict[str, torch.Tensor]) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+    def rollout_step(
+        state: dict[str, torch.Tensor],
+    ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
         """RK4 substep (dev/WeatherGFT_3.py:255-285, без scale_diff)."""
         dt = args.block_dt_seconds
 
@@ -216,8 +225,12 @@ def main() -> None:
         block_dt_seconds=args.block_dt_seconds,
         project_name=args.project_name,
         tags=[
-            "fd4", "rk4", "coriolis_spherical",
-            "turbulent_mixing", "radiative_cooling", "convective_precip",
+            "fd4",
+            "rk4",
+            "coriolis_spherical",
+            "turbulent_mixing",
+            "radiative_cooling",
+            "convective_precip",
             "method_weathergft_3",
         ],
         offline=args.offline,

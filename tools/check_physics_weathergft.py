@@ -35,12 +35,9 @@ from tools.check_physics_common import (
     GeometryCPU,
     coriolis_constant,
     default_initial_conditions,
-    integral_z_cpu,
-    relhum_to_specific,
     run_72h_rollout,
 )
 from utils.old_physics import make_weathergft_ops
-
 
 # Физические константы (WeatherGFT.py:125-131).
 L = 2.5e6
@@ -50,7 +47,9 @@ c_p = 1005.0
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--memmap-path", default="/home/fa.buzaev/era5_memmap/predformer_globe_2000_2018.dat")
+    p.add_argument(
+        "--memmap-path", default="/home/fa.buzaev/era5_memmap/predformer_globe_2000_2018.dat"
+    )
     p.add_argument("--memmap-meta-path", default=None)
     p.add_argument(
         "--mean-std-path",
@@ -58,13 +57,25 @@ def main() -> None:
         help="Per-channel mean/std (.npy or .json). Pass empty (default) if memmap already stores raw "
         "physical units (v3/v4 memmap convention). Pass a path only if memmap holds normalised data.",
     )
-    p.add_argument("--H", type=int, default=32, help="Grid height. Default matches predformer_globe memmap (32).")
-    p.add_argument("--W", type=int, default=64, help="Grid width. Default matches predformer_globe memmap (64).")
+    p.add_argument(
+        "--H",
+        type=int,
+        default=32,
+        help="Grid height. Default matches predformer_globe memmap (32).",
+    )
+    p.add_argument(
+        "--W",
+        type=int,
+        default=64,
+        help="Grid width. Default matches predformer_globe memmap (64).",
+    )
     p.add_argument("--year", type=int, default=2005)
     p.add_argument("--horizon-hours", type=int, default=72)
     p.add_argument("--block-dt-seconds", type=float, default=300.0)
     p.add_argument("--coriolis-value", type=float, default=7.29e-5)
-    p.add_argument("--offline", action="store_true", help="Comet OfflineExperiment вместо живой синхронизации")
+    p.add_argument(
+        "--offline", action="store_true", help="Comet OfflineExperiment вместо живой синхронизации"
+    )
     p.add_argument("--project-name", default="WeatherPredictions")
     args = p.parse_args()
 
@@ -84,7 +95,9 @@ def main() -> None:
     f_field = coriolis_constant(geom, value=args.coriolis_value).to(device)
     pressure_pa = geom.pressure_pa_t.to(device)
 
-    def rollout_step(state: dict[str, torch.Tensor]) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+    def rollout_step(
+        state: dict[str, torch.Tensor],
+    ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
         """Один Euler-substep `block_dt` секунд по WeatherGFT-семантике, без scale_diff."""
         u, v, t, q, z = state["u"], state["v"], state["t"], state["q"], state["z"]
 

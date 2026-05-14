@@ -63,6 +63,7 @@ register_model("PI-IAM4VP")(IAM4VP)
 
 _PredRNN_Model = _maybe_import("Models.PredRNN", "PredRNN_Model")
 if _PredRNN_Model is not None:
+
     def _build_predrnn(**params):
         """``PredRNN_Model`` with nested ``configs`` and tuple coercion."""
         configs = dict(params.pop("configs", {}))

@@ -364,13 +364,15 @@ class Trainer:
                 else:
                     with record_function("zero_grad"):
                         optimizer.zero_grad(set_to_none=True)
-                    with record_function("forward"):
-                        with autocast(
+                    with (
+                        record_function("forward"),
+                        autocast(
                             device_type=self.dist.device.type,
                             dtype=self.amp_dtype,
                             enabled=self.amp_enabled,
-                        ):
-                            step_metrics = strategy.train_step(model, batch, ctx)
+                        ),
+                    ):
+                        step_metrics = strategy.train_step(model, batch, ctx)
                     loss = step_metrics["loss"]
                     # NaN/Inf guard: under bf16/fp16 a single bad sample or
                     # exploding gradient can poison the optimiser state for

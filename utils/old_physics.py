@@ -25,12 +25,11 @@ factory-функции).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 import torch
 import torch.nn.functional as F
-
 
 # =============================================================================
 # Helpers: построение module-global констант под заданный latents_size
@@ -73,9 +72,9 @@ def _build_grid_weathergft_style(latents_size: tuple[int, int]) -> _GridSnapshot
     pressure = torch.tensor(
         [50, 100, 150, 200, 250, 300, 400, 500, 600, 700, 850, 925, 1000]
     ).reshape([1, 13, 1, 1])
-    pixel_z = torch.tensor(
-        [50, 50, 50, 50, 50, 75, 100, 100, 100, 125, 112, 75, 75]
-    ).reshape([1, 13, 1, 1])
+    pixel_z = torch.tensor([50, 50, 50, 50, 50, 75, 100, 100, 100, 125, 112, 75, 75]).reshape(
+        [1, 13, 1, 1]
+    )
 
     pressure_level_num = pixel_z.shape[1]
     M_z = torch.zeros(pressure_level_num, pressure_level_num)
@@ -121,9 +120,9 @@ def _build_grid_predformergft_style(latents_size: tuple[int, int]) -> _GridSnaps
     pressure = torch.tensor(
         [50, 100, 150, 200, 250, 300, 400, 500, 600, 700, 850, 925, 1000]
     ).reshape([1, 13, 1, 1])
-    pixel_z = torch.tensor(
-        [50, 50, 50, 50, 50, 75, 100, 100, 100, 125, 112, 75, 75]
-    ).reshape([1, 13, 1, 1])
+    pixel_z = torch.tensor([50, 50, 50, 50, 50, 75, 100, 100, 100, 125, 112, 75, 75]).reshape(
+        [1, 13, 1, 1]
+    )
 
     pressure_level_num = pixel_z.shape[1]
     M_z = torch.zeros(pressure_level_num, pressure_level_num)
@@ -251,9 +250,7 @@ def make_weathergft_ops(latents_size: tuple[int, int] = (8, 16)):
         conv_kernel[0, 0, 3] = -8
         conv_kernel[0, 0, 4] = 1
 
-        input_tensor = torch.cat(
-            (input_tensor[:, :2], input_tensor, input_tensor[:, -2:]), dim=1
-        )
+        input_tensor = torch.cat((input_tensor[:, :2], input_tensor, input_tensor[:, -2:]), dim=1)
         input_tensor = input_tensor.unsqueeze(1)  # B, 1, C, H, W
         output_z = F.conv3d(input_tensor, conv_kernel) / 12
         output_z = output_z.squeeze(1)
@@ -337,9 +334,7 @@ def make_predformergft_ops(latents_size: tuple[int, int] = (8, 16)):
         beta1 = (13 / 12.0) * (u_m2 - 2 * u_m1 + u_0) ** 2 + (1 / 4.0) * (
             u_m2 - 4 * u_m1 + 3 * u_0
         ) ** 2
-        beta2 = (13 / 12.0) * (u_m1 - 2 * u_0 + u_p1) ** 2 + (1 / 4.0) * (
-            u_m1 - u_p1
-        ) ** 2
+        beta2 = (13 / 12.0) * (u_m1 - 2 * u_0 + u_p1) ** 2 + (1 / 4.0) * (u_m1 - u_p1) ** 2
         beta3 = (13 / 12.0) * (u_0 - 2 * u_p1 + u_p2) ** 2 + (1 / 4.0) * (
             3 * u_0 - 4 * u_p1 + u_p2
         ) ** 2
@@ -412,9 +407,7 @@ def make_predformergft_ops(latents_size: tuple[int, int] = (8, 16)):
         conv_kernel[0, 0, 3] = -8
         conv_kernel[0, 0, 4] = 1
 
-        input_tensor = torch.cat(
-            (input_tensor[:, :2], input_tensor, input_tensor[:, -2:]), dim=1
-        )
+        input_tensor = torch.cat((input_tensor[:, :2], input_tensor, input_tensor[:, -2:]), dim=1)
         input_tensor = input_tensor.unsqueeze(1)
         output_z = F.conv3d(input_tensor, conv_kernel) / 12
         output_z = output_z.squeeze(1)
@@ -448,9 +441,7 @@ def make_predformergft_ops(latents_size: tuple[int, int] = (8, 16)):
         boundary: str = "reflect",
     ) -> torch.Tensor:
         # PredFormerGFT.py:187-200
-        refined_field, refined = adaptive_mesh_refinement(
-            field, grad_threshold, upscale_factor
-        )
+        refined_field, refined = adaptive_mesh_refinement(field, grad_threshold, upscale_factor)
         if refined:
             refined_deriv = derivative_fn(refined_field, boundary=boundary)
             deriv = F.interpolate(

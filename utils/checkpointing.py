@@ -175,7 +175,7 @@ def convert_lightning_checkpoint(
     converted: dict[str, torch.Tensor] = {}
     for key, value in ckpt["state_dict"].items():
         if key.startswith(prefix):
-            converted[key[len(prefix):]] = value
+            converted[key[len(prefix) :]] = value
         else:
             converted[key] = value
 

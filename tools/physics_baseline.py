@@ -49,7 +49,6 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 import torch
-import torch.nn.functional as F
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
@@ -66,7 +65,6 @@ from utils.physics import (
     pde_residual,
     potential_vorticity_proxy,
 )
-
 
 # =============================================================================
 # Channel layout (after variables_list filter, 69 channels)
@@ -117,14 +115,20 @@ class BaselineConfig:
 # =============================================================================
 
 
-def load_memmap_view(memmap_path: str, memmap_meta_path: str | None) -> tuple[np.memmap, dict, dict[int, int]]:
+def load_memmap_view(
+    memmap_path: str, memmap_meta_path: str | None
+) -> tuple[np.memmap, dict, dict[int, int]]:
     """Открыть memmap read-only и собрать year -> first-row offset map.
 
     Returns:
         (memmap, meta, year_to_first_row).
     """
     if memmap_meta_path is None:
-        memmap_meta_path = memmap_path[:-4] + ".meta.json" if memmap_path.endswith(".dat") else memmap_path + ".meta.json"
+        memmap_meta_path = (
+            memmap_path[:-4] + ".meta.json"
+            if memmap_path.endswith(".dat")
+            else memmap_path + ".meta.json"
+        )
     with open(memmap_meta_path) as f:
         meta = json.load(f)
 
@@ -193,7 +197,9 @@ def relative_to_specific_humidity(r_percent: torch.Tensor, q_s: torch.Tensor) ->
 # =============================================================================
 
 
-def per_channel_rmse_mae(pred: torch.Tensor, target: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def per_channel_rmse_mae(
+    pred: torch.Tensor, target: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Per-channel (axis 1) RMSE и MAE, усреднённые по (B, H, W).
 
     Args:
@@ -203,7 +209,7 @@ def per_channel_rmse_mae(pred: torch.Tensor, target: torch.Tensor) -> tuple[torc
         rmse, mae: (C,).
     """
     diff = pred - target
-    rmse = torch.sqrt((diff ** 2).mean(dim=(0, 2, 3)))
+    rmse = torch.sqrt((diff**2).mean(dim=(0, 2, 3)))
     mae = diff.abs().mean(dim=(0, 2, 3))
     return rmse, mae
 
@@ -223,7 +229,9 @@ def per_channel_psnr(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     return 20.0 * torch.log10(target_range / torch.sqrt(mse + 1e-12))
 
 
-def latitude_weighted_rmse(pred: torch.Tensor, target: torch.Tensor, lat_weights: torch.Tensor) -> torch.Tensor:
+def latitude_weighted_rmse(
+    pred: torch.Tensor, target: torch.Tensor, lat_weights: torch.Tensor
+) -> torch.Tensor:
     """Latitude-weighted RMSE (cos(lat)-нормированные веса, как `utils.metrics.weighted_rmse_torch`).
 
     Args:
@@ -282,16 +290,22 @@ def run_baseline(cfg: BaselineConfig, smoke: bool = False) -> None:
         T_total, C, H_data, W_data = arr.shape
         print(f"[init] Memmap shape: T={T_total}, C={C}, H={H_data}, W={W_data}")
         assert C == 69, f"Expected 69 channels, got {C}"
-        assert (H_data, W_data) == (cfg.H, cfg.W), f"Grid mismatch: memmap {H_data}x{W_data} vs cfg {cfg.H}x{cfg.W}"
+        assert (H_data, W_data) == (cfg.H, cfg.W), (
+            f"Grid mismatch: memmap {H_data}x{W_data} vs cfg {cfg.H}x{cfg.W}"
+        )
 
         # Build sample timestamps grid (start..end, stride=stride_hours)
         start = pd.to_datetime(cfg.start_time)
         end = pd.to_datetime(cfg.end_time)
         timestamps = pd.date_range(start, end, freq=f"{cfg.stride_hours}h")
         rows_now = [timestamp_to_row(t, row_starts) for t in timestamps]
-        rows_next = [timestamp_to_row(t + pd.Timedelta(hours=cfg.lead_hours), row_starts) for t in timestamps]
+        rows_next = [
+            timestamp_to_row(t + pd.Timedelta(hours=cfg.lead_hours), row_starts) for t in timestamps
+        ]
         # filter out-of-range
-        valid_mask = [r < T_total and rn < T_total for r, rn in zip(rows_now, rows_next, strict=True)]
+        valid_mask = [
+            r < T_total and rn < T_total for r, rn in zip(rows_now, rows_next, strict=True)
+        ]
         timestamps = timestamps[valid_mask]
         rows_now = [r for r, m in zip(rows_now, valid_mask, strict=True) if m]
         rows_next = [r for r, m in zip(rows_next, valid_mask, strict=True) if m]
@@ -322,8 +336,16 @@ def run_baseline(cfg: BaselineConfig, smoke: bool = False) -> None:
             rows_now_b = rows_now[sl]
             rows_next_b = rows_next[sl]
             ts_batch = timestamps[sl]
-            x_now_raw = torch.from_numpy(np.stack([arr[r] for r in rows_now_b], axis=0)).float().to(cfg.device)
-            x_next_raw = torch.from_numpy(np.stack([arr[r] for r in rows_next_b], axis=0)).float().to(cfg.device)
+            x_now_raw = (
+                torch.from_numpy(np.stack([arr[r] for r in rows_now_b], axis=0))
+                .float()
+                .to(cfg.device)
+            )
+            x_next_raw = (
+                torch.from_numpy(np.stack([arr[r] for r in rows_next_b], axis=0))
+                .float()
+                .to(cfg.device)
+            )
             # NOTE: memmap is already RAW (per Data.weatherbench_128_v4 docstring),
             # but in V3 it's pre-normalised. We undo normalisation if mean/std loaded;
             # the user-passed mean_std should match the memmap convention.
@@ -350,7 +372,13 @@ def run_baseline(cfg: BaselineConfig, smoke: bool = False) -> None:
             cur = state_now
             for _ in range(cfg.n_substeps):
                 step = kernel.step(cur["u"], cur["v"], cur["t"], cur["q"], cur["z"])
-                cur = {"u": step["u"], "v": step["v"], "t": step["t"], "q": step["q"], "z": step["z"]}
+                cur = {
+                    "u": step["u"],
+                    "v": step["v"],
+                    "t": step["t"],
+                    "q": step["q"],
+                    "z": step["z"],
+                }
             state_pred = cur
 
             # Forecast metrics
@@ -360,15 +388,17 @@ def run_baseline(cfg: BaselineConfig, smoke: bool = False) -> None:
                 wrmse_pc = latitude_weighted_rmse(state_pred[var], state_truth[var], lat_weights)
                 for lvl in range(rmse_pc.shape[0]):
                     for ts in ts_batch:
-                        records.append({
-                            "timestamp": ts.isoformat(),
-                            "variable": var,
-                            "pressure_level_hpa": int(grid.config.pressure_levels[lvl]),
-                            "rmse": float(rmse_pc[lvl].cpu()),
-                            "mae": float(mae_pc[lvl].cpu()),
-                            "psnr_db": float(psnr_pc[lvl].cpu()),
-                            "weighted_rmse": float(wrmse_pc[lvl].cpu()),
-                        })
+                        records.append(
+                            {
+                                "timestamp": ts.isoformat(),
+                                "variable": var,
+                                "pressure_level_hpa": int(grid.config.pressure_levels[lvl]),
+                                "rmse": float(rmse_pc[lvl].cpu()),
+                                "mae": float(mae_pc[lvl].cpu()),
+                                "psnr_db": float(psnr_pc[lvl].cpu()),
+                                "weighted_rmse": float(wrmse_pc[lvl].cpu()),
+                            }
+                        )
 
             # Physics consistency on (state_now, state_truth)
             dt_total = cfg.block_dt * cfg.n_substeps
@@ -381,26 +411,30 @@ def run_baseline(cfg: BaselineConfig, smoke: bool = False) -> None:
 
             for var in ("u", "v", "t", "q", "z"):
                 residual_buffer[var].append(float(resid[var].abs().mean().cpu()))
-            cfl_max_per_sample.append(float(max(cfl["cfl_x"].max().cpu(), cfl["cfl_y"].max().cpu())))
+            cfl_max_per_sample.append(
+                float(max(cfl["cfl_x"].max().cpu(), cfl["cfl_y"].max().cpu()))
+            )
 
             for i, ts in enumerate(ts_batch):
-                records.append({
-                    "timestamp": ts.isoformat(),
-                    "variable": "_consistency_",
-                    "pressure_level_hpa": -1,
-                    "mass_div_abs_mean": float(div[i].abs().mean().cpu()),
-                    "ke_max": float(ke[i].max().cpu()),
-                    "pv_abs_mean": float(pv[i].abs().mean().cpu()),
-                    "geo_u_resid_abs_mean": float(geo["u_residual"][i].abs().mean().cpu()),
-                    "geo_v_resid_abs_mean": float(geo["v_residual"][i].abs().mean().cpu()),
-                    "cfl_x_max": float(cfl["cfl_x"][i].max().cpu()),
-                    "cfl_y_max": float(cfl["cfl_y"][i].max().cpu()),
-                })
+                records.append(
+                    {
+                        "timestamp": ts.isoformat(),
+                        "variable": "_consistency_",
+                        "pressure_level_hpa": -1,
+                        "mass_div_abs_mean": float(div[i].abs().mean().cpu()),
+                        "ke_max": float(ke[i].max().cpu()),
+                        "pv_abs_mean": float(pv[i].abs().mean().cpu()),
+                        "geo_u_resid_abs_mean": float(geo["u_residual"][i].abs().mean().cpu()),
+                        "geo_v_resid_abs_mean": float(geo["v_residual"][i].abs().mean().cpu()),
+                        "cfl_x_max": float(cfl["cfl_x"][i].max().cpu()),
+                        "cfl_y_max": float(cfl["cfl_y"][i].max().cpu()),
+                    }
+                )
 
         if bi % 10 == 0 or bi == n_batches - 1:
             elapsed = time.time() - t_start
             rate = (bi + 1) * cfg.batch_size / max(elapsed, 1e-6)
-            print(f"[batch {bi+1}/{n_batches}] {rate:.1f} samples/s")
+            print(f"[batch {bi + 1}/{n_batches}] {rate:.1f} samples/s")
 
     # --- Save outputs ---
     df = pd.DataFrame(records)
@@ -424,15 +458,21 @@ def run_baseline(cfg: BaselineConfig, smoke: bool = False) -> None:
 
 def parse_args(argv: list[str] | None = None) -> tuple[BaselineConfig, bool]:
     p = argparse.ArgumentParser()
-    p.add_argument("--memmap-path", default="/home/fa.buzaev/era5_memmap/predformer_globe_2000_2018.dat")
+    p.add_argument(
+        "--memmap-path", default="/home/fa.buzaev/era5_memmap/predformer_globe_2000_2018.dat"
+    )
     p.add_argument("--memmap-meta-path", default=None)
-    p.add_argument("--mean-std-path", default="/home/fratnikov/weather_bench/1.40625deg/mean_std.npy")
+    p.add_argument(
+        "--mean-std-path", default="/home/fratnikov/weather_bench/1.40625deg/mean_std.npy"
+    )
     p.add_argument("--start-time", default="2000-01-01 00:00:00")
     p.add_argument("--end-time", default="2010-12-31 23:00:00")
     p.add_argument("--stride-hours", type=int, default=24)
     p.add_argument("--lead-hours", type=int, default=1)
     p.add_argument("--stencil", choices=["fd4", "weno5"], default="fd4")
-    p.add_argument("--coriolis", choices=["constant", "beta_plane", "spherical"], default="spherical")
+    p.add_argument(
+        "--coriolis", choices=["constant", "beta_plane", "spherical"], default="spherical"
+    )
     p.add_argument("--time-scheme", choices=["euler", "rk4"], default="euler")
     p.add_argument("--block-dt", type=float, default=300.0)
     p.add_argument("--n-substeps", type=int, default=12)
@@ -444,7 +484,9 @@ def parse_args(argv: list[str] | None = None) -> tuple[BaselineConfig, bool]:
     p.add_argument("--output-dir", default="checkpoints/physics_baseline/default")
     p.add_argument("--H", type=int, default=128)
     p.add_argument("--W", type=int, default=256)
-    p.add_argument("--smoke", action="store_true", help="Run on synthetic random tensor, skip memmap.")
+    p.add_argument(
+        "--smoke", action="store_true", help="Run on synthetic random tensor, skip memmap."
+    )
     args = p.parse_args(argv)
 
     smoke = bool(args.smoke)

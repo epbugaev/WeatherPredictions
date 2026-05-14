@@ -44,9 +44,13 @@ from utils.physics import Grid, GridConfig, PurePDEKernel
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--memmap-path", default="/home/fa.buzaev/era5_memmap/predformer_globe_2000_2018.dat")
+    p.add_argument(
+        "--memmap-path", default="/home/fa.buzaev/era5_memmap/predformer_globe_2000_2018.dat"
+    )
     p.add_argument("--memmap-meta-path", default=None)
-    p.add_argument("--mean-std-path", default="", help="Empty: assume memmap holds raw physical units.")
+    p.add_argument(
+        "--mean-std-path", default="", help="Empty: assume memmap holds raw physical units."
+    )
     p.add_argument("--H", type=int, default=32)
     p.add_argument("--W", type=int, default=64)
     p.add_argument("--year", type=int, default=2005)
@@ -54,10 +58,14 @@ def main() -> None:
     p.add_argument("--block-dt-seconds", type=float, default=300.0)
     p.add_argument("--stencil", choices=["fd4", "weno5"], required=True)
     p.add_argument("--time-scheme", choices=["euler", "rk4"], required=True)
-    p.add_argument("--coriolis", choices=["constant", "beta_plane", "spherical"], default="spherical")
+    p.add_argument(
+        "--coriolis", choices=["constant", "beta_plane", "spherical"], default="spherical"
+    )
     p.add_argument("--boundary-h", choices=["periodic", "reflect"], default="periodic")
     p.add_argument("--boundary-z", choices=["periodic", "reflect"], default="periodic")
-    p.add_argument("--use-R-d", action="store_true", help="Use R_d=287 in hydrostatic eq instead of R=8.314.")
+    p.add_argument(
+        "--use-R-d", action="store_true", help="Use R_d=287 in hydrostatic eq instead of R=8.314."
+    )
     p.add_argument("--offline", action="store_true")
     p.add_argument("--project-name", default="WeatherPredictions")
     args = p.parse_args()
@@ -112,7 +120,13 @@ def main() -> None:
             "v": out["v"],
             "q": out["q"],
         }
-        rhs = {"u_t": out["u_t"], "v_t": out["v_t"], "t_t": out["t_t"], "q_t": out["q_t"], "z_t": out["z_t"]}
+        rhs = {
+            "u_t": out["u_t"],
+            "v_t": out["v_t"],
+            "t_t": out["t_t"],
+            "q_t": out["q_t"],
+            "z_t": out["z_t"],
+        }
         return new_state, rhs
 
     tags = [

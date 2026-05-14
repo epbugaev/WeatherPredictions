@@ -12,9 +12,7 @@ from Data.weatherbench_128_v3 import WeatherBench128
 from Models.PredFormerGFT import PredFormer_Model
 from train._common import run_legacy_training
 
-_CONSTANTS_PATH = (
-    "/home/fratnikov/weather_bench/1.40625deg/constants/constants_1.40625deg.nc"
-)
+_CONSTANTS_PATH = "/home/fratnikov/weather_bench/1.40625deg/constants/constants_1.40625deg.nc"
 
 
 def train_model() -> None:

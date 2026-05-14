@@ -36,9 +36,7 @@ def _register(registry: dict[str, Callable[..., Any]], name: str) -> Callable[[T
 
     def decorator(cls: T) -> T:
         if name in registry and registry[name] is not cls:
-            raise ValueError(
-                f"Registry collision: {name!r} already bound to {registry[name]!r}"
-            )
+            raise ValueError(f"Registry collision: {name!r} already bound to {registry[name]!r}")
         registry[name] = cls
         return cls
 
@@ -63,25 +61,19 @@ def register_strategy(name: str) -> Callable[[T], T]:
 def get_model(name: str) -> Callable[..., Any]:
     """Look up a model factory; raises KeyError with a helpful message."""
     if name not in MODELS:
-        raise KeyError(
-            f"Unknown model type {name!r}. Available: {sorted(MODELS)}"
-        )
+        raise KeyError(f"Unknown model type {name!r}. Available: {sorted(MODELS)}")
     return MODELS[name]
 
 
 def get_dataset(name: str) -> Callable[..., Any]:
     """Look up a dataset factory; raises KeyError with a helpful message."""
     if name not in DATASETS:
-        raise KeyError(
-            f"Unknown dataset version {name!r}. Available: {sorted(DATASETS)}"
-        )
+        raise KeyError(f"Unknown dataset version {name!r}. Available: {sorted(DATASETS)}")
     return DATASETS[name]
 
 
 def get_strategy(name: str) -> Callable[..., Any]:
     """Look up a strategy factory; raises KeyError with a helpful message."""
     if name not in STRATEGIES:
-        raise KeyError(
-            f"Unknown strategy {name!r}. Available: {sorted(STRATEGIES)}"
-        )
+        raise KeyError(f"Unknown strategy {name!r}. Available: {sorted(STRATEGIES)}")
     return STRATEGIES[name]

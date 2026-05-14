@@ -28,13 +28,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 
 # =============================================================================
 # Grid
@@ -59,7 +58,21 @@ class GridConfig:
 
     H: int
     W: int
-    pressure_levels: tuple[int, ...] = (50, 100, 150, 200, 250, 300, 400, 500, 600, 700, 850, 925, 1000)
+    pressure_levels: tuple[int, ...] = (
+        50,
+        100,
+        150,
+        200,
+        250,
+        300,
+        400,
+        500,
+        600,
+        700,
+        850,
+        925,
+        1000,
+    )
     pixel_z_values: tuple[int, ...] = (50, 50, 50, 50, 50, 75, 100, 100, 100, 125, 112, 75, 75)
     radius: float = 6371.0 * 1000.0
     lat_scheme: Literal["linear_minus90_90", "arange"] = "linear_minus90_90"
@@ -364,11 +377,11 @@ class PhysicsConstants:
     Дефолты численно совпадают с оригинальным PDE_kernel из WeatherGFT.py.
     """
 
-    L: float = 2.5e6       # Дж/кг, скрытая теплота парообразования
-    R: float = 8.314       # Дж/(моль·К), универсальная (sic — как в оригинале)
-    R_d: float = 287.0     # Дж/(кг·К), сухой воздух
-    R_v: float = 461.5     # Дж/(кг·К), водяной пар
-    c_p: float = 1005.0    # Дж/(кг·К), теплоёмкость
+    L: float = 2.5e6  # Дж/кг, скрытая теплота парообразования
+    R: float = 8.314  # Дж/(моль·К), универсальная (sic — как в оригинале)
+    R_d: float = 287.0  # Дж/(кг·К), сухой воздух
+    R_v: float = 461.5  # Дж/(кг·К), водяной пар
+    c_p: float = 1005.0  # Дж/(кг·К), теплоёмкость
     diff_ratio: float = 0.05  # scale_diff coefficient
 
 
@@ -419,7 +432,9 @@ class PurePDEKernel(nn.Module):
         self.use_R_d_in_hydrostatic = use_R_d_in_hydrostatic
 
         if stencil == "fd4":
-            self.diff = FiniteDifference(grid, boundary_x=boundary_horiz, boundary_y=boundary_horiz, boundary_z=boundary_z)
+            self.diff = FiniteDifference(
+                grid, boundary_x=boundary_horiz, boundary_y=boundary_horiz, boundary_z=boundary_z
+            )
         elif stencil == "weno5":
             self.diff = WENO5(grid, boundary=boundary_horiz, boundary_z=boundary_z)
         else:
@@ -537,10 +552,13 @@ class PurePDEKernel(nn.Module):
         R_moist = (1 + 0.608 * q) * self.consts.R_d
         F_factor = (
             (self.consts.L * R_moist - self.consts.c_p * self.consts.R_v * t)
-            / self._avoid_inf(self.consts.c_p * self.consts.R_v * t * t + self.consts.L ** 2 * q_s)
-            * q_s * t
+            / self._avoid_inf(self.consts.c_p * self.consts.R_v * t * t + self.consts.L**2 * q_s)
+            * q_s
+            * t
         )
-        return -(u * q_x + v * q_y + w * q_z) + p_t * delta * F_factor / self._avoid_inf(self.consts.R * t)
+        return -(u * q_x + v * q_y + w * q_z) + p_t * delta * F_factor / self._avoid_inf(
+            self.consts.R * t
+        )
 
     # ----- Time stepping -----
 
@@ -723,7 +741,9 @@ def geostrophic_residual(
     }
 
 
-def cfl_number(kernel: PurePDEKernel, u: torch.Tensor, v: torch.Tensor, dt: float) -> dict[str, torch.Tensor]:
+def cfl_number(
+    kernel: PurePDEKernel, u: torch.Tensor, v: torch.Tensor, dt: float
+) -> dict[str, torch.Tensor]:
     """CFL = |c|·dt/dx по каждому из horizontal-axes.
 
     Для устойчивости явной схемы должен быть ≤ 1 (для FD-4 ~ 0.7; для WENO-5 ~ 1.4).

@@ -41,7 +41,6 @@ from tools.check_physics_common import (
 )
 from utils.old_physics import make_predformergft_ops
 
-
 # Физические константы (PredFormerGFT.py:234-238).
 L = 2.5e6
 R = 8.314
@@ -50,9 +49,15 @@ c_p = 1005.0
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--memmap-path", default="/home/fa.buzaev/era5_memmap/predformer_globe_2000_2018.dat")
+    p.add_argument(
+        "--memmap-path", default="/home/fa.buzaev/era5_memmap/predformer_globe_2000_2018.dat"
+    )
     p.add_argument("--memmap-meta-path", default=None)
-    p.add_argument("--mean-std-path", default="", help="Empty: assume memmap holds raw physical units (v3/v4 default).")
+    p.add_argument(
+        "--mean-std-path",
+        default="",
+        help="Empty: assume memmap holds raw physical units (v3/v4 default).",
+    )
     p.add_argument("--H", type=int, default=32)
     p.add_argument("--W", type=int, default=64)
     p.add_argument("--year", type=int, default=2005)
@@ -61,7 +66,11 @@ def main() -> None:
     p.add_argument("--f0", type=float, default=7.29e-5)
     p.add_argument("--beta", type=float, default=1.6e-11)
     p.add_argument("--eddy-viscosity", type=float, default=0.0)
-    p.add_argument("--use-amr", action="store_true", help="Включить adaptive_mesh_refinement (default off — оригинал PredFormerGFT включает его, но он медленный)")
+    p.add_argument(
+        "--use-amr",
+        action="store_true",
+        help="Включить adaptive_mesh_refinement (default off — оригинал PredFormerGFT включает его, но он медленный)",
+    )
     p.add_argument("--offline", action="store_true")
     p.add_argument("--project-name", default="WeatherPredictions")
     args = p.parse_args()
@@ -81,7 +90,9 @@ def main() -> None:
     f_field = coriolis_beta_plane(geom, f0=args.f0, beta=args.beta).to(device)
     pressure_pa = geom.pressure_pa_t.to(device)
 
-    def rollout_step(state: dict[str, torch.Tensor]) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+    def rollout_step(
+        state: dict[str, torch.Tensor],
+    ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
         """Один Euler-substep `block_dt` секунд по PredFormerGFT-семантике."""
         u, v, t, q, z = state["u"], state["v"], state["t"], state["q"], state["z"]
 

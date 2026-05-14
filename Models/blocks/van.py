@@ -6,15 +6,15 @@
 # only file path and package name were changed.
 
 import math
+
 import torch
 import torch.nn as nn
-
 from timm.layers import DropPath, trunc_normal_
 
 
 class DWConv(nn.Module):
     def __init__(self, dim=768):
-        super(DWConv, self).__init__()
+        super().__init__()
         self.dwconv = nn.Conv2d(dim, dim, 3, 1, 1, bias=True, groups=dim)
 
     def forward(self, x):
@@ -23,21 +23,22 @@ class DWConv(nn.Module):
 
 
 class MixMlp(nn.Module):
-    def __init__(self,
-                 in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
+    def __init__(
+        self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.0
+    ):
         super().__init__()
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
         self.fc1 = nn.Conv2d(in_features, hidden_features, 1)  # 1x1
-        self.dwconv = DWConv(hidden_features)                  # CFF: Convlutional feed-forward network
-        self.act = act_layer()                                 # GELU
-        self.fc2 = nn.Conv2d(hidden_features, out_features, 1) # 1x1
+        self.dwconv = DWConv(hidden_features)  # CFF: Convlutional feed-forward network
+        self.act = act_layer()  # GELU
+        self.fc2 = nn.Conv2d(hidden_features, out_features, 1)  # 1x1
         self.drop = nn.Dropout(drop)
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight, std=.02)
+            trunc_normal_(m.weight, std=0.02)
             if isinstance(m, nn.Linear) and m.bias is not None:
                 nn.init.constant_(m.bias, 0)
         elif isinstance(m, nn.LayerNorm):
@@ -64,10 +65,8 @@ class LKA(nn.Module):
     def __init__(self, dim):
         super().__init__()
         self.conv0 = nn.Conv2d(dim, dim, 5, padding=2, groups=dim)
-        self.conv_spatial = nn.Conv2d(
-            dim, dim, 7, stride=1, padding=9, groups=dim, dilation=3)
+        self.conv_spatial = nn.Conv2d(dim, dim, 7, stride=1, padding=9, groups=dim, dilation=3)
         self.conv1 = nn.Conv2d(dim, dim, 1)
-
 
     def forward(self, x):
         u = x.clone()
@@ -101,23 +100,35 @@ class Attention(nn.Module):
 
 
 class VANBlock(nn.Module):
-    def __init__(self, dim, mlp_ratio=4., drop=0.,drop_path=0., init_value=1e-2, act_layer=nn.GELU, attn_shortcut=True):
+    def __init__(
+        self,
+        dim,
+        mlp_ratio=4.0,
+        drop=0.0,
+        drop_path=0.0,
+        init_value=1e-2,
+        act_layer=nn.GELU,
+        attn_shortcut=True,
+    ):
         super().__init__()
         self.norm1 = nn.BatchNorm2d(dim)
         self.attn = Attention(dim, attn_shortcut=attn_shortcut)
-        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
         self.norm2 = nn.BatchNorm2d(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = MixMlp(
-            in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+            in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop
+        )
 
-        self.layer_scale_1 = nn.Parameter(init_value * torch.ones((dim)), requires_grad=True)
-        self.layer_scale_2 = nn.Parameter(init_value * torch.ones((dim)), requires_grad=True)
+        self.layer_scale_1 = nn.Parameter(init_value * torch.ones(dim), requires_grad=True)
+        self.layer_scale_2 = nn.Parameter(init_value * torch.ones(dim), requires_grad=True)
 
     def forward(self, x):
         x = x + self.drop_path(
-            self.layer_scale_1.unsqueeze(-1).unsqueeze(-1) * self.attn(self.norm1(x)))
+            self.layer_scale_1.unsqueeze(-1).unsqueeze(-1) * self.attn(self.norm1(x))
+        )
         x = x + self.drop_path(
-            self.layer_scale_2.unsqueeze(-1).unsqueeze(-1) * self.mlp(self.norm2(x)))
+            self.layer_scale_2.unsqueeze(-1).unsqueeze(-1) * self.mlp(self.norm2(x))
+        )
         return x

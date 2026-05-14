@@ -32,9 +32,8 @@ from utils.registry import get_strategy
 
 def _make_run_id() -> str:
     """Compose the run-id used as the checkpoint subdir name."""
-    return (
-        datetime.datetime.now().strftime("%Y-%m-%d-%H:%M")
-        + "".join(random.choices(string.ascii_lowercase + string.digits, k=5))
+    return datetime.datetime.now().strftime("%Y-%m-%d-%H:%M") + "".join(
+        random.choices(string.ascii_lowercase + string.digits, k=5)
     )
 
 

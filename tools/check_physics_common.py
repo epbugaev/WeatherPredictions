@@ -18,9 +18,9 @@ import json
 import os
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 import pandas as pd
@@ -46,7 +46,19 @@ if str(REPO_ROOT) not in sys.path:
 # PRESSURE_LEVELS_HPA: [50, 100, 150, 200, 250, 300, 400, 500, 600, 700, 850, 925, 1000]
 
 PRESSURE_LEVELS_HPA: tuple[int, ...] = (
-    50, 100, 150, 200, 250, 300, 400, 500, 600, 700, 850, 925, 1000
+    50,
+    100,
+    150,
+    200,
+    250,
+    300,
+    400,
+    500,
+    600,
+    700,
+    850,
+    925,
+    1000,
 )
 
 SURFACE_VARS = ("t2m", "u10", "v10", "tp")
@@ -79,7 +91,9 @@ def split_channels_69(x: torch.Tensor) -> dict[str, torch.Tensor]:
 
 def pack_channels_69(state: dict[str, torch.Tensor]) -> torch.Tensor:
     """Обратная операция к split_channels_69."""
-    return torch.cat([state[v] for v in ("t2m", "u10", "v10", "tp", "z", "t", "r", "u", "v")], dim=1)
+    return torch.cat(
+        [state[v] for v in ("t2m", "u10", "v10", "tp", "z", "t", "r", "u", "v")], dim=1
+    )
 
 
 # =============================================================================
@@ -157,12 +171,75 @@ def load_mean_std(path: str) -> tuple[np.ndarray, np.ndarray] | tuple[None, None
         if arr.shape[1] == 110:
             # Apply variables_list filter (matches Data/weatherbench_128.py:63-69)
             variables_list = [
-                0, 1, 2, 4,
-                6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
-                19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
-                45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57,
-                58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70,
-                71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83,
+                0,
+                1,
+                2,
+                4,
+                6,
+                7,
+                8,
+                9,
+                10,
+                11,
+                12,
+                13,
+                14,
+                15,
+                16,
+                17,
+                18,
+                19,
+                20,
+                21,
+                22,
+                23,
+                24,
+                25,
+                26,
+                27,
+                28,
+                29,
+                30,
+                31,
+                45,
+                46,
+                47,
+                48,
+                49,
+                50,
+                51,
+                52,
+                53,
+                54,
+                55,
+                56,
+                57,
+                58,
+                59,
+                60,
+                61,
+                62,
+                63,
+                64,
+                65,
+                66,
+                67,
+                68,
+                69,
+                70,
+                71,
+                72,
+                73,
+                74,
+                75,
+                76,
+                77,
+                78,
+                79,
+                80,
+                81,
+                82,
+                83,
             ]
             arr = arr[:, variables_list]
         return arr[0], arr[1]
@@ -208,7 +285,9 @@ def magnus_qs(t_kelvin: torch.Tensor, p_hpa: torch.Tensor) -> torch.Tensor:
     return 0.622 * e_s / (p_hpa - 0.378 * e_s)
 
 
-def relhum_to_specific(r_percent: torch.Tensor, t_kelvin: torch.Tensor, p_hpa: torch.Tensor) -> torch.Tensor:
+def relhum_to_specific(
+    r_percent: torch.Tensor, t_kelvin: torch.Tensor, p_hpa: torch.Tensor
+) -> torch.Tensor:
     """q ≈ (r/100) · q_s(T, p). Простое приближение."""
     return (r_percent / 100.0) * magnus_qs(t_kelvin, p_hpa)
 
@@ -226,12 +305,12 @@ class GeometryCPU:
     pressure_hpa: tuple[int, ...] = PRESSURE_LEVELS_HPA
 
     latitudes: torch.Tensor = field(init=False)  # (H,) радианы
-    pixel_x: torch.Tensor = field(init=False)    # (1, 1, H, 1) метры
-    pixel_y: torch.Tensor = field(init=False)    # () метры
+    pixel_x: torch.Tensor = field(init=False)  # (1, 1, H, 1) метры
+    pixel_y: torch.Tensor = field(init=False)  # () метры
     pressure_hpa_t: torch.Tensor = field(init=False)  # (1, 13, 1, 1) гПа
-    pressure_pa_t: torch.Tensor = field(init=False)   # (1, 13, 1, 1) Па
-    pixel_z: torch.Tensor = field(init=False)    # (1, 13, 1, 1) гПа
-    M_z: torch.Tensor = field(init=False)        # (13, 13)
+    pressure_pa_t: torch.Tensor = field(init=False)  # (1, 13, 1, 1) Па
+    pixel_z: torch.Tensor = field(init=False)  # (1, 13, 1, 1) гПа
+    M_z: torch.Tensor = field(init=False)  # (13, 13)
     lat_weights: torch.Tensor = field(init=False)  # (H,)
 
     def __post_init__(self) -> None:
@@ -244,7 +323,9 @@ class GeometryCPU:
         self.pixel_x = (c_lats / W).reshape(1, 1, H, 1)
         self.pixel_y = torch.tensor(torch.pi * self.radius / (H + 1), dtype=torch.float32)
 
-        self.pressure_hpa_t = torch.tensor(self.pressure_hpa, dtype=torch.float32).reshape(1, -1, 1, 1)
+        self.pressure_hpa_t = torch.tensor(self.pressure_hpa, dtype=torch.float32).reshape(
+            1, -1, 1, 1
+        )
         self.pressure_pa_t = self.pressure_hpa_t * 100.0
         # Δp между уровнями (как в WeatherGFT.py:29)
         pixel_z_values = (50, 50, 50, 50, 50, 75, 100, 100, 100, 125, 112, 75, 75)
@@ -282,7 +363,9 @@ def coriolis_constant(geom: GeometryCPU, value: float = 7.29e-5) -> torch.Tensor
     return torch.tensor(value)
 
 
-def coriolis_beta_plane(geom: GeometryCPU, f0: float = 7.29e-5, beta: float = 1.6e-11) -> torch.Tensor:
+def coriolis_beta_plane(
+    geom: GeometryCPU, f0: float = 7.29e-5, beta: float = 1.6e-11
+) -> torch.Tensor:
     """f = f0 + β·R·φ (как в Models/PredFormerGFT.py:222-225)."""
     y = geom.radius * geom.latitudes
     return (f0 + beta * y).reshape(1, 1, -1, 1)
@@ -392,13 +475,11 @@ def compute_forecast_metrics(
         p = pred_state[var]
         t_ = truth_state[var]
         diff = p - t_
-        rmse = torch.sqrt((diff ** 2).mean()).item()
+        rmse = torch.sqrt((diff**2).mean()).item()
         mae = diff.abs().mean().item()
-        wrmse = torch.sqrt((lat_w * (diff ** 2)).mean()).item()
+        wrmse = torch.sqrt((lat_w * (diff**2)).mean()).item()
         rng = (t_.max() - t_.min()).item()
-        psnr = (
-            20.0 * np.log10(rng / (rmse + 1e-12)) if rng > 1e-12 and rmse > 0 else float("nan")
-        )
+        psnr = 20.0 * np.log10(rng / (rmse + 1e-12)) if rng > 1e-12 and rmse > 0 else float("nan")
         metrics[f"rmse/surface/{var}"] = rmse
         metrics[f"mae/surface/{var}"] = mae
         metrics[f"weighted_rmse/surface/{var}"] = wrmse
@@ -411,9 +492,9 @@ def compute_forecast_metrics(
         for lvl_idx, plvl in enumerate(PRESSURE_LEVELS_HPA):
             d = diff[:, lvl_idx]
             t_lvl = t_[:, lvl_idx]
-            rmse = torch.sqrt((d ** 2).mean()).item()
+            rmse = torch.sqrt((d**2).mean()).item()
             mae = d.abs().mean().item()
-            wrmse = torch.sqrt(((lat_w.squeeze(0).squeeze(0)) * (d ** 2)).mean()).item()
+            wrmse = torch.sqrt(((lat_w.squeeze(0).squeeze(0)) * (d**2)).mean()).item()
             rng = (t_lvl.max() - t_lvl.min()).item()
             psnr = (
                 20.0 * np.log10(rng / (rmse + 1e-12)) if rng > 1e-12 and rmse > 0 else float("nan")
@@ -507,7 +588,9 @@ def count_nans_per_var(state: dict[str, torch.Tensor]) -> dict[str, float]:
 def run_72h_rollout(
     *,
     method_name: str,
-    rollout_step_fn: Callable[[dict[str, torch.Tensor]], tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]],
+    rollout_step_fn: Callable[
+        [dict[str, torch.Tensor]], tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]
+    ],
     d_x_fn: Callable[[torch.Tensor], torch.Tensor],
     d_y_fn: Callable[[torch.Tensor], torch.Tensor],
     f_field: torch.Tensor,
@@ -574,19 +657,21 @@ def run_72h_rollout(
     logger.experiment.log_other("method", method_name)
     logger.experiment.log_other("run_timestamp", timestamp_str)
 
-    logger.log_parameters({
-        "method": method_name,
-        "H": geom.H,
-        "W": geom.W,
-        "horizon_hours": horizon_hours,
-        "block_dt_seconds": block_dt_seconds,
-        "substeps_per_hour": substeps_per_hour,
-        "n_initial_conditions": len(initial_conditions),
-        "initial_conditions": [str(t) for t in initial_conditions],
-        "pressure_levels_hpa": list(PRESSURE_LEVELS_HPA),
-        "memmap_path": memmap_path,
-        "device": "cpu",
-    })
+    logger.log_parameters(
+        {
+            "method": method_name,
+            "H": geom.H,
+            "W": geom.W,
+            "horizon_hours": horizon_hours,
+            "block_dt_seconds": block_dt_seconds,
+            "substeps_per_hour": substeps_per_hour,
+            "n_initial_conditions": len(initial_conditions),
+            "initial_conditions": [str(t) for t in initial_conditions],
+            "pressure_levels_hpa": list(PRESSURE_LEVELS_HPA),
+            "memmap_path": memmap_path,
+            "device": "cpu",
+        }
+    )
 
     # ERA5
     print(f"[init] Opening memmap {memmap_path}")
@@ -611,12 +696,15 @@ def run_72h_rollout(
 
     t_start = time.time()
     for ic_idx, ts0 in enumerate(initial_conditions):
-        print(f"\n[IC {ic_idx+1}/{len(initial_conditions)}] {ts0}")
+        print(f"\n[IC {ic_idx + 1}/{len(initial_conditions)}] {ts0}")
         # Init state в физических единицах.
         x0 = load_snapshot(handle, ts0, mean, std)
         state = _prepare_state(x0, geom)
         _accumulate(0, compute_forecast_metrics(state, state, geom))  # тривиально 0
-        _accumulate(0, compute_physics_metrics(state, None, geom, f_field, d_x_fn, d_y_fn, dt_seconds=3600.0))
+        _accumulate(
+            0,
+            compute_physics_metrics(state, None, geom, f_field, d_x_fn, d_y_fn, dt_seconds=3600.0),
+        )
         _accumulate(0, count_nans_per_var(state))
 
         for hour in range(1, horizon_hours + 1):
@@ -631,7 +719,9 @@ def run_72h_rollout(
             truth_state = _prepare_state(x_truth, geom)
 
             forecast_m = compute_forecast_metrics(state, truth_state, geom)
-            physics_m = compute_physics_metrics(state, last_rhs, geom, f_field, d_x_fn, d_y_fn, dt_seconds=3600.0)
+            physics_m = compute_physics_metrics(
+                state, last_rhs, geom, f_field, d_x_fn, d_y_fn, dt_seconds=3600.0
+            )
             nan_m = count_nans_per_var(state)
             _accumulate(hour, forecast_m)
             _accumulate(hour, physics_m)
@@ -640,7 +730,9 @@ def run_72h_rollout(
             if hour % 12 == 0 or hour in (1, 6, 24, 48, 72):
                 elapsed = time.time() - t_start
                 u_blow = state["u"].abs().max().item()
-                print(f"  h={hour:3d}  |u|max={u_blow:.2e}  rmse(u@500)={forecast_m['rmse/u/500hPa']:.3e}  cfl_x={physics_m['physics/cfl_x_max']:.3e}  elapsed={elapsed:.0f}s")
+                print(
+                    f"  h={hour:3d}  |u|max={u_blow:.2e}  rmse(u@500)={forecast_m['rmse/u/500hPa']:.3e}  cfl_x={physics_m['physics/cfl_x_max']:.3e}  elapsed={elapsed:.0f}s"
+                )
 
     # Average across IC and log.
     print("\n[log] Pushing averaged metrics to Comet…")

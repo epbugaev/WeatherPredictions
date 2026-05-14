@@ -1,12 +1,12 @@
 import math
 
-import torch
 import numpy as np
+import torch
 import xarray as xr
-from torch import nn, einsum
 from einops import rearrange
 from einops.layers.torch import Rearrange
 from timm.layers import DropPath, to_2tuple, trunc_normal_
+from torch import einsum, nn
 
 
 class PreNorm(nn.Module):
@@ -18,46 +18,49 @@ class PreNorm(nn.Module):
     def forward(self, x, **kwargs):
         return self.fn(self.norm(x), **kwargs)
 
+
 class FeedForward(nn.Module):
-    def __init__(self, dim, hidden_dim, dropout=0.):
+    def __init__(self, dim, hidden_dim, dropout=0.0):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(dim, hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, dim),
-            nn.Dropout(dropout)
+            nn.Dropout(dropout),
         )
 
     def forward(self, x):
         return self.net(x)
-     
+
+
 class Attention(nn.Module):
-    def __init__(self, dim, heads=8, dim_head=64, dropout=0.):
+    def __init__(self, dim, heads=8, dim_head=64, dropout=0.0):
         super().__init__()
         inner_dim = dim_head * heads
         project_out = not (heads == 1 and dim_head == dim)
 
         self.heads = heads
-        self.scale = dim_head ** -0.5
+        self.scale = dim_head**-0.5
 
         self.to_qkv = nn.Linear(dim, inner_dim * 3, bias=False)
 
-        self.to_out = nn.Sequential(
-            nn.Linear(inner_dim, dim),
-            nn.Dropout(dropout)
-        ) if project_out else nn.Identity()
+        self.to_out = (
+            nn.Sequential(nn.Linear(inner_dim, dim), nn.Dropout(dropout))
+            if project_out
+            else nn.Identity()
+        )
 
     def forward(self, x):
         h = self.heads
         qkv = self.to_qkv(x).chunk(3, dim=-1)
-        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h=h), qkv)
-        dots = einsum('b h i d, b h j d -> b h i j', q, k) * self.scale
+        q, k, v = map(lambda t: rearrange(t, "b n (h d) -> b h n d", h=h), qkv)
+        dots = einsum("b h i d, b h j d -> b h i j", q, k) * self.scale
 
         attn = dots.softmax(dim=-1)
 
-        out = einsum('b h i j, b h j d -> b h i d', attn, v)
-        out = rearrange(out, 'b h n d -> b n (h d)')
+        out = einsum("b h i j, b h j d -> b h i d", attn, v)
+        out = rearrange(out, "b h n d -> b n (h d)")
         out = self.to_out(out)
         return out
 
@@ -109,7 +112,7 @@ class SpectralMixer2D(nn.Module):
         channel_blocks=8,
         soft_thresh_lambda=0.01,
         use_local_branch=True,
-        dropout=0.,
+        dropout=0.0,
     ):
         super().__init__()
         if dim % channel_blocks != 0:
@@ -128,16 +131,17 @@ class SpectralMixer2D(nn.Module):
 
         scale = 1.0 / math.sqrt(self.block_dim)
         self.weight = nn.Parameter(
-            scale * torch.randn(2, self.num_blocks, self.modes_h, self.modes_w,
-                                self.block_dim, self.block_dim)
+            scale
+            * torch.randn(
+                2, self.num_blocks, self.modes_h, self.modes_w, self.block_dim, self.block_dim
+            )
         )
         self.bias = nn.Parameter(
             torch.zeros(2, self.num_blocks, self.modes_h, self.modes_w, self.block_dim)
         )
 
         self.local_branch = (
-            nn.Conv2d(dim, dim, kernel_size=3, padding=1, groups=dim)
-            if use_local_branch else None
+            nn.Conv2d(dim, dim, kernel_size=3, padding=1, groups=dim) if use_local_branch else None
         )
 
         self.proj = nn.Linear(dim, dim)
@@ -156,8 +160,8 @@ class SpectralMixer2D(nn.Module):
         B_, D, H, W = x_spatial.shape
         orig_dtype = x_spatial.dtype
 
-        with torch.amp.autocast(device_type='cuda', enabled=False):
-            x_fft = torch.fft.rfft2(x_spatial.float(), dim=(-2, -1), norm='ortho')
+        with torch.amp.autocast(device_type="cuda", enabled=False):
+            x_fft = torch.fft.rfft2(x_spatial.float(), dim=(-2, -1), norm="ortho")
             x_re = x_fft.real
             x_im = x_fft.imag
             mh, mw = self.modes_h, self.modes_w
@@ -170,10 +174,12 @@ class SpectralMixer2D(nn.Module):
             b_re = self.bias[0].float()
             b_im = self.bias[1].float()
 
-            out_re = (torch.einsum('bkihw, khwio -> bkohw', x_re_low, w_re)
-                      - torch.einsum('bkihw, khwio -> bkohw', x_im_low, w_im))
-            out_im = (torch.einsum('bkihw, khwio -> bkohw', x_re_low, w_im)
-                      + torch.einsum('bkihw, khwio -> bkohw', x_im_low, w_re))
+            out_re = torch.einsum("bkihw, khwio -> bkohw", x_re_low, w_re) - torch.einsum(
+                "bkihw, khwio -> bkohw", x_im_low, w_im
+            )
+            out_im = torch.einsum("bkihw, khwio -> bkohw", x_re_low, w_im) + torch.einsum(
+                "bkihw, khwio -> bkohw", x_im_low, w_re
+            )
 
             out_re = out_re + b_re.permute(0, 3, 1, 2).unsqueeze(0)
             out_im = out_im + b_im.permute(0, 3, 1, 2).unsqueeze(0)
@@ -181,8 +187,13 @@ class SpectralMixer2D(nn.Module):
             out_re, out_im = self._complex_soft_thresh(out_re, out_im, self.soft_thresh_lambda)
 
             full_re = torch.zeros(
-                B_, self.num_blocks, self.block_dim, x_re.shape[-2], x_re.shape[-1],
-                dtype=out_re.dtype, device=out_re.device,
+                B_,
+                self.num_blocks,
+                self.block_dim,
+                x_re.shape[-2],
+                x_re.shape[-1],
+                dtype=out_re.dtype,
+                device=out_re.device,
             )
             full_im = torch.zeros_like(full_re)
             full_re[..., :mh, :mw] = out_re
@@ -191,7 +202,10 @@ class SpectralMixer2D(nn.Module):
             full_im = full_im.reshape(B_, D, x_im.shape[-2], x_im.shape[-1])
 
             out_spatial = torch.fft.irfft2(
-                torch.complex(full_re, full_im), s=(H, W), dim=(-2, -1), norm='ortho',
+                torch.complex(full_re, full_im),
+                s=(H, W),
+                dim=(-2, -1),
+                norm="ortho",
             )
         return out_spatial.to(orig_dtype)
 
@@ -205,7 +219,7 @@ class SpectralMixer2D(nn.Module):
             torch.Tensor of shape ``(B', N, D)``.
         """
         B_, N, D = x.shape
-        if N != self.h * self.w:
+        if self.h * self.w != N:
             raise ValueError(f"token count N={N} does not match h*w={self.h * self.w}")
 
         x_spatial = x.transpose(1, 2).reshape(B_, D, self.h, self.w)
@@ -275,14 +289,14 @@ class DualOperatorBridge(nn.Module):
 
 class SwiGLU(nn.Module):
     def __init__(
-            self,
-            in_features,
-            hidden_features=None,
-            out_features=None,
-            act_layer=nn.SiLU,
-            norm_layer=None,
-            bias=True,
-            drop=0.,
+        self,
+        in_features,
+        hidden_features=None,
+        out_features=None,
+        act_layer=nn.SiLU,
+        norm_layer=None,
+        bias=True,
+        drop=0.0,
     ):
         super().__init__()
         out_features = out_features or in_features
@@ -312,22 +326,31 @@ class SwiGLU(nn.Module):
         x = self.drop2(x)
         return x
 
+
 class GatedTransformer(nn.Module):
     def __init__(
-        self, dim, depth, heads, dim_head, mlp_dim,
-        dropout=0., attn_dropout=0., drop_path=0.1,
-        op_type='attn', mixer_kwargs=None,
+        self,
+        dim,
+        depth,
+        heads,
+        dim_head,
+        mlp_dim,
+        dropout=0.0,
+        attn_dropout=0.0,
+        drop_path=0.1,
+        op_type="attn",
+        mixer_kwargs=None,
     ):
         super().__init__()
         self.layers = nn.ModuleList([])
         self.norm = nn.LayerNorm(dim)
         mixer_kwargs = dict(mixer_kwargs) if mixer_kwargs else {}
         for _ in range(depth):
-            if op_type == 'attn':
+            if op_type == "attn":
                 mixer = Attention(dim, heads=heads, dim_head=dim_head, dropout=attn_dropout)
-            elif op_type == 'spectral':
+            elif op_type == "spectral":
                 mixer = SpectralMixer2D(dim, dropout=attn_dropout, **mixer_kwargs)
-            elif op_type == 'dual_bridge':
+            elif op_type == "dual_bridge":
                 attn = Attention(dim, heads=heads, dim_head=dim_head, dropout=attn_dropout)
                 spectral = SpectralMixer2D(dim, dropout=attn_dropout, **mixer_kwargs)
                 mixer = DualOperatorBridge(attn, spectral, alpha=1.0)
@@ -336,49 +359,83 @@ class GatedTransformer(nn.Module):
                     f"Unknown op_type={op_type!r}, expected one of "
                     f"{{'attn','spectral','dual_bridge'}}"
                 )
-            self.layers.append(nn.ModuleList([
-                PreNorm(dim, mixer),
-                PreNorm(dim, SwiGLU(dim, mlp_dim, drop=dropout)),
-                DropPath(drop_path) if drop_path > 0. else nn.Identity(),
-                DropPath(drop_path) if drop_path > 0. else nn.Identity()
-            ]))
+            self.layers.append(
+                nn.ModuleList(
+                    [
+                        PreNorm(dim, mixer),
+                        PreNorm(dim, SwiGLU(dim, mlp_dim, drop=dropout)),
+                        DropPath(drop_path) if drop_path > 0.0 else nn.Identity(),
+                        DropPath(drop_path) if drop_path > 0.0 else nn.Identity(),
+                    ]
+                )
+            )
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight, std=.02)
+            trunc_normal_(m.weight, std=0.02)
             if isinstance(m, nn.Linear) and m.bias is not None:
                 nn.init.constant_(m.bias, 0)
         elif isinstance(m, nn.LayerNorm):
             nn.init.constant_(m.bias, 0)
-            nn.init.constant_(m.weight, 1.0)       
-            
+            nn.init.constant_(m.weight, 1.0)
+
     def forward(self, x):
-        for attn, ff, drop_path1,drop_path2 in self.layers:
+        for attn, ff, drop_path1, drop_path2 in self.layers:
             x = x + drop_path1(attn(x))
             x = x + drop_path2(ff(x))
         return self.norm(x)
-    
+
+
 class PredFormerLayer(nn.Module):
     def __init__(
-        self, dim, depth, heads, dim_head, mlp_dim,
-        dropout=0., attn_dropout=0., drop_path=0.1,
-        space_op_type='attn', spectral_kwargs=None,
+        self,
+        dim,
+        depth,
+        heads,
+        dim_head,
+        mlp_dim,
+        dropout=0.0,
+        attn_dropout=0.0,
+        drop_path=0.1,
+        space_op_type="attn",
+        spectral_kwargs=None,
     ):
         super().__init__()
 
         self.temporal_transformer_first = GatedTransformer(
-            dim, depth, heads, dim_head, mlp_dim,
-            dropout, attn_dropout, drop_path, op_type='attn',
+            dim,
+            depth,
+            heads,
+            dim_head,
+            mlp_dim,
+            dropout,
+            attn_dropout,
+            drop_path,
+            op_type="attn",
         )
         self.space_transformer = GatedTransformer(
-            dim, depth, heads, dim_head, mlp_dim,
-            dropout, attn_dropout, drop_path,
-            op_type=space_op_type, mixer_kwargs=spectral_kwargs,
+            dim,
+            depth,
+            heads,
+            dim_head,
+            mlp_dim,
+            dropout,
+            attn_dropout,
+            drop_path,
+            op_type=space_op_type,
+            mixer_kwargs=spectral_kwargs,
         )
         self.temporal_transformer_second = GatedTransformer(
-            dim, depth, heads, dim_head, mlp_dim,
-            dropout, attn_dropout, drop_path, op_type='attn',
+            dim,
+            depth,
+            heads,
+            dim_head,
+            mlp_dim,
+            dropout,
+            attn_dropout,
+            drop_path,
+            op_type="attn",
         )
 
     def forward(self, x):
@@ -386,37 +443,39 @@ class PredFormerLayer(nn.Module):
         x_t = x
 
         # t branch (first temporal)
-        x_t = rearrange(x_t, 'b t n d -> b n t d')
-        x_t = rearrange(x_t, 'b n t d -> (b n) t d')
+        x_t = rearrange(x_t, "b t n d -> b n t d")
+        x_t = rearrange(x_t, "b n t d -> (b n) t d")
         x_t = self.temporal_transformer_first(x_t)
-        
+
         # s branch (space)
-        x_ts = rearrange(x_t, '(b n) t d -> b n t d', b=b)
-        x_ts = rearrange(x_ts, 'b n t d -> b t n d')
-        x_ts = rearrange(x_ts, 'b t n d -> (b t) n d') 
+        x_ts = rearrange(x_t, "(b n) t d -> b n t d", b=b)
+        x_ts = rearrange(x_ts, "b n t d -> b t n d")
+        x_ts = rearrange(x_ts, "b t n d -> (b t) n d")
         x_ts = self.space_transformer(x_ts)
-        
+
         # t branch (second temporal)
-        x_tst = rearrange(x_ts, '(b t) n d -> b t n d', b=b)
-        x_tst = rearrange(x_tst, 'b t n d -> b n t d')
-        x_tst = rearrange(x_tst, 'b n t d -> (b n) t d')
+        x_tst = rearrange(x_ts, "(b t) n d -> b t n d", b=b)
+        x_tst = rearrange(x_tst, "b t n d -> b n t d")
+        x_tst = rearrange(x_tst, "b n t d -> (b n) t d")
         x_tst = self.temporal_transformer_second(x_tst)
 
-        # ts output branch     
-        x_tst = rearrange(x_tst, '(b n) t d -> b n t d', b=b)
-        x_tst = rearrange(x_tst, 'b n t d -> b t n d', b=b) 
-  
-        # add residual connection, we only add this for human3.6m  
+        # ts output branch
+        x_tst = rearrange(x_tst, "(b n) t d -> b n t d", b=b)
+        x_tst = rearrange(x_tst, "b n t d -> b t n d", b=b)
+
+        # add residual connection, we only add this for human3.6m
         # x_tst += x_ori
-        
+
         return x_tst
 
+
 def sinusoidal_embedding(n_channels, dim):
-    pe = torch.FloatTensor([[p / (10000 ** (2 * (i // 2) / dim)) for i in range(dim)]
-                            for p in range(n_channels)])
+    pe = torch.FloatTensor(
+        [[p / (10000 ** (2 * (i // 2) / dim)) for i in range(dim)] for p in range(n_channels)]
+    )
     pe[:, 0::2] = torch.sin(pe[:, 0::2])
     pe[:, 1::2] = torch.cos(pe[:, 1::2])
-    return rearrange(pe, '... -> 1 ...')
+    return rearrange(pe, "... -> 1 ...")
 
 
 def _fourier_features_1d(coords: torch.Tensor, num_freqs: int, base: float = 2.0) -> torch.Tensor:
@@ -477,10 +536,12 @@ def build_latlon_time_fourier_pe(
         suitable to wrap into an nn.Parameter(requires_grad=False) just like
         ``sinusoidal_embedding`` does.
     """
-    assert lat_pixel_rad.shape[0] == num_patches_h * patch_size, \
+    assert lat_pixel_rad.shape[0] == num_patches_h * patch_size, (
         f"lat_pixel_rad shape {tuple(lat_pixel_rad.shape)} != {num_patches_h * patch_size}"
-    assert lon_pixel_rad.shape[0] == num_patches_w * patch_size, \
+    )
+    assert lon_pixel_rad.shape[0] == num_patches_w * patch_size, (
         f"lon_pixel_rad shape {tuple(lon_pixel_rad.shape)} != {num_patches_w * patch_size}"
+    )
 
     lat_patches = lat_pixel_rad.view(num_patches_h, patch_size).mean(dim=1)
     lon_patches = lon_pixel_rad.view(num_patches_w, patch_size).mean(dim=1)
@@ -509,7 +570,8 @@ def build_latlon_time_fourier_pe(
 
     pe = features @ proj_weight
     return pe.unsqueeze(0)
-      
+
+
 class PredFormer_Model(nn.Module):
     """Видеопредиктор PredFormer: ViT-блоки с patch-эмбеддингом + статичная маска ландшафта.
 
@@ -528,73 +590,82 @@ class PredFormer_Model(nn.Module):
 
     def __init__(self, model_config, **kwargs):
         super().__init__()
-        self.image_height = model_config['height']
-        self.image_width = model_config['width']
-        self.patch_size = model_config['patch_size']
+        self.image_height = model_config["height"]
+        self.image_width = model_config["width"]
+        self.patch_size = model_config["patch_size"]
         self.num_patches_h = self.image_height // self.patch_size
         self.num_patches_w = self.image_width // self.patch_size
         self.num_patches = self.num_patches_h * self.num_patches_w
-        self.num_frames_in = model_config['pre_seq']
-        self.dim = model_config['dim']
-        self.num_channels = model_config['num_channels']
+        self.num_frames_in = model_config["pre_seq"]
+        self.dim = model_config["dim"]
+        self.num_channels = model_config["num_channels"]
         self.num_classes = self.num_channels
-        self.heads = model_config['heads']
-        self.dim_head = model_config['dim_head']
-        self.dropout = model_config['dropout']
-        self.attn_dropout = model_config['attn_dropout']
-        self.drop_path = model_config['drop_path']
-        self.scale_dim = model_config['scale_dim']
-        self.Ndepth = model_config['Ndepth']  # Ensure this is defined
-        self.depth = model_config['depth']  # Ensure this is defined
-        self.path_to_constants = model_config['path_to_constants']
+        self.heads = model_config["heads"]
+        self.dim_head = model_config["dim_head"]
+        self.dropout = model_config["dropout"]
+        self.attn_dropout = model_config["attn_dropout"]
+        self.drop_path = model_config["drop_path"]
+        self.scale_dim = model_config["scale_dim"]
+        self.Ndepth = model_config["Ndepth"]  # Ensure this is defined
+        self.depth = model_config["depth"]  # Ensure this is defined
+        self.path_to_constants = model_config["path_to_constants"]
         self.ds = xr.open_dataset(self.path_to_constants)
-        self.orography_mask = torch.Tensor(np.array(self.ds.orography)) # shape = [H, W]
-        self.soil_mask = torch.Tensor(np.array(self.ds.slt)) # shape = [H, W]
-        self.lsm_mask = torch.Tensor(np.array(self.ds.lsm)) # shape = [H, W]
-        self.static_masks = torch.stack([self.orography_mask, self.soil_mask, self.lsm_mask], dim=0).unsqueeze(0) # [1, 3, H, W]
-        cut = model_config.get('cut')
+        self.orography_mask = torch.Tensor(np.array(self.ds.orography))  # shape = [H, W]
+        self.soil_mask = torch.Tensor(np.array(self.ds.slt))  # shape = [H, W]
+        self.lsm_mask = torch.Tensor(np.array(self.ds.lsm))  # shape = [H, W]
+        self.static_masks = torch.stack(
+            [self.orography_mask, self.soil_mask, self.lsm_mask], dim=0
+        ).unsqueeze(0)  # [1, 3, H, W]
+        cut = model_config.get("cut")
         if cut is not None:
-            self.static_masks = self.static_masks[..., cut[0][0]:cut[0][1], cut[1][0]:cut[1][1]]
+            self.static_masks = self.static_masks[..., cut[0][0] : cut[0][1], cut[1][0] : cut[1][1]]
         if self.static_masks.shape[-2:] != (self.image_height, self.image_width):
             raise ValueError(
                 f"Static mask shape {tuple(self.static_masks.shape[-2:])} does not match "
                 f"configured image shape {(self.image_height, self.image_width)}"
             )
-        self.num_masks = 3 # Определяем количество масок
+        self.num_masks = 3  # Определяем количество масок
 
-        assert self.image_height % self.patch_size == 0, 'Image height must be divisible by the patch size.'
-        assert self.image_width % self.patch_size == 0, 'Image width must be divisible by the patch size.'
-        self.patch_dim = self.num_channels * self.patch_size ** 2
+        assert self.image_height % self.patch_size == 0, (
+            "Image height must be divisible by the patch size."
+        )
+        assert self.image_width % self.patch_size == 0, (
+            "Image width must be divisible by the patch size."
+        )
+        self.patch_dim = self.num_channels * self.patch_size**2
 
         self.to_patch_embedding = nn.Sequential(
-            Rearrange('b t c (h p1) (w p2) -> b t (h w) (p1 p2 c)', p1=self.patch_size, p2=self.patch_size),
+            Rearrange(
+                "b t c (h p1) (w p2) -> b t (h w) (p1 p2 c)", p1=self.patch_size, p2=self.patch_size
+            ),
             nn.Linear(self.patch_dim, self.dim),
         )
-        
-        self.mask_patch_dim = self.num_masks * self.patch_size ** 2
-        self.rearrange_masks = Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1=self.patch_size, p2=self.patch_size)
+
+        self.mask_patch_dim = self.num_masks * self.patch_size**2
+        self.rearrange_masks = Rearrange(
+            "b c (h p1) (w p2) -> b (h w) (p1 p2 c)", p1=self.patch_size, p2=self.patch_size
+        )
         self.mask_embedding = nn.Linear(self.mask_patch_dim, self.dim)
 
-        pos_encoding_type = model_config.get('pos_encoding_type', 'sinusoidal')
-        if pos_encoding_type == 'fourier_2d':
-            K_lat = model_config.get('pe_K_lat', 16)
-            K_lon = model_config.get('pe_K_lon', 16)
-            K_t = model_config.get('pe_K_t', 8)
-            pe_freq_base = float(model_config.get('pe_freq_base', 2.0))
-            pe_seed = int(model_config.get('pe_seed', 0))
+        pos_encoding_type = model_config.get("pos_encoding_type", "sinusoidal")
+        if pos_encoding_type == "fourier_2d":
+            K_lat = model_config.get("pe_K_lat", 16)
+            K_lon = model_config.get("pe_K_lon", 16)
+            K_t = model_config.get("pe_K_t", 8)
+            pe_freq_base = float(model_config.get("pe_freq_base", 2.0))
+            pe_seed = int(model_config.get("pe_seed", 0))
 
-            lat_key = 'lat' if 'lat' in self.ds.coords else 'latitude'
-            lon_key = 'lon' if 'lon' in self.ds.coords else 'longitude'
+            lat_key = "lat" if "lat" in self.ds.coords else "latitude"
+            lon_key = "lon" if "lon" in self.ds.coords else "longitude"
             lat_full = torch.tensor(np.array(self.ds[lat_key]), dtype=torch.float32)
             lon_full = torch.tensor(np.array(self.ds[lon_key]), dtype=torch.float32)
             if cut is not None:
-                lat_pixel = lat_full[cut[0][0]:cut[0][1]]
-                lon_pixel = lon_full[cut[1][0]:cut[1][1]]
+                lat_pixel = lat_full[cut[0][0] : cut[0][1]]
+                lon_pixel = lon_full[cut[1][0] : cut[1][1]]
             else:
                 lat_pixel = lat_full
                 lon_pixel = lon_full
-            if (lat_pixel.shape[0] != self.image_height
-                    or lon_pixel.shape[0] != self.image_width):
+            if lat_pixel.shape[0] != self.image_height or lon_pixel.shape[0] != self.image_width:
                 raise ValueError(
                     f"Lat/lon coords after cut have shape "
                     f"({lat_pixel.shape[0]}, {lon_pixel.shape[0]}), "
@@ -611,10 +682,13 @@ class PredFormer_Model(nn.Module):
                 lat_pixel_rad=lat_pixel_rad,
                 lon_pixel_rad=lon_pixel_rad,
                 patch_size=self.patch_size,
-                K_lat=K_lat, K_lon=K_lon, K_t=K_t,
-                base=pe_freq_base, seed=pe_seed,
+                K_lat=K_lat,
+                K_lon=K_lon,
+                K_t=K_t,
+                base=pe_freq_base,
+                seed=pe_seed,
             )
-        elif pos_encoding_type == 'sinusoidal':
+        elif pos_encoding_type == "sinusoidal":
             pe_flat = sinusoidal_embedding(self.num_frames_in * self.num_patches, self.dim)
         else:
             raise ValueError(
@@ -623,35 +697,45 @@ class PredFormer_Model(nn.Module):
             )
 
         self.pos_embedding = nn.Parameter(pe_flat, requires_grad=False).view(
-            1, self.num_frames_in, self.num_patches, self.dim,
+            1,
+            self.num_frames_in,
+            self.num_patches,
+            self.dim,
         )
 
-        space_op_schedule = model_config.get('space_op_schedule')
+        space_op_schedule = model_config.get("space_op_schedule")
         if space_op_schedule is None:
-            space_op_schedule = ['attn'] * self.Ndepth
+            space_op_schedule = ["attn"] * self.Ndepth
         if len(space_op_schedule) != self.Ndepth:
             raise ValueError(
                 f"space_op_schedule has length {len(space_op_schedule)} but Ndepth={self.Ndepth}"
             )
 
-        spectral_kwargs = dict(model_config.get('spectral_kwargs', {}))
-        spectral_kwargs.setdefault('num_patches_h', self.num_patches_h)
-        spectral_kwargs.setdefault('num_patches_w', self.num_patches_w)
+        spectral_kwargs = dict(model_config.get("spectral_kwargs", {}))
+        spectral_kwargs.setdefault("num_patches_h", self.num_patches_h)
+        spectral_kwargs.setdefault("num_patches_w", self.num_patches_w)
 
-        self.blocks = nn.ModuleList([
-            PredFormerLayer(
-                self.dim, self.depth, self.heads, self.dim_head, self.dim * self.scale_dim,
-                self.dropout, self.attn_dropout, self.drop_path,
-                space_op_type=space_op_schedule[i],
-                spectral_kwargs=spectral_kwargs,
-            )
-            for i in range(self.Ndepth)
-        ])
+        self.blocks = nn.ModuleList(
+            [
+                PredFormerLayer(
+                    self.dim,
+                    self.depth,
+                    self.heads,
+                    self.dim_head,
+                    self.dim * self.scale_dim,
+                    self.dropout,
+                    self.attn_dropout,
+                    self.drop_path,
+                    space_op_type=space_op_schedule[i],
+                    spectral_kwargs=spectral_kwargs,
+                )
+                for i in range(self.Ndepth)
+            ]
+        )
 
         self.mlp_head = nn.Sequential(
-            nn.LayerNorm(self.dim),
-            nn.Linear(self.dim, self.num_channels * self.patch_size ** 2)
-            )
+            nn.LayerNorm(self.dim), nn.Linear(self.dim, self.num_channels * self.patch_size**2)
+        )
 
     def set_dual_bridge_alpha(self, value):
         """Set the blend alpha on every :class:`DualOperatorBridge` in the model.
@@ -680,28 +764,34 @@ class PredFormer_Model(nn.Module):
             Прогноз формы `(B, T, C, H, W)`.
         """
         B, T, C, H, W = x.shape
-        assert C == self.num_channels
+        assert self.num_channels == C
 
-        mask_patches = self.rearrange_masks(self.static_masks.to(x.device)) # [1, num_patches, 3*ps*ps]
-        mask_embed = self.mask_embedding(mask_patches) # [1, num_patches, dim]
-        mask_embed = mask_embed.unsqueeze(1) # [1, 1, num_patches, dim]
+        mask_patches = self.rearrange_masks(
+            self.static_masks.to(x.device)
+        )  # [1, num_patches, 3*ps*ps]
+        mask_embed = self.mask_embedding(mask_patches)  # [1, num_patches, dim]
+        mask_embed = mask_embed.unsqueeze(1)  # [1, 1, num_patches, dim]
         mask_embed = mask_embed.to(x.device)
 
         # Patch Embedding для входа x
-        x_embed = self.to_patch_embedding(x) # [B, T, num_patches, dim]
-        
-        x_combined = x_embed + mask_embed       
+        x_embed = self.to_patch_embedding(x)  # [B, T, num_patches, dim]
+
+        x_combined = x_embed + mask_embed
 
         # Position Embedding
         x_combined += self.pos_embedding.to(x.device)
-        
+
         # PredFormer Encoder
         for idx, blk in enumerate(self.blocks):
             x_combined = blk(x_combined)
-        # MLP head        
+        # MLP head
         x = self.mlp_head(x_combined.reshape(-1, self.dim))
-        x = x.view(B, T, self.num_patches_h, self.num_patches_w, C, self.patch_size, self.patch_size)
+        x = x.view(
+            B, T, self.num_patches_h, self.num_patches_w, C, self.patch_size, self.patch_size
+        )
         x = x.permute(0, 1, 4, 2, 5, 3, 6).reshape(B, T, C, H, W)
-        
+
         return x
+
+
 # print(output.shape)  # [B, T, C, H, W]
