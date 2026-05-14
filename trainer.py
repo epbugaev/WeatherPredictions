@@ -110,6 +110,11 @@ class TrainerConfig:
     float32_matmul_precision: str | None = None
     grad_clip_norm: float | None = None
     skip_non_finite_loss: bool = True
+    # Run validation (and the rank-0 checkpoint write that depends on it)
+    # only every Nth epoch. ``1`` = legacy behaviour. At larger values the
+    # ``early_stopping_patience`` should be scaled down by the same factor
+    # so the "epochs of plateau" semantics stay equivalent.
+    val_every_n_epochs: int = 1
 
 
 class Trainer:
@@ -215,38 +220,46 @@ class Trainer:
                     )
                 break
 
-            val_metrics = self._validate(
-                model=model,
-                loader=val_loader,
-                optimizer=optimizer,
-                scaler=scaler,
-                strategy=strategy,
-                experiment=experiment,
-                metrics=metrics,
-                epoch=epoch,
-                global_step=global_step,
-            )
-
-            val_loss = float(val_metrics["val_loss"].item())
-            improved = early_stopping.is_improvement(val_loss)
-
-            if self.dist.rank == 0:
-                self._write_checkpoints(
+            # Validate every ``val_every_n_epochs`` (and on the last epoch).
+            # On skipped epochs we save no checkpoint and don't update
+            # early-stopping — the gap is "free" GPU time vs the ~30-60 sec
+            # validation + checkpoint sync per epoch.
+            should_validate = (epoch + 1) % self.cfg.val_every_n_epochs == 0 or (
+                epoch + 1
+            ) == self.cfg.max_epochs
+            if should_validate:
+                val_metrics = self._validate(
                     model=model,
+                    loader=val_loader,
                     optimizer=optimizer,
-                    scheduler=scheduler,
-                    scaler=scaler if self.amp_enabled else None,
+                    scaler=scaler,
+                    strategy=strategy,
+                    experiment=experiment,
+                    metrics=metrics,
                     epoch=epoch,
                     global_step=global_step,
-                    val_loss=val_loss,
-                    config=full_config,
-                    improved=improved,
                 )
 
-            if early_stopping.update(val_loss):
+                val_loss = float(val_metrics["val_loss"].item())
+                improved = early_stopping.is_improvement(val_loss)
+
                 if self.dist.rank == 0:
-                    print(f"[trainer] early stop at epoch {epoch} (val_loss={val_loss:.6f})")
-                break
+                    self._write_checkpoints(
+                        model=model,
+                        optimizer=optimizer,
+                        scheduler=scheduler,
+                        scaler=scaler if self.amp_enabled else None,
+                        epoch=epoch,
+                        global_step=global_step,
+                        val_loss=val_loss,
+                        config=full_config,
+                        improved=improved,
+                    )
+
+                if early_stopping.update(val_loss):
+                    if self.dist.rank == 0:
+                        print(f"[trainer] early stop at epoch {epoch} (val_loss={val_loss:.6f})")
+                    break
 
             barrier(self.dist)
 

@@ -286,6 +286,7 @@ def train(config: dict[str, Any], config_path: str | None = None) -> None:
         float32_matmul_precision=trainer_cfg.get("float32_matmul_precision"),
         grad_clip_norm=trainer_cfg.get("grad_clip_norm"),
         skip_non_finite_loss=trainer_cfg.get("skip_non_finite_loss", True),
+        val_every_n_epochs=trainer_cfg.get("val_every_n_epochs", 1),
     )
 
     if is_main:
