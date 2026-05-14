@@ -24,26 +24,16 @@ def lat(j: torch.Tensor, num_lat: int) -> torch.Tensor:
 
 # @torch.jit.script
 def type_weighted_bias_torch_channels(pred: torch.Tensor) -> torch.Tensor:
-    """Bias по каналам, взвешенный по широте (исторический quirk: `pred.shape[2]` = `num_lat`).
+    """Bias по каналам, взвешенный по широте.
 
     Args:
-        pred: разность `pred - gt`, форма `(B, C, H, W)`.
+        pred: разность `pred - gt`, форма `(B, C, H, W)` или `(B, T, C, H, W)`.
 
     Returns:
-        Тензор формы `(B, C)`: среднее по spatial-осям, взвешенное по широте.
+        Тензор формы `(B, C)` или `(B, T, C)`: среднее по spatial-осям, взвешенное по широте.
     """
-    num_lat = pred.shape[2]
-    lat_t = torch.arange(start=0, end=num_lat, device=pred.device)
-
-    s = torch.sum(torch.cos(3.1416 / 180.0 * lat(lat_t, num_lat)))
-    if len(pred.shape) == 5:
-        weight = torch.reshape(latitude_weighting_factor_torch(lat_t, num_lat, s), (1, 1, 1, -1, 1))
-    else:
-        weight = torch.reshape(latitude_weighting_factor_torch(lat_t, num_lat, s), (1, 1, -1, 1))
-
-    result = torch.mean(weight * pred, dim=(-1, -2))
-
-    return result
+    weight = _lat_weight(pred)
+    return torch.mean(weight * pred, dim=(-1, -2))
 
 
 # @torch.jit.script
