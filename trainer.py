@@ -14,10 +14,12 @@ from __future__ import annotations
 
 import atexit
 import os
+import queue
+import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterator
 
 import torch
 from torch import nn
@@ -116,6 +118,16 @@ class TrainerConfig:
     # ``early_stopping_patience`` should be scaled down by the same factor
     # so the "epochs of plateau" semantics stay equivalent.
     val_every_n_epochs: int = 1
+    # Wrap train/val DataLoader in CudaPrefetcher: a background thread
+    # pins each batch and issues an async H2D copy on a side CUDA stream
+    # so the next batch is already on the GPU when the trainer reaches
+    # it. Pairs with ``pin_memory: false`` + ``persistent_workers: true``
+    # in the DataLoader (the prefetcher does the pinning, so PyTorch's
+    # leaking pin_memory thread is not spawned). Default off.
+    cuda_prefetcher: bool = False
+    # How many batches the prefetcher may keep on the GPU at once. 2 is
+    # enough to hide a one-step H2D copy behind one forward+backward.
+    cuda_prefetcher_depth: int = 2
 
 
 class Trainer:
@@ -155,6 +167,17 @@ class Trainer:
         if self._ckpt_pool is not None:
             self._ckpt_pool.shutdown(wait=True)
             self._ckpt_pool = None
+
+    def _wrap_loader_for_prefetch(self, loader: DataLoader) -> Any:
+        """Wrap ``loader`` in ``_CudaPrefetcher`` when the flag is set; pass through otherwise."""
+        if not self.cfg.cuda_prefetcher:
+            return loader
+        return _CudaPrefetcher(
+            loader=loader,
+            device=self.dist.device,
+            normalize=self._normalize,
+            max_prefetch=self.cfg.cuda_prefetcher_depth,
+        )
 
     # -------- public API --------
 
@@ -335,18 +358,22 @@ class Trainer:
             )
 
         with prof_ctx as prof:
-            loader_iter = iter(loader)
+            loader_iter = iter(self._wrap_loader_for_prefetch(loader))
             while True:
                 with record_function("data_wait"):
                     batch = next(loader_iter, _END_OF_LOADER)
                 if batch is _END_OF_LOADER:
                     break
 
-                with record_function("to_device"):
-                    batch = _to_device(batch, self.dist.device)
-                if self._normalize is not None:
-                    with record_function("normalize"):
-                        batch = _normalize_batch(batch, self._normalize)
+                if not self.cfg.cuda_prefetcher:
+                    # Legacy path: batches arrive on CPU; do H2D and
+                    # normalize here. Prefetcher already did both in a
+                    # side stream so the tags are skipped in that mode.
+                    with record_function("to_device"):
+                        batch = _to_device(batch, self.dist.device)
+                    if self._normalize is not None:
+                        with record_function("normalize"):
+                            batch = _normalize_batch(batch, self._normalize)
                 ctx = StepContext(
                     device=self.dist.device,
                     optimizer=optimizer,
@@ -447,10 +474,11 @@ class Trainer:
         model.eval()
         accum: dict[str, torch.Tensor] = {}
         count = 0
-        for batch in loader:
-            batch = _to_device(batch, self.dist.device)
-            if self._normalize is not None:
-                batch = _normalize_batch(batch, self._normalize)
+        for batch in self._wrap_loader_for_prefetch(loader):
+            if not self.cfg.cuda_prefetcher:
+                batch = _to_device(batch, self.dist.device)
+                if self._normalize is not None:
+                    batch = _normalize_batch(batch, self._normalize)
             ctx = StepContext(
                 device=self.dist.device,
                 optimizer=optimizer,
@@ -626,6 +654,140 @@ def _take_checkpoint_snapshot(
     if scaler is not None:
         payload["scaler"] = scaler.state_dict()
     return payload
+
+
+def _pin_batch(batch: Any) -> Any:
+    """Recursively pin CPU tensors in a batch via ``tensor.pin_memory()``.
+
+    ``pin_memory()`` calls into ``cudaHostRegister``, which releases the
+    Python GIL, so calling this from a background thread doesn't block
+    the main trainer thread (unlike doing the same in ``_to_device``).
+    """
+    if isinstance(batch, torch.Tensor):
+        if batch.device.type == "cpu" and not batch.is_pinned():
+            return batch.pin_memory()
+        return batch
+    if isinstance(batch, (tuple, list)):
+        moved = [_pin_batch(item) for item in batch]
+        return type(batch)(moved)
+    if isinstance(batch, dict):
+        return {k: _pin_batch(v) for k, v in batch.items()}
+    return batch
+
+
+def _record_stream_for_batch(batch: Any, stream: torch.cuda.Stream) -> None:
+    """Tell the CUDA caching allocator not to free batch tensors until
+    ``stream`` (the consumer stream) has actually used them. Required when
+    the producer stream is different from the consumer stream.
+    """
+    if isinstance(batch, torch.Tensor):
+        if batch.device.type == "cuda":
+            batch.record_stream(stream)
+        return
+    if isinstance(batch, (tuple, list)):
+        for item in batch:
+            _record_stream_for_batch(item, stream)
+        return
+    if isinstance(batch, dict):
+        for item in batch.values():
+            _record_stream_for_batch(item, stream)
+
+
+# Sentinel emitted by the prefetcher's worker thread to signal end-of-loader.
+_PREFETCH_DONE = object()
+
+
+class _CudaPrefetcher:
+    """Async CPU→GPU prefetcher driven by a background thread + side CUDA stream.
+
+    Wraps a ``DataLoader`` whose batches live on CPU (``pin_memory=False``
+    in the loader — the prefetcher does the pinning itself, so PyTorch's
+    leaking pin_memory thread is not spawned). A worker thread pulls the
+    next batch, pins it, and issues ``tensor.to(device, non_blocking=True)``
+    on a side stream; the trainer thread blocks on a ``torch.cuda.Event``
+    just before consuming the batch, which is usually a no-op because the
+    side stream has already finished while the previous step was running.
+
+    Optionally applies ``normalize`` on the GPU inside the same side
+    stream — this keeps the trainer's hot path strictly forward+backward.
+
+    Concurrency:
+        * Worker thread: drives the underlying ``DataLoader`` iterator,
+          pins, issues async H2D copies, records a CUDA event per batch.
+        * Main thread: pulls (batch, event) tuples from a bounded queue,
+          waits on the event from the current CUDA stream, hands the
+          batch to the trainer.
+
+    The queue depth (``max_prefetch``) bounds GPU memory occupancy:
+        depth=2 means at most 2 batches sit on the GPU at once.
+    """
+
+    def __init__(
+        self,
+        loader: DataLoader,
+        device: torch.device,
+        normalize: nn.Module | None = None,
+        max_prefetch: int = 2,
+    ) -> None:
+        self._loader = loader
+        self._device = device
+        self._normalize = normalize
+        self._max_prefetch = max(1, max_prefetch)
+        # The side stream lives on the same device as the trainer's main
+        # stream. PyTorch shares the CUDA context across threads in the
+        # same process, so the worker thread can record events on this
+        # stream without an explicit ``cuda.set_device`` call.
+        self._stream: torch.cuda.Stream | None = (
+            torch.cuda.Stream(device=device) if device.type == "cuda" else None
+        )
+
+    def __iter__(self) -> Iterator[Any]:
+        if self._stream is None:
+            # CPU device — no point in a prefetcher; iterate the loader
+            # directly so callers can use the same code path.
+            yield from self._loader
+            return
+
+        q: queue.Queue = queue.Queue(maxsize=self._max_prefetch)
+        stop_event = threading.Event()
+
+        def _producer() -> None:
+            for batch in self._loader:
+                if stop_event.is_set():
+                    return
+                # Pin in this background thread (cudaHostRegister releases
+                # the GIL, so the main thread can run forward+backward
+                # concurrently).
+                batch_cpu = _pin_batch(batch)
+                # Issue async H2D + normalize on the side stream.
+                with torch.cuda.stream(self._stream):
+                    batch_gpu = _to_device(batch_cpu, self._device)
+                    if self._normalize is not None:
+                        batch_gpu = _normalize_batch(batch_gpu, self._normalize)
+                event = torch.cuda.Event()
+                event.record(self._stream)
+                q.put((batch_gpu, event))
+            q.put(_PREFETCH_DONE)
+
+        worker = threading.Thread(target=_producer, name="cuda_prefetcher", daemon=True)
+        worker.start()
+
+        cur_stream = torch.cuda.current_stream(self._device)
+        while True:
+            item = q.get()
+            if item is _PREFETCH_DONE:
+                break
+            batch_gpu, event = item
+            # The main stream will not start consuming the batch until
+            # the H2D copy issued in the side stream has finished.
+            cur_stream.wait_event(event)
+            # Lifetime: ensure the caching allocator keeps these tensors
+            # alive until the main stream has actually used them.
+            _record_stream_for_batch(batch_gpu, cur_stream)
+            yield batch_gpu
+
+        stop_event.set()
+        worker.join()
 
 
 def _write_checkpoint_payload(payload: dict[str, Any], paths: list[str]) -> None:

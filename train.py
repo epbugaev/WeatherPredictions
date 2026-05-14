@@ -287,6 +287,8 @@ def train(config: dict[str, Any], config_path: str | None = None) -> None:
         grad_clip_norm=trainer_cfg.get("grad_clip_norm"),
         skip_non_finite_loss=trainer_cfg.get("skip_non_finite_loss", True),
         val_every_n_epochs=trainer_cfg.get("val_every_n_epochs", 1),
+        cuda_prefetcher=trainer_cfg.get("cuda_prefetcher", False),
+        cuda_prefetcher_depth=trainer_cfg.get("cuda_prefetcher_depth", 2),
     )
 
     if is_main:
