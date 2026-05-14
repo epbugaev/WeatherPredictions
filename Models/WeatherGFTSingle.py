@@ -45,8 +45,10 @@ _PIXEL_Z_LEVELS_HPA: tuple[int, ...] = (
     75,
     75,
 )
-# Default latent-grid shape for the WeatherGFTSingle variant (32×64 latents).
-_DEFAULT_LATENTS_SIZE: tuple[int, int] = (32, 64)
+# Default latent-grid shape for the WeatherGFTSingle variant; on USA 32×64
+# input the encoder downscale (0.5×0.5×1) collapses to 8×16 by the time the
+# body's PDE_kernel runs, mirroring WeatherGFT.
+_DEFAULT_LATENTS_SIZE: tuple[int, int] = (8, 16)
 
 
 class PDE_kernel(nn.Module):
