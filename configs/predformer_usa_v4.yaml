@@ -48,14 +48,15 @@ data:
   # collate (torch.stack of 144 (12,69,32,64) tensors) is non-trivial;
   # 4 workers throughput-capped batch=144 to 30 samples/sec.
   num_workers: 8
-  # pin_memory + persistent_workers=False: PyTorch's pin_memory thread
-  # leaks sockets across epochs, crashing at epoch ~5 (job 3990855:
-  # "Pin memory thread exited unexpectedly"). Disabling pin_memory entirely
-  # (job 3990956) dropped GPU util from 78% to 58% — bad. Recreating
-  # workers each epoch resets the cumulative leak; cost is ~30-60 sec/epoch
-  # startup, acceptable.
-  pin_memory: true
-  persistent_workers: false
+  # pin_memory=False so PyTorch does NOT spawn the leaking pin_memory
+  # background thread (job 3990855 crashed at epoch 5 with
+  # "Pin memory thread exited unexpectedly"). persistent_workers=True
+  # so workers survive across epochs (~30-60 s/epoch saved). The trainer's
+  # _to_device calls tensor.pin_memory() in the main thread, then
+  # ``.to(device, non_blocking=True)`` — no background thread, no leak,
+  # H2D copy still async.
+  pin_memory: false
+  persistent_workers: true
   prefetch_factor: 4
   train:
     # bf16 freed ~30 GB of activation memory (was 74 GB at batch=90 fp32,
