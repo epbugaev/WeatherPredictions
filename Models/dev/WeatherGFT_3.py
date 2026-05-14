@@ -1336,7 +1336,6 @@ class GFT(nn.Module):
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
     import numpy as np
-    # from thop import profile
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(device)
@@ -1582,21 +1581,18 @@ def analyze_stability(model, input_data, dt_values=[60, 300, 600, 900]):
             if isinstance(module, PDE_kernel):
                 module.block_dt = dt
 
-        # Run the model
+        # Run the model. NaN/Inf and large magnitudes are detected via
+        # torch.isfinite; runtime exceptions are intentionally left
+        # un-caught so the analysis fails loudly rather than silently
+        # marking a real bug as "unstable".
         with torch.no_grad():
-            try:
-                pred = model(input_data)
-                # Check for NaN values
-                if torch.isnan(pred).any():
-                    stability = "Unstable (NaN values)"
-                else:
-                    # Simple heuristic: check if values are within reasonable bounds
-                    if torch.max(torch.abs(pred)) > 1e5:
-                        stability = "Unstable (extreme values)"
-                    else:
-                        stability = "Stable"
-            except Exception as e:
-                stability = f"Unstable (error: {str(e)})"
+            pred = model(input_data)
+            if not torch.isfinite(pred).all():
+                stability = "Unstable (NaN/Inf values)"
+            elif torch.max(torch.abs(pred)) > 1e5:
+                stability = "Unstable (extreme values)"
+            else:
+                stability = "Stable"
 
         results[dt] = stability
 

@@ -1040,7 +1040,6 @@ if __name__ == "__main__":
     import matplotlib.colors as colors
     import matplotlib.pyplot as plt
     import numpy as np
-    # from thop import profile
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(device)

@@ -1,11 +1,10 @@
-import traceback
-
 import torch
 import torch.nn.functional as F
 from einops import rearrange
 from einops.layers.torch import Rearrange
 from timm.layers import DropPath, to_2tuple, trunc_normal_
 from torch import einsum, nn
+from torch.distributions.normal import Normal
 
 
 class PreNorm(nn.Module):
@@ -135,8 +134,6 @@ class MoE(nn.Module):
             torch.gather(top_values_flat, 0, threshold_positions_if_out), 1
         )
         # is each value currently in the top k.
-        from torch.distributions.normal import Normal
-
         normal = Normal(self.mean, self.std)
         prob_if_in = normal.cdf((clean_values - threshold_if_in) / noise_stddev)
         prob_if_out = normal.cdf((clean_values - threshold_if_out) / noise_stddev)
@@ -180,29 +177,6 @@ class MoE(nn.Module):
             x = x.reshape(-1, original_shape[-1])
 
         gates, load = self.noisy_top_k_gating(x, self.training)
-
-        # # Calculate importance loss
-        # importance = gates.sum(0)
-        # loss = self.cv_squared(importance) + self.cv_squared(load)
-        # loss *= loss_coef
-
-        # # Print MoE routing statistics
-        # if not hasattr(self, 'print_counter'):
-        #     self.print_counter = 0
-
-        # Only print every 10 times to avoid log flood
-        # if self.print_counter % 10 == 0:
-        #     with torch.no_grad():
-        #         expert_usage = load.detach().cpu().numpy()
-        #         total_tokens = x.shape[0]
-        #         routing_percent = 100 * expert_usage / total_tokens
-        #         # # print(f"\nMoE Routing Statistics (tokens={total_tokens}):")
-        #         # for i, percent in enumerate(routing_percent):
-        #         #     print(f"Expert {i}: {percent:.2f}% tokens ({int(expert_usage[i])} tokens)")
-        #         imbalance = self.cv_squared(importance).item()
-        #         # print(f"Load imbalance: {imbalance:.4f}")
-
-        # self.print_counter += 1
 
         dispatcher = SparseDispatcher(self.num_experts, gates)
         expert_inputs = dispatcher.dispatch(x)
@@ -477,20 +451,12 @@ class PredFormerLayer(nn.Module):
         x_t = rearrange(x_t, "b n t d -> (b n) t d")
         x_t = self.temporal_transformer_first(x_t)
 
-        # Safely apply weighted token mixing
-        try:
-            # Reshape for mixing
-            bn, t, d = x_t.shape
-            x_t_mixed = x_t.clone()  # Create a copy to avoid in-place modification issues
-
-            # Process each sequence separately
-            for i in range(bn):
-                x_t_mixed[i] = self.temporal_mixer(x_t[i])
-
-            x_t = x_t_mixed
-        except Exception as e:
-            # If there's an error, just skip the mixing
-            print(f"Skipping temporal mixing due to: {e}")
+        # Apply weighted token mixing along the temporal axis.
+        bn, t, d = x_t.shape
+        x_t_mixed = x_t.clone()  # avoid in-place modification of the autograd graph
+        for i in range(bn):
+            x_t_mixed[i] = self.temporal_mixer(x_t[i])
+        x_t = x_t_mixed
 
         # s branch (space)
         x_ts = rearrange(x_t, "(b n) t d -> b n t d", b=b)
@@ -706,24 +672,18 @@ if __name__ == "__main__":
     print(f"Trainable parameters: {trainable_params:,}")
     print(f"Model size: {total_params * 4 / (1024 * 1024):.2f} MB")
 
-    try:
-        print(f"Moving model to {device}...")
-        model = model.to(device)
-        print("Model moved to device successfully")
+    print(f"Moving model to {device}...")
+    model = model.to(device)
+    print("Model moved to device successfully")
 
-        # Create input with appropriate dimensions
-        print("Creating test input tensor...")
-        print(f"Input shape: [{batch_size}, {seq_len}, {num_channels}, {img_height}, {img_width}]")
-        x = torch.rand(batch_size, seq_len, num_channels, img_height, img_width).to(device)
+    # Create input with appropriate dimensions
+    print("Creating test input tensor...")
+    print(f"Input shape: [{batch_size}, {seq_len}, {num_channels}, {img_height}, {img_width}]")
+    x = torch.rand(batch_size, seq_len, num_channels, img_height, img_width).to(device)
 
-        # Forward pass
-        print("Starting forward pass...")
-        with torch.no_grad():
-            output = model(x)
-        print("Forward pass completed successfully")
-        print(f"Output tensor shape: {output.shape}")
-
-    except Exception as e:
-        print(f"Error during model execution: {e}")
-        traceback.print_exc()
-        print("Model execution failed.")
+    # Forward pass
+    print("Starting forward pass...")
+    with torch.no_grad():
+        output = model(x)
+    print("Forward pass completed successfully")
+    print(f"Output tensor shape: {output.shape}")
