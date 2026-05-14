@@ -13,122 +13,54 @@ def lat(j: torch.Tensor, num_lat: int) -> torch.Tensor:
     return 90.0 - j * 180.0 / float(num_lat - 1)
 
 
-latents_size = [8, 16]  # patch size = 4, input size [128, 256], latents size = [128/4, 256/4]
-
-radius = 6371.0 * 1000
-num_lat = latents_size[0] + 2
-lat_t = torch.arange(start=0, end=num_lat)
-latitudes = lat(lat_t, num_lat)[1:-1]
-latitudes = latitudes / 180 * torch.pi
-
-c_lats = 2 * torch.pi * radius * torch.cos(latitudes)
-c_lats = c_lats.reshape([1, 1, latents_size[0], 1])
-
-pixel_x = (
-    c_lats / latents_size[1]
-)  # The actual distance each pixel corresponds to in the horizontal direction
-pixel_y = (
-    torch.pi * radius / (latents_size[0] + 1)
-)  # The actual distance each pixel corresponds to in the vertical direction
-
-pressure = torch.tensor([50, 100, 150, 200, 250, 300, 400, 500, 600, 700, 850, 925, 1000]).reshape(
-    [1, 13, 1, 1]
+_EARTH_RADIUS_M = 6371.0e3
+_PRESSURE_LEVELS_HPA: tuple[int, ...] = (
+    50,
+    100,
+    150,
+    200,
+    250,
+    300,
+    400,
+    500,
+    600,
+    700,
+    850,
+    925,
+    1000,
 )
-pixel_z = torch.tensor(
-    [50, 50, 50, 50, 50, 75, 100, 100, 100, 125, 112, 75, 75]
-).reshape(
-    [1, 13, 1, 1]
-)  # The difference between adjacent pressure levels, which will be used to calculate the p-direction integral
-
-
-pressure_level_num = pixel_z.shape[1]
-M_z = torch.zeros(pressure_level_num, pressure_level_num)
-for M_z_i in range(pressure_level_num):
-    for M_z_j in range(pressure_level_num):
-        if M_z_i <= M_z_j:
-            M_z[M_z_i, M_z_j] = pixel_z[0, M_z_j, 0, 0]
-
-
-def integral_z(input_tensor):
-    # Pressure-direction integral
-    B, pressure_level_num, H, W = input_tensor.shape
-    input_tensor = input_tensor.reshape(B, pressure_level_num, H * W)
-    output = M_z.to(input_tensor.dtype).to(input_tensor.device) @ input_tensor
-    output = output.reshape(B, pressure_level_num, H, W)
-    return output
-
-
-def d_x(input_tensor):
-    # Latitude-direction differential
-    B, C, H, W = input_tensor.shape
-    conv_kernel = torch.zeros(
-        [1, 1, 1, 5], device=input_tensor.device, dtype=input_tensor.dtype, requires_grad=False
-    )
-    conv_kernel[0, 0, 0, 0] = 1
-    conv_kernel[0, 0, 0, 1] = -8
-    conv_kernel[0, 0, 0, 3] = 8
-    conv_kernel[0, 0, 0, 4] = -1
-
-    input_tensor = torch.cat(
-        (input_tensor[:, :, :, -2:], input_tensor, input_tensor[:, :, :, :2]), dim=3
-    )
-    _, _, H_, W_ = input_tensor.shape
-
-    input_tensor = input_tensor.reshape(B * C, 1, H_, W_)
-    output_x = F.conv2d(input_tensor, conv_kernel) / 12
-    output_x = output_x.reshape(B, C, H, W)
-    output_x = output_x / pixel_x.to(output_x.dtype).to(output_x.device)
-
-    return output_x
-
-
-def d_y(input_tensor):
-    # longitude-direction differential
-    B, C, H, W = input_tensor.shape
-    conv_kernel = torch.zeros(
-        [1, 1, 5, 1], device=input_tensor.device, dtype=input_tensor.dtype, requires_grad=False
-    )
-    conv_kernel[0, 0, 0] = -1
-    conv_kernel[0, 0, 1] = 8
-    conv_kernel[0, 0, 3] = -8
-    conv_kernel[0, 0, 4] = 1
-
-    input_tensor = torch.cat((input_tensor[:, :, :2], input_tensor, input_tensor[:, :, -2:]), dim=2)
-    _, _, H_, W_ = input_tensor.shape
-
-    input_tensor = input_tensor.reshape(B * C, 1, H_, W_)
-    output_y = F.conv2d(input_tensor, conv_kernel) / 12
-    output_y = output_y.reshape(B, C, H, W)
-    output_y = output_y / pixel_y
-
-    return output_y
-
-
-def d_z(input_tensor):
-    # Pressure-direction differential
-    conv_kernel = torch.zeros(
-        [1, 1, 5, 1, 1], device=input_tensor.device, dtype=input_tensor.dtype, requires_grad=False
-    )
-    conv_kernel[0, 0, 0] = -1
-    conv_kernel[0, 0, 1] = 8
-    conv_kernel[0, 0, 3] = -8
-    conv_kernel[0, 0, 4] = 1
-
-    input_tensor = torch.cat((input_tensor[:, :2], input_tensor, input_tensor[:, -2:]), dim=1)
-
-    input_tensor = input_tensor.unsqueeze(1)  # B, 1, C, H, W
-    output_z = F.conv3d(input_tensor, conv_kernel) / 12
-    output_z = output_z.squeeze(1)
-    output_z = output_z / pixel_z.to(output_z.dtype).to(output_z.device)
-
-    return output_z
+# Difference between adjacent pressure levels, used by the p-direction integral.
+_PIXEL_Z_LEVELS_HPA: tuple[int, ...] = (
+    50,
+    50,
+    50,
+    50,
+    50,
+    75,
+    100,
+    100,
+    100,
+    125,
+    112,
+    75,
+    75,
+)
+# Default latent-grid shape for the original WeatherGFT (patch=4, input 128×256).
+_DEFAULT_LATENTS_SIZE: tuple[int, int] = (8, 16)
 
 
 class PDE_kernel(nn.Module):
     def __init__(
-        self, in_dim, physics_part_coef, variable_dim=13, block_dt=300, inverse_time=False
+        self,
+        in_dim,
+        physics_part_coef,
+        variable_dim=13,
+        block_dt=300,
+        inverse_time=False,
+        latents_size: tuple[int, int] = _DEFAULT_LATENTS_SIZE,
     ):
         super().__init__()
+        self._build_grid_buffers(latents_size)
         self.in_dim = in_dim
         self.variable_dim = variable_dim
 
@@ -164,6 +96,147 @@ class PDE_kernel(nn.Module):
         )
         self.block_norm = nn.BatchNorm2d(in_dim)
 
+    def _build_grid_buffers(self, latents_size: tuple[int, int]) -> None:
+        """Зарегистрировать grid-константы как буферы модуля.
+
+        Все тензоры регистрируются через `register_buffer`, поэтому корректно
+        переезжают на `.to(device)` и реплицируются в DDP. Это устраняет
+        per-forward вызовы `.to(device)` на `M_z`/`pixel_*`/`pressure`.
+
+        Args:
+            latents_size: ``(H, W)`` латентного грида, на котором работает PDE_kernel.
+        """
+        height, width = latents_size
+        num_lat = height + 2
+        lat_t = torch.arange(start=0, end=num_lat)
+        latitudes = lat(lat_t, num_lat)[1:-1] / 180.0 * torch.pi
+
+        c_lats = 2 * torch.pi * _EARTH_RADIUS_M * torch.cos(latitudes)
+        c_lats = c_lats.reshape([1, 1, height, 1])
+
+        pixel_x = c_lats / width
+        pixel_y = torch.tensor(torch.pi * _EARTH_RADIUS_M / (height + 1))
+
+        pressure = torch.tensor(_PRESSURE_LEVELS_HPA, dtype=torch.float32).reshape([1, 13, 1, 1])
+        pixel_z = torch.tensor(_PIXEL_Z_LEVELS_HPA, dtype=torch.float32).reshape([1, 13, 1, 1])
+
+        pressure_level_num = pixel_z.shape[1]
+        M_z = torch.zeros(pressure_level_num, pressure_level_num)
+        for M_z_i in range(pressure_level_num):
+            for M_z_j in range(pressure_level_num):
+                if M_z_i <= M_z_j:
+                    M_z[M_z_i, M_z_j] = pixel_z[0, M_z_j, 0, 0]
+
+        self.register_buffer("pixel_x", pixel_x)
+        self.register_buffer("pixel_y", pixel_y)
+        self.register_buffer("pixel_z", pixel_z)
+        self.register_buffer("pressure", pressure)
+        self.register_buffer("M_z", M_z)
+
+    def integral_z(self, input_tensor: torch.Tensor) -> torch.Tensor:
+        """Кумулятивный интеграл по уровням давления.
+
+        Args:
+            input_tensor: ``(B, C=13, H, W)``.
+
+        Returns:
+            Тензор той же формы.
+        """
+        B, pressure_level_num, H, W = input_tensor.shape
+        input_tensor = input_tensor.reshape(B, pressure_level_num, H * W)
+        output = self.M_z.to(input_tensor.dtype) @ input_tensor
+        output = output.reshape(B, pressure_level_num, H, W)
+        return output
+
+    def d_x(self, input_tensor: torch.Tensor) -> torch.Tensor:
+        """FD-4 производная по долготе (периодическое граничное условие).
+
+        Args:
+            input_tensor: ``(B, C, H, W)``.
+
+        Returns:
+            Тензор той же формы.
+        """
+        B, C, H, W = input_tensor.shape
+        conv_kernel = torch.zeros(
+            [1, 1, 1, 5], device=input_tensor.device, dtype=input_tensor.dtype, requires_grad=False
+        )
+        conv_kernel[0, 0, 0, 0] = 1
+        conv_kernel[0, 0, 0, 1] = -8
+        conv_kernel[0, 0, 0, 3] = 8
+        conv_kernel[0, 0, 0, 4] = -1
+
+        input_tensor = torch.cat(
+            (input_tensor[:, :, :, -2:], input_tensor, input_tensor[:, :, :, :2]), dim=3
+        )
+        _, _, H_, W_ = input_tensor.shape
+
+        input_tensor = input_tensor.reshape(B * C, 1, H_, W_)
+        output_x = F.conv2d(input_tensor, conv_kernel) / 12
+        output_x = output_x.reshape(B, C, H, W)
+        output_x = output_x / self.pixel_x.to(output_x.dtype)
+
+        return output_x
+
+    def d_y(self, input_tensor: torch.Tensor) -> torch.Tensor:
+        """FD-4 производная по широте (повторное граничное условие).
+
+        Args:
+            input_tensor: ``(B, C, H, W)``.
+
+        Returns:
+            Тензор той же формы.
+        """
+        B, C, H, W = input_tensor.shape
+        conv_kernel = torch.zeros(
+            [1, 1, 5, 1], device=input_tensor.device, dtype=input_tensor.dtype, requires_grad=False
+        )
+        conv_kernel[0, 0, 0] = -1
+        conv_kernel[0, 0, 1] = 8
+        conv_kernel[0, 0, 3] = -8
+        conv_kernel[0, 0, 4] = 1
+
+        input_tensor = torch.cat(
+            (input_tensor[:, :, :2], input_tensor, input_tensor[:, :, -2:]), dim=2
+        )
+        _, _, H_, W_ = input_tensor.shape
+
+        input_tensor = input_tensor.reshape(B * C, 1, H_, W_)
+        output_y = F.conv2d(input_tensor, conv_kernel) / 12
+        output_y = output_y.reshape(B, C, H, W)
+        output_y = output_y / self.pixel_y
+
+        return output_y
+
+    def d_z(self, input_tensor: torch.Tensor) -> torch.Tensor:
+        """FD-4 производная по уровням давления (повторное граничное условие).
+
+        Args:
+            input_tensor: ``(B, C=13, H, W)``.
+
+        Returns:
+            Тензор той же формы.
+        """
+        conv_kernel = torch.zeros(
+            [1, 1, 5, 1, 1],
+            device=input_tensor.device,
+            dtype=input_tensor.dtype,
+            requires_grad=False,
+        )
+        conv_kernel[0, 0, 0] = -1
+        conv_kernel[0, 0, 1] = 8
+        conv_kernel[0, 0, 3] = -8
+        conv_kernel[0, 0, 4] = 1
+
+        input_tensor = torch.cat((input_tensor[:, :2], input_tensor, input_tensor[:, -2:]), dim=1)
+
+        input_tensor = input_tensor.unsqueeze(1)  # B, 1, C, H, W
+        output_z = F.conv3d(input_tensor, conv_kernel) / 12
+        output_z = output_z.squeeze(1)
+        output_z = output_z / self.pixel_z.to(output_z.dtype)
+
+        return output_z
+
     def scale_tensor(self, tensor, a, b):
         min_val = tensor.min().detach()
         max_val = tensor.max().detach()
@@ -184,19 +257,19 @@ class PDE_kernel(nn.Module):
         return tensor
 
     def share_z_dxyz(self, z):
-        self.z_x = d_x(z)
-        self.z_y = d_y(z)
-        self.z_z = d_z(z)
+        self.z_x = self.d_x(z)
+        self.z_y = self.d_y(z)
+        self.z_z = self.d_z(z)
 
     ############################# u v #############################
     def get_uv_dt(self, u, v, w):
         u_x = self.u_x
-        u_y = d_y(u)
-        u_z = d_z(u)
+        u_y = self.d_y(u)
+        u_z = self.d_z(u)
 
-        v_x = d_x(v)
+        v_x = self.d_x(v)
         v_y = self.v_y
-        v_z = d_z(v)
+        v_z = self.d_z(v)
 
         self.u_t = -u * u_x - v * u_y - w * u_z + self.f * v - self.z_x
         self.v_t = -u * v_x - v * v_y - w * v_z - self.f * u - self.z_y
@@ -212,9 +285,9 @@ class PDE_kernel(nn.Module):
 
     ############################# t #############################
     def get_t_t(self, u, v, w, t):
-        t_x = d_x(t)
-        t_y = d_y(t)
-        t_z = d_z(t)
+        t_x = self.d_x(t)
+        t_y = self.d_y(t)
+        t_z = self.d_z(t)
 
         Q = -self.L * self.z_z * w
         self.t_t = (Q - self.z_z * w) / self.c_p - u * t_x - v * t_y - w * t_z
@@ -229,12 +302,12 @@ class PDE_kernel(nn.Module):
 
     ############################# z #############################
     def get_z_zt(self):
-        z_zt = -self.R / pressure.to(self.t_t.dtype).to(self.t_t.device) * self.t_t
+        z_zt = -self.R / self.pressure.to(self.t_t.dtype) * self.t_t
         return z_zt
 
     def get_z_t(self):
         z_zt = self.get_z_zt()
-        self.z_t = integral_z(z_zt)
+        self.z_t = self.integral_z(z_zt)
         return self.z_t
 
     def z_evolution(self, z):
@@ -246,10 +319,10 @@ class PDE_kernel(nn.Module):
 
     ############################# w #############################
     def get_w(self, u, v):
-        self.u_x = d_x(u)
-        self.v_y = d_y(v)
+        self.u_x = self.d_x(u)
+        self.v_y = self.d_y(v)
         w_z = -self.u_x - self.v_y
-        w = integral_z(w_z).detach()
+        w = self.integral_z(w_z).detach()
         return w
 
     ################################################################
@@ -278,9 +351,9 @@ class PDE_kernel(nn.Module):
             F_ = F_ * q_s * T
             return F_
 
-        q_x = d_x(q)
-        q_y = d_y(q)
-        q_z = d_z(q)
+        q_x = self.d_x(q)
+        q_y = self.d_y(q)
+        q_z = self.d_z(q)
 
         rho = -1 / self.avoid_inf(self.z_z)
         p = rho * self.R * t

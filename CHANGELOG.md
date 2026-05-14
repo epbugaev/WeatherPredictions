@@ -205,6 +205,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   sample poisoning the optimiser state for the rest of training.
 - `configs/predformer_usa_v4.yaml`: `trainer.grad_clip_norm: 1.0` and
   `trainer.skip_non_finite_loss: true` to harden bf16 training.
+- `Models/WeatherGFT.py` and `Models/WeatherGFTSingle.py`: moved the
+  module-level grid constants (`M_z`, `pixel_x`, `pixel_y`, `pixel_z`,
+  `pressure`) into `PDE_kernel.__init__` via `register_buffer`. The four
+  free FD/integral helpers (`integral_z`, `d_x`, `d_y`, `d_z`) became
+  methods on `PDE_kernel` and read the buffers via `self.*`. Effect:
+  one `.to(device)` per init instead of one per `forward`, and the
+  module follows DDP replication and `nn.Module.to` semantics. The
+  latent-grid shape (`(8, 16)` for the legacy model, `(32, 64)` for the
+  Single variant) is now an `__init__` parameter `latents_size` rather
+  than a module-level global.
 
 ### Fixed
 
