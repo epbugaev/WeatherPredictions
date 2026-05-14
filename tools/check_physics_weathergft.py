@@ -149,7 +149,7 @@ def main() -> None:
         return new_state, rhs
 
     run_72h_rollout(
-        method_name="weathergft",
+        method_name="fd4_euler_constCoriolis",
         rollout_step_fn=rollout_step,
         d_x_fn=d_x,
         d_y_fn=d_y,

@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=check-physics-weathergft-3
+#SBATCH --job-name=phys-fd4-rk4-sphere-radmix
 #SBATCH --partition=rocky
 #SBATCH --qos=rocky
 #SBATCH --cpus-per-task=16

@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=check-physics-predformergft
+#SBATCH --job-name=phys-weno5-euler-beta
 #SBATCH --partition=rocky
 #SBATCH --qos=rocky
 #SBATCH --cpus-per-task=16

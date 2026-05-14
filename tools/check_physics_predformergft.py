@@ -145,7 +145,7 @@ def main() -> None:
         return new_state, rhs
 
     run_72h_rollout(
-        method_name="predformergft",
+        method_name="weno5_euler_betaPlane_AMR",
         rollout_step_fn=rollout_step,
         d_x_fn=d_x,
         d_y_fn=d_y,
