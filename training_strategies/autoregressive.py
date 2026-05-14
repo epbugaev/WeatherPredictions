@@ -50,7 +50,7 @@ class AutoregressiveStep(StepStrategy):
         x, y = batch
         y_hat = model(x)
         y_hat_second = model(y_hat[:, -1, ...])
-        y_hat_full = torch.concat([y_hat, y_hat_second], axis=1)
+        y_hat_full = torch.concat([y_hat, y_hat_second], dim=1)
         val_loss = self.loss(y_hat_full, y)
 
         metrics = self._build_val_metrics(
