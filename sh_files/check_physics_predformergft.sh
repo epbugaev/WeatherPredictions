@@ -21,14 +21,9 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-${SLURM_CPUS_PER_TASK:-16}}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-${SLURM_CPUS_PER_TASK:-16}}"
 export PYTHONUNBUFFERED=1
 
-REPO_ROOT="${REPO_ROOT:-${SLURM_SUBMIT_DIR:-/home/fa.buzaev/WeatherPredictions}}"
-cd "${REPO_ROOT}"
-
-if [[ -f .env ]]; then
-  set -a
-  source .env
-  set +a
-fi
+_sc_here="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# shellcheck source=sh_files/_shell_contract.sh
+source "${_sc_here}/_shell_contract.sh" "${_sc_here}"
 
 MEMMAP_PATH="${MEMMAP_PATH:-/home/fa.buzaev/era5_memmap/predformer_globe_2000_2018.dat}"
 MEAN_STD_PATH="${MEAN_STD_PATH:-/home/epbugaev/weather_bench/1.40625deg/mean_std.npy}"
