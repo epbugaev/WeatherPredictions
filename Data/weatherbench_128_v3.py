@@ -208,62 +208,64 @@ class WeatherBench128(Dataset):
     def __len__(self):
         return self.length
 
-    def __getitem__(self, index):
-        # Load a sequence of X inputs.
-        # ``record_function`` tags are temporary: they let torch.profiler
-        # break down per-phase cost (disk read vs normalization vs
-        # numpy->tensor conversion) for the baseline measurement; remove
-        # after diagnostics.
-        x_sequence = []
-        for i in range(self.start_time_x, self.end_time_x + 1):
-            current_index = index + i
-            file_path = self.x_file_list[current_index]
-            with record_function("custom_np_load_x"):
-                sample_x = self.custom_np_load(file_path)
-            with record_function("normalization_x"):
-                sample_x = self.normalization(sample_x)
-            with record_function("from_numpy_x"):
-                sample_x = torch.from_numpy(sample_x).float()
+    # ------------------------------------------------------------------
+    # Per-step reader hooks; overridden by Memmap/V4 subclasses.
+    # ``record_function`` tags выставляются здесь, в overrides — со своими
+    # именами; общий стэк остаётся в `_build_sample_pair`.
+    # ------------------------------------------------------------------
 
-            x_sequence.append(sample_x)
+    def _read_x(self, time_idx: int) -> torch.Tensor:
+        """Прочитать вход на абсолютном time_idx; (C, H, W), float32."""
+        file_path = self.x_file_list[time_idx]
+        with record_function("custom_np_load_x"):
+            sample = self.custom_np_load(file_path)
+        with record_function("normalization_x"):
+            sample = self.normalization(sample)
+        with record_function("from_numpy_x"):
+            return torch.from_numpy(sample).float()
 
-        # Stack X sequence
+    def _read_y(self, y_time: pd.Timestamp) -> torch.Tensor:
+        """Прочитать таргет в момент времени y_time; (C, H, W), float32."""
+        y_file_path = os.path.join(
+            self.data_folder,
+            str(y_time.year) + '-{:04d}'.format(self.idx_in_year(y_time)) + '.npy',
+        )
+        with record_function("custom_np_load_y"):
+            sample = self.custom_np_load(y_file_path)
+        with record_function("normalization_y"):
+            sample = self.normalization(sample)
+        with record_function("from_numpy_y"):
+            return torch.from_numpy(sample).float()
+
+    def _build_sample_pair(self, index):
+        """Общий цикл по таймстепам x/y, сборка и опциональный stack по muti_target_steps."""
+        x_sequence = [
+            self._read_x(index + i)
+            for i in range(self.start_time_x, self.end_time_x + 1)
+        ]
         with record_function("stack_x"):
             sample_x_sequence = torch.stack(x_sequence, dim=0)  # [T, C, H, W]
 
-        # Load a sequence of Y targets
         y_sequences = []
         for steps in range(self.muti_target_steps):
-            y_sequence = []
-            for i in range(self.start_time_y, self.end_time_y + 1):
-                # Calculate the corresponding time for this target
-                x_time = self.x_time_ilst[index + i]
-                y_time = x_time + pd.Timedelta(hours=(steps+1)*self.lead_time)
-                y_file_path = os.path.join(self.data_folder,
-                                          str(y_time.year)+'-{:04d}'.format(self.idx_in_year(y_time))+'.npy')
-                with record_function("custom_np_load_y"):
-                    sample_y = self.custom_np_load(y_file_path)
-                with record_function("normalization_y"):
-                    sample_y = self.normalization(sample_y)
-                with record_function("from_numpy_y"):
-                    sample_y = torch.from_numpy(sample_y).float()
-
-                y_sequence.append(sample_y)
-
-            # Stack this target sequence
+            offset = pd.Timedelta(hours=(steps + 1) * self.lead_time)
+            y_sequence = [
+                self._read_y(self.x_time_ilst[index + i] + offset)
+                for i in range(self.start_time_y, self.end_time_y + 1)
+            ]
             with record_function("stack_y"):
-                stacked_y_sequence = torch.stack(y_sequence, dim=0)  # [T, C, H, W]
-            y_sequences.append(stacked_y_sequence)
-        
+                y_sequences.append(torch.stack(y_sequence, dim=0))  # [T, C, H, W]
+
         if self.muti_target_steps > 1:
-            # Shape: [muti_target_steps, T, C, H, W]
+            # [muti_target_steps, T, C, H, W]
             sample_y_all = torch.stack(y_sequences, dim=0)
         else:
-            # Shape: [T, C, H, W]
+            # [T, C, H, W]
             sample_y_all = y_sequences[0]
-            
-        # self.preload = {} # This is useful if you run out of RAM
         return sample_x_sequence, sample_y_all
+
+    def __getitem__(self, index):
+        return self._build_sample_pair(index)
 
 
 class WeatherBench128Memmap(WeatherBench128):
@@ -319,40 +321,22 @@ class WeatherBench128Memmap(WeatherBench128):
         """Return the memmap row corresponding to ``timestamp``."""
         return self._memmap_row_starts[timestamp.year] + self.idx_in_year(timestamp)
 
-    def __getitem__(self, index):
-        # Memmap branch: one slice per sample timestep, no netCDF parse, no
-        # spatial cut and no channel filter (both pre-applied at repack time).
-        x_sequence = []
-        for i in range(self.start_time_x, self.end_time_x + 1):
-            t = self.x_time_ilst[index + i]
-            with record_function("memmap_read_x"):
-                raw = np.asarray(self._memmap[self._memmap_row(t)])
-            with record_function("normalization_x"):
-                normed = (raw - self.the_mean[:, None, None]) / self.the_std[:, None, None]
-            with record_function("from_numpy_x"):
-                x_sequence.append(torch.from_numpy(normed).float())
+    # Memmap-чтение: один slice вместо h5netcdf parse, без channel-filter
+    # (он уже применён на этапе repack).
 
-        with record_function("stack_x"):
-            sample_x_sequence = torch.stack(x_sequence, dim=0)
+    def _read_x(self, time_idx: int) -> torch.Tensor:
+        t = self.x_time_ilst[time_idx]
+        with record_function("memmap_read_x"):
+            raw = np.asarray(self._memmap[self._memmap_row(t)])
+        with record_function("normalization_x"):
+            normed = (raw - self.the_mean[:, None, None]) / self.the_std[:, None, None]
+        with record_function("from_numpy_x"):
+            return torch.from_numpy(normed).float()
 
-        y_sequences = []
-        for steps in range(self.muti_target_steps):
-            y_sequence = []
-            for i in range(self.start_time_y, self.end_time_y + 1):
-                x_time = self.x_time_ilst[index + i]
-                y_time = x_time + pd.Timedelta(hours=(steps + 1) * self.lead_time)
-                with record_function("memmap_read_y"):
-                    raw = np.asarray(self._memmap[self._memmap_row(y_time)])
-                with record_function("normalization_y"):
-                    normed = (raw - self.the_mean[:, None, None]) / self.the_std[:, None, None]
-                with record_function("from_numpy_y"):
-                    y_sequence.append(torch.from_numpy(normed).float())
-
-            with record_function("stack_y"):
-                y_sequences.append(torch.stack(y_sequence, dim=0))
-
-        if self.muti_target_steps > 1:
-            sample_y_all = torch.stack(y_sequences, dim=0)
-        else:
-            sample_y_all = y_sequences[0]
-        return sample_x_sequence, sample_y_all
+    def _read_y(self, y_time: pd.Timestamp) -> torch.Tensor:
+        with record_function("memmap_read_y"):
+            raw = np.asarray(self._memmap[self._memmap_row(y_time)])
+        with record_function("normalization_y"):
+            normed = (raw - self.the_mean[:, None, None]) / self.the_std[:, None, None]
+        with record_function("from_numpy_y"):
+            return torch.from_numpy(normed).float()
