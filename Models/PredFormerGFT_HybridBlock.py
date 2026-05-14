@@ -1,7 +1,6 @@
 import torch
 import numpy as np
 import xarray as xr
-import torch
 from torch import nn, einsum
 from einops import rearrange
 from einops.layers.torch import Rearrange
@@ -9,19 +8,12 @@ from timm.layers import DropPath, to_2tuple, trunc_normal_
 import torch.nn.functional as F
 
 
-@torch.jit.script
-def lat(j: torch.Tensor, num_lat: int) -> torch.Tensor:
-    return 90. - j * 180./float(num_lat-1)
-
 # ===== Исходные расчёты параметров дискретизации =====
 latents_size = [32, 64]  # patch size = 4, input size [128, 256], latents size = [128/4, 256/4]
 radius = 6371.0 * 1000
 num_lat = latents_size[0] + 2
-lat_t = torch.arange(start=0, end=num_lat)
-# Функция для равномерного распределения широт от -90 до 90 градусов:
-def lat(lat_t, num_lat):
-    return torch.linspace(-90, 90, steps=num_lat)
-latitudes = lat(lat_t, num_lat)[1:-1]
+# Равномерное распределение широт от -90 до 90 градусов; края (-90/+90) обрезаются как полюсы.
+latitudes = torch.linspace(-90, 90, steps=num_lat)[1:-1]
 latitudes = latitudes / 180 * torch.pi  # перевод в радианы
 
 c_lats = 2 * torch.pi * radius * torch.cos(latitudes)
