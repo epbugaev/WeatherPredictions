@@ -20,7 +20,11 @@ model:
     dim_head: 32
     dropout: 0.0
     attn_dropout: 0.0
-    drop_path: 0.0
+    # Job 3991633 overfit hard from epoch ~41 (val 0.187 -> 0.210,
+    # train 0.187 -> 0.111 — train kept improving while val drifted).
+    # Stochastic depth at 0.15 across the 24 attention blocks delays
+    # the overfit and lets the model train longer productively.
+    drop_path: 0.15
     scale_dim: 4
     depth: 1
     Ndepth: 24

@@ -161,6 +161,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `training.early_stopping_patience` 5 -> 100 for long production
   runs. Job 3991527 showed val_loss still falling at epoch 20
   (0.1968 -> 0.1951) — room to converge further.
+- `configs/predformer_usa_v4.yaml`: `model.params.drop_path` 0.0 -> 0.15
+  to delay overfit. Job 3991633 (141 epochs) showed val_loss bottom
+  at epoch 41 (0.1867) then climbed to 0.2103 while train_loss kept
+  falling 0.187 -> 0.111 — classic overfit with zero regularization.
+  Stochastic depth at 0.15 across the 24 attention blocks should
+  push the val_loss minimum further out.
 - `sh_files/train_PredFormer_USA_2gpu_v4.sh`: `#SBATCH --time` 2-18:00:00
   -> 6-00:00:00 to fit the 2000-epoch run (~2.1 min/epoch × 2000 ≈ 70 h).
 - `trainer.TrainerConfig`: new `grad_clip_norm: float | None` and
