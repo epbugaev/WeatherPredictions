@@ -3,7 +3,7 @@ import numpy as np
 import torch
 import pandas as pd
 import h5netcdf
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 
 
 def custom_np_load(file_path):
@@ -146,40 +146,3 @@ class WeatherBench128(Dataset):
         return sample_x, sample_y_all
 
 
-if __name__ == '__main__':
-    train_data = WeatherBench128(start_time='2010-01-01 00:00:00', 
-                                end_time='2000-03-10 23:00:00',
-                                include_target=False,
-                                lead_time=6, 
-                                interval=6,
-                                muti_target_steps=4)
-    # 240h 40input 10batch
-    
-    train_loader = DataLoader(train_data, batch_size=4, shuffle=False, num_workers=8)
-    print("batch len:", len(train_loader))
-
-    for batch_idx, (X, Y) in enumerate(train_loader):
-        print("batch", batch_idx)
-        now_mean = []
-        now_std = []
-        print("X")
-        print(X.shape)
-        for i in range(X.shape[1]):
-            now_mean.append(round(float(torch.mean(X[0][i])), 2))
-            now_std.append(round(float(torch.std(X[0][i])),2))
-        print(now_mean)
-        print(now_std)
-        
-        now_mean = []
-        now_std = []
-        print("Y")
-        print(Y.shape)
-        for i in range(Y.shape[2]):
-            now_mean.append(round(float(torch.mean(Y[0][0][i])),2))
-            now_std.append(round(float(torch.std(Y[0][0][i])),2))
-        print(now_mean)
-        print(now_std)
-        
-        
-        if batch_idx == 1:
-            break
