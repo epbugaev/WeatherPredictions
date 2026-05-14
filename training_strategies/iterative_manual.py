@@ -41,6 +41,40 @@ class IterativeManualStep(StepStrategy):
         self.log_figures_once = log_figures_once
         self._figures_logged = False
 
+    def _iterate_timesteps(
+        self,
+        model: nn.Module,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        ctx: StepContext,
+        *,
+        backward_each_step: bool,
+    ) -> tuple[list[torch.Tensor], torch.Tensor]:
+        """Run the per-timestep prediction loop, optionally backwarding each step.
+
+        Args:
+            model: predictor; called as ``model(x, pred_list, t)`` per step.
+            x: input tensor.
+            y: ground truth, shape ``(B, T, ...)``; the t-th step is supervised by ``y[:, t]``.
+            ctx: trainer context (only ``device`` is read here).
+            backward_each_step: when ``True``, calls ``step_loss.backward()`` after
+                each per-timestep loss (manual_optimization train_step contract).
+
+        Returns:
+            ``(pred_list, total_loss)`` — predictions appended detached, summed loss.
+        """
+        total_loss = torch.zeros((), device=ctx.device)
+        pred_list: list[torch.Tensor] = []
+        for idx_time in range(self.time_prediction):
+            t = torch.tensor((idx_time + 1) * 100, device=ctx.device).repeat(x.shape[0])
+            prediction = model(x, pred_list, t)
+            pred_list.append(prediction.detach())
+            step_loss = self.loss(prediction, y[:, idx_time])
+            total_loss = total_loss + step_loss
+            if backward_each_step:
+                step_loss.backward()
+        return pred_list, total_loss
+
     def train_step(
         self,
         model: nn.Module,
@@ -58,18 +92,7 @@ class IterativeManualStep(StepStrategy):
         x, y = batch
         ctx.optimizer.zero_grad(set_to_none=True)
 
-        total_loss = torch.zeros((), device=ctx.device)
-        pred_list: list[torch.Tensor] = []
-
-        for idx_time in range(self.time_prediction):
-            t = torch.tensor((idx_time + 1) * 100, device=ctx.device).repeat(x.shape[0])
-            prediction = model(x, pred_list, t)
-            pred_list.append(prediction.detach())
-
-            step_loss = self.loss(prediction, y[:, idx_time])
-            total_loss = total_loss + step_loss
-
-            step_loss.backward()
+        _, total_loss = self._iterate_timesteps(model, x, y, ctx, backward_each_step=True)
 
         ctx.optimizer.step()
 
@@ -85,14 +108,7 @@ class IterativeManualStep(StepStrategy):
     ) -> dict[str, torch.Tensor]:
         x, y = batch
 
-        total_loss = torch.zeros((), device=ctx.device)
-        pred_list: list[torch.Tensor] = []
-
-        for idx_time in range(self.time_prediction):
-            t = torch.tensor((idx_time + 1) * 100, device=ctx.device).repeat(x.shape[0])
-            prediction = model(x, pred_list, t)
-            pred_list.append(prediction.detach())
-            total_loss = total_loss + self.loss(prediction, y[:, idx_time])
+        pred_list, total_loss = self._iterate_timesteps(model, x, y, ctx, backward_each_step=False)
 
         val_loss = total_loss / self.time_prediction
         rmse_first = ctx.metrics.WRMSE(pred_list[0], y[:, 0])
