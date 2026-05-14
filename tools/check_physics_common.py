@@ -558,7 +558,10 @@ def run_72h_rollout(
     workspace_eff = workspace or os.environ.get("COMET_WORKSPACE")
     project_name_eff = project_name or os.environ.get("COMET_PROJECT_NAME") or "WeatherPredictions"
 
-    run_name = f"check_physics_{method_name}_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}"
+    # Comet experiment name: method first, then context, then timestamp. Это
+    # сразу выделяет метод в Comet UI и позволяет фильтровать по prefix’у.
+    timestamp_str = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+    run_name = f"{method_name}_72h_{timestamp_str}"
     logger = Comet72hLogger(
         project_name=project_name_eff,
         workspace=workspace_eff,
@@ -567,6 +570,9 @@ def run_72h_rollout(
         offline_dir=f"logs/comet_offline/{method_name}",
         tags=(tags or []) + [method_name, f"H{geom.H}", f"W{geom.W}", "cpu", "72h"],
     )
+    # Дополнительно отдельным метаполем — для group-by в Comet.
+    logger.experiment.log_other("method", method_name)
+    logger.experiment.log_other("run_timestamp", timestamp_str)
 
     logger.log_parameters({
         "method": method_name,
