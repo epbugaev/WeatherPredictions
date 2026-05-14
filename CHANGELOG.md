@@ -167,14 +167,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   falling 0.187 -> 0.111 — classic overfit with zero regularization.
   Stochastic depth at 0.15 across the 24 attention blocks should
   push the val_loss minimum further out.
-- `trainer._to_device`: now calls ``tensor.pin_memory()`` in the calling
-  thread before the async H2D copy. Lets us drop ``pin_memory: true``
-  in the DataLoader (which spawned the leaking pin_memory background
-  thread that crashed job 3990855 at epoch 5) while keeping H2D copies
-  asynchronous.
-- `configs/predformer_usa_v4.yaml`: `pin_memory: true -> false`,
-  `persistent_workers: false -> true`. Saves ~30-60 s/epoch on worker
-  recreation without re-triggering the pin_memory thread socket leak.
+- `trainer._to_device`: reverted to the legacy ``.to(device,
+  non_blocking=True)`` after the in-thread ``pin_memory()`` experiment
+  (commit 16fcb6c) regressed GPU util 73% → 52% on job 3993815. The
+  synchronous ``tensor.pin_memory()`` allocated a fresh ~50 MB pinned
+  buffer per tensor per batch and blocked the trainer for ~30 ms/step
+  (≈30% of the bf16 step time). DataLoader's own pin_memory thread is
+  cheaper despite the cross-epoch socket leak.
+- `configs/predformer_usa_v4.yaml`: keep `pin_memory: true` and
+  `persistent_workers: false`. The ~30-60 s/epoch worker-restart cost
+  is the lesser evil compared to either the +30 ms/step in-thread pin
+  regression or the pin_memory thread leak.
 - `trainer.TrainerConfig`: new `val_every_n_epochs: int = 1`. When set
   to N>1 the trainer skips validation + checkpoint + early-stopping
   on (N-1)/N epochs, freeing those gaps. Last epoch always validates.

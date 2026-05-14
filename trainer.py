@@ -566,18 +566,8 @@ class Trainer:
 
 
 def _to_device(batch: Any, device: torch.device) -> Any:
-    """Move tensors in a batch to ``device``; tuples/lists are recursed into.
-
-    For CPU tensors we pin in the calling (trainer) thread before the async
-    H2D copy. This sidesteps the leaking pin_memory background thread that
-    forced ``persistent_workers=false`` (job 3990855 crashed at epoch 5
-    with "Pin memory thread exited unexpectedly"). With pin_memory=False
-    in the DataLoader, no background thread is created and there is no
-    leak; the manual ``pin_memory()`` call here keeps the H2D copy async.
-    """
+    """Move tensors in a batch to ``device``; tuples/lists are recursed into."""
     if isinstance(batch, torch.Tensor):
-        if batch.device.type == "cpu" and not batch.is_pinned():
-            batch = batch.pin_memory()
         return batch.to(device, non_blocking=True)
     if isinstance(batch, (tuple, list)):
         moved = [_to_device(item, device) for item in batch]
