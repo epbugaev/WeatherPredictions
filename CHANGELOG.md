@@ -7,6 +7,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `ruff.toml`: expanded the lint selects to `F, E, W, B, I, UP, SIM,
+  T100, T201` and pinned `target-version = "py310"`. New rule families
+  enforce CLAUDE.md requirements: `UP` for PEP 604 (`|`, `list[...]`),
+  `SIM` for ≤3-level nesting / control-flow simplifications, `T201`
+  for the no-`print()` rule (legacy entry points keep their
+  `per-file-ignores`). Models/dev/* and tools/* get tolerated rule
+  baselines so the one-shot lint pass doesn't fight archival code.
+- `.pre-commit-config.yaml`: two hooks pinned to ruff 0.15.9
+  (`ruff --fix` + `ruff-format`). Install with
+  `uv tool install pre-commit && pre-commit install`.
+- `utils/regions.USA_CROP`: `Final[list[list[int]]]` constant for the
+  USA index window (was duplicated across five train scripts).
+- `training_strategies.base.StepStrategy._build_val_metrics`: protected
+  helper that bundles `val_loss` + per-variable RMSE for the first /
+  last predicted timestep. All five strategies now call it instead of
+  rolling their own copy.
+- `Models.WeatherGFT.PDE_kernel._build_grid_buffers` and the four
+  finite-difference / integral methods (`integral_z`, `d_x`, `d_y`,
+  `d_z`) replace the module-level globals and free functions of the
+  same names. Same code in `Models/WeatherGFTSingle.py`.
+- `IterativeManualStep._iterate_timesteps`: shared per-timestep
+  prediction loop used by both `train_step` (with manual backward) and
+  `val_step` (forward only).
 - `sh_files/bench_dataloader.sh` — SLURM submit script for diagnostic
   dataloader benchmarks. Exports `BENCH_MAX_STEPS` and `PROFILE_TRACE_DIR`
   so `trainer.py` runs a short profiled epoch and exits before validation
