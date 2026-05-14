@@ -76,13 +76,11 @@ class TimestepSelectStep(StepStrategy):
         rmse_last = ctx.metrics.WRMSE(y_hat[:, -1], y_sel[:, -1])
 
         metrics: dict[str, torch.Tensor] = {"val_loss": val_loss}
-        for var_name, idx in MULTIOUT_INDEX_MAP.items():
-            metrics[f"f RMSE_{var_name}_first"] = torch.as_tensor(
-                rmse_first[idx], device=val_loss.device
+        metrics.update(
+            self._per_variable_rmse_metrics(
+                rmse_first, rmse_last, MULTIOUT_INDEX_MAP, val_loss.device, prefix="f "
             )
-            metrics[f"f RMSE_{var_name}_last"] = torch.as_tensor(
-                rmse_last[idx], device=val_loss.device
-            )
+        )
 
         if ctx.is_main_process and (not self.log_figures_once or not self._figures_logged):
             log_prediction_maps(

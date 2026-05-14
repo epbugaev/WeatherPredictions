@@ -85,6 +85,36 @@ class StepStrategy(ABC):
     def _mse_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         return torch.mean((pred - target) ** 2)
 
+    @staticmethod
+    def _per_variable_rmse_metrics(
+        rmse_first: list[float] | torch.Tensor,
+        rmse_last: list[float] | torch.Tensor,
+        index_map: dict[str, int],
+        device: torch.device,
+        prefix: str = "",
+    ) -> dict[str, torch.Tensor]:
+        """Собрать словарь `{prefix}RMSE_<var>_first/last` из per-channel WRMSE.
+
+        Args:
+            rmse_first: per-channel WRMSE на первом таймстепе (1-D iterable).
+            rmse_last: per-channel WRMSE на последнем таймстепе.
+            index_map: имя переменной → индекс канала в WRMSE-векторе.
+            device: устройство, на которое преобразовать каждую скалярную метрику.
+            prefix: префикс ключей (например, ``"f "`` у multiout-стратегий).
+
+        Returns:
+            Словарь скалярных 0-d тензоров для агрегации в трейнере.
+        """
+        metrics: dict[str, torch.Tensor] = {}
+        for var_name, idx in index_map.items():
+            metrics[f"{prefix}RMSE_{var_name}_first"] = torch.as_tensor(
+                rmse_first[idx], device=device
+            )
+            metrics[f"{prefix}RMSE_{var_name}_last"] = torch.as_tensor(
+                rmse_last[idx], device=device
+            )
+        return metrics
+
     @abstractmethod
     def train_step(
         self,

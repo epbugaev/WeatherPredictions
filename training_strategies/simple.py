@@ -65,11 +65,9 @@ class SimpleStep(StepStrategy):
         rmse_last = ctx.metrics.WRMSE(y_hat[:, -1], y[:, -1])
 
         metrics: dict[str, torch.Tensor] = {"val_loss": val_loss}
-        for var_name, idx in BASEMODEL_INDEX_MAP.items():
-            metrics[f"RMSE_{var_name}_first"] = torch.as_tensor(
-                rmse_first[idx], device=val_loss.device
+        metrics.update(
+            self._per_variable_rmse_metrics(
+                rmse_first, rmse_last, BASEMODEL_INDEX_MAP, val_loss.device
             )
-            metrics[f"RMSE_{var_name}_last"] = torch.as_tensor(
-                rmse_last[idx], device=val_loss.device
-            )
+        )
         return metrics
