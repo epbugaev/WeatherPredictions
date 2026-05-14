@@ -21,7 +21,10 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-${SLURM_CPUS_PER_TASK:-16}}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-${SLURM_CPUS_PER_TASK:-16}}"
 export PYTHONUNBUFFERED=1
 
-_sc_here="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# SLURM copies the job script into /var/spool/.../job<ID>/, so we cannot use
+# ${BASH_SOURCE[0]} to locate sh_files/. Anchor via SLURM_SUBMIT_DIR or a fallback.
+REPO_ROOT_FOR_CONTRACT="${REPO_ROOT:-${SLURM_SUBMIT_DIR:-/home/fa.buzaev/WeatherPredictions}}"
+_sc_here="${REPO_ROOT_FOR_CONTRACT}/sh_files"
 # shellcheck source=sh_files/_shell_contract.sh
 source "${_sc_here}/_shell_contract.sh" "${_sc_here}"
 
