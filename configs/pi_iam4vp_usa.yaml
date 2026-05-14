@@ -31,7 +31,7 @@ data:
 
 training:
   litmodel: mutiout_imvp_small_world
-  lr: 5e-4
+  lr: 5.0e-4
   eta_min: 0.0
   max_epoch: 1
   loss_type: MAE
