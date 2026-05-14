@@ -62,17 +62,18 @@ data:
   prefetch_factor: 4
   train:
     # bf16 freed ~30 GB of activation memory (was 74 GB at batch=90 fp32,
-    # 46 GB at batch=90 bf16). Bumped 90 -> 144 (+60%) to convert that
-    # headroom into wall-time. Expected memory at batch=144 ≈ 73 GB,
-    # leaving ~12 GB safety margin on the 85 GB A100.
+    # 46 GB at batch=90 bf16). Bumped 90 -> 160 (+78%) — at 144 GPU
+    # memory was 74 GB / 80 GB (job 3993887), bigger batch pushes that
+    # closer to 78-80 GB and lengthens the compute step so end-of-epoch
+    # gaps shrink as a fraction of wall time.
     start_time: "2000-01-01 00:00:00"
     end_time: "2003-12-30 00:00:00"
-    batch_size: 144
+    batch_size: 160
     shuffle: true
   val:
     start_time: "2004-01-01 00:00:00"
     end_time: "2004-12-30 00:00:00"
-    batch_size: 144
+    batch_size: 160
     shuffle: false
 
 training:
