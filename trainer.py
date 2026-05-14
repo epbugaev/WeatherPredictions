@@ -12,7 +12,9 @@ schedule, matching the previous training configuration).
 
 from __future__ import annotations
 
+import atexit
 import os
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
@@ -32,7 +34,6 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
 from training_strategies.base import StepContext, StepStrategy
-from utils.checkpointing import save_checkpoint
 from utils.distributed import DistInfo, barrier, reduce_dict
 from utils.early_stopping import EarlyStoppingTracker
 from utils.experiment import Experiment
@@ -133,6 +134,27 @@ class Trainer:
 
         if cfg.float32_matmul_precision is not None:
             torch.set_float32_matmul_precision(cfg.float32_matmul_precision)
+
+        # Background checkpoint writer (rank 0 only). The training loop
+        # snapshots state_dicts synchronously (~1-3 s on CPU) and submits
+        # the actual ``torch.save`` + ``os.replace`` to this pool, so the
+        # DDP barrier after _write_checkpoints isn't blocked on disk I/O.
+        # ``atexit`` waits for the last in-flight write before the process
+        # exits so we never leave a half-written ``.tmp`` file behind.
+        self._ckpt_pool: ThreadPoolExecutor | None = None
+        self._pending_ckpt: Future | None = None
+        if self.dist.rank == 0:
+            self._ckpt_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ckpt_writer")
+            atexit.register(self._drain_pending_ckpt)
+
+    def _drain_pending_ckpt(self) -> None:
+        """Wait for the in-flight checkpoint write (if any) and shut the pool."""
+        if self._pending_ckpt is not None:
+            self._pending_ckpt.result()
+            self._pending_ckpt = None
+        if self._ckpt_pool is not None:
+            self._ckpt_pool.shutdown(wait=True)
+            self._ckpt_pool = None
 
     # -------- public API --------
 
@@ -490,11 +512,23 @@ class Trainer:
         config: dict[str, Any],
         improved: bool,
     ) -> None:
-        """Save ``last.pt`` and, when ``improved``, ``best.pt`` and a tagged copy."""
+        """Save ``last.pt`` and, when ``improved``, ``best.pt`` and a tagged copy.
+
+        Strategy: snapshot the state-dicts on CPU synchronously (~1-3 s
+        — this is what blocks rank 0), then offload the actual
+        ``torch.save`` + ``os.replace`` to a background thread so the
+        DDP barrier following this method doesn't wait for disk I/O.
+        """
         os.makedirs(self.cfg.checkpoint_dir, exist_ok=True)
-        last_path = os.path.join(self.cfg.checkpoint_dir, "last.pt")
-        save_checkpoint(
-            path=last_path,
+
+        # Wait on the previous epoch's write before we overwrite its
+        # paths. In steady state this is instant (the write finished
+        # while the next epoch was training).
+        if self._pending_ckpt is not None:
+            self._pending_ckpt.result()
+            self._pending_ckpt = None
+
+        payload = _take_checkpoint_snapshot(
             model=model,
             optimizer=optimizer,
             scheduler=scheduler,
@@ -504,33 +538,22 @@ class Trainer:
             metric=val_loss,
             config=config,
         )
+
+        last_path = os.path.join(self.cfg.checkpoint_dir, "last.pt")
+        paths: list[str] = [last_path]
         if improved:
-            best_path = os.path.join(self.cfg.checkpoint_dir, "best.pt")
-            save_checkpoint(
-                path=best_path,
-                model=model,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                scaler=scaler,
-                epoch=epoch,
-                global_step=global_step,
-                metric=val_loss,
-                config=config,
+            paths.append(os.path.join(self.cfg.checkpoint_dir, "best.pt"))
+            paths.append(
+                os.path.join(
+                    self.cfg.checkpoint_dir,
+                    f"epoch={epoch:02d}-val_loss={val_loss:.4f}.pt",
+                )
             )
-            tagged_path = os.path.join(
-                self.cfg.checkpoint_dir, f"epoch={epoch:02d}-val_loss={val_loss:.4f}.pt"
-            )
-            save_checkpoint(
-                path=tagged_path,
-                model=model,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                scaler=scaler,
-                epoch=epoch,
-                global_step=global_step,
-                metric=val_loss,
-                config=config,
-            )
+
+        # All three paths share the same payload (single CPU snapshot),
+        # so the background thread does N torch.save calls in sequence.
+        assert self._ckpt_pool is not None
+        self._pending_ckpt = self._ckpt_pool.submit(_write_checkpoint_payload, payload, paths)
 
 
 def _to_device(batch: Any, device: torch.device) -> Any:
@@ -569,3 +592,53 @@ def _normalize_batch(batch: Any, normalize: nn.Module) -> Any:
     if isinstance(batch, dict):
         return {k: _normalize_batch(v, normalize) for k, v in batch.items()}
     return batch
+
+
+def _take_checkpoint_snapshot(
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer | None,
+    scheduler: torch.optim.lr_scheduler.LRScheduler | None,
+    scaler: GradScaler | None,
+    epoch: int,
+    global_step: int,
+    metric: float,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a CPU-resident checkpoint payload that's safe to hand to a thread.
+
+    Runs in the training thread. The optimiser / scheduler / scaler
+    ``state_dict()`` methods already return CPU-resident, deep-enough
+    copies; only the model weights live on the GPU, so those we clone
+    explicitly to CPU. After this returns, the training loop can mutate
+    the live state freely without affecting the background writer.
+    """
+    raw = model.module if isinstance(model, nn.parallel.DistributedDataParallel) else model
+    payload: dict[str, Any] = {
+        "model": {k: v.detach().to("cpu", copy=True) for k, v in raw.state_dict().items()},
+        "epoch": epoch,
+        "global_step": global_step,
+        "metric": metric,
+        "config": config,
+    }
+    if optimizer is not None:
+        payload["optimizer"] = optimizer.state_dict()
+    if scheduler is not None:
+        payload["scheduler"] = scheduler.state_dict()
+    if scaler is not None:
+        payload["scaler"] = scaler.state_dict()
+    return payload
+
+
+def _write_checkpoint_payload(payload: dict[str, Any], paths: list[str]) -> None:
+    """Write ``payload`` to every path in ``paths`` via tmp-file + atomic rename.
+
+    Runs in a background thread. Each path gets the same on-disk bytes,
+    so we only serialise once and ``shutil.copy`` the file for additional
+    destinations — but ``torch.save`` is fast enough on CPU snapshots
+    (~5-15 s for 100-500 MB) that the simpler ``save-then-copy`` pattern
+    isn't worth the complexity. Sequential ``torch.save`` it is.
+    """
+    for path in paths:
+        tmp_path = path + ".tmp"
+        torch.save(payload, tmp_path)
+        os.replace(tmp_path, path)
