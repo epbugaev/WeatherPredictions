@@ -167,6 +167,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   falling 0.187 -> 0.111 — classic overfit with zero regularization.
   Stochastic depth at 0.15 across the 24 attention blocks should
   push the val_loss minimum further out.
+- `trainer._to_device`: now calls ``tensor.pin_memory()`` in the calling
+  thread before the async H2D copy. Lets us drop ``pin_memory: true``
+  in the DataLoader (which spawned the leaking pin_memory background
+  thread that crashed job 3990855 at epoch 5) while keeping H2D copies
+  asynchronous.
+- `configs/predformer_usa_v4.yaml`: `pin_memory: true -> false`,
+  `persistent_workers: false -> true`. Saves ~30-60 s/epoch on worker
+  recreation without re-triggering the pin_memory thread socket leak.
+- `trainer.TrainerConfig`: new `val_every_n_epochs: int = 1`. When set
+  to N>1 the trainer skips validation + checkpoint + early-stopping
+  on (N-1)/N epochs, freeing those gaps. Last epoch always validates.
+- `configs/predformer_usa_v4.yaml`: `trainer.val_every_n_epochs: 3` and
+  `training.early_stopping_patience: 100 -> 34` (34*3 ≈ same 100-epoch
+  plateau budget).
+- `trainer.Trainer`: rank-0 owns a 1-thread ThreadPoolExecutor for
+  checkpoint writes. ``_write_checkpoints`` now snapshots state_dicts
+  on CPU synchronously (~1-3 s) then submits the actual ``torch.save``
+  plus atomic rename to the background pool, so the DDP barrier after
+  this method no longer waits on disk I/O (was ~5-15 s/epoch). The
+  next epoch's call awaits any in-flight write before clobbering paths.
+  ``atexit`` drains the pool on shutdown.
+- `trainer._log_train_metrics`: logs rank-0 local train_loss directly,
+  no cross-rank ``reduce_dict``. Validation metric reduction (val_loss
+  feeds early-stopping) is unchanged.
 - `sh_files/train_PredFormer_USA_2gpu_v4.sh`: `#SBATCH --time` 2-18:00:00
   -> 6-00:00:00 to fit the 2000-epoch run (~2.1 min/epoch × 2000 ≈ 70 h).
 - `trainer.TrainerConfig`: new `grad_clip_norm: float | None` and
