@@ -5,6 +5,8 @@
 `cos(lat)` (равномерное распределение `lat` от 90° до -90°).
 """
 
+import math
+
 import torch
 
 
@@ -95,7 +97,7 @@ def latitude_weighting_factor_torch(j: torch.Tensor, num_lat: int, s: torch.Tens
     Returns:
         Тензор весов формы `j`.
     """
-    return num_lat * torch.cos(3.1416 / 180.0 * lat(j, num_lat)) / s
+    return num_lat * torch.cos(math.pi / 180.0 * lat(j, num_lat)) / s
 
 
 @torch.jit.script
@@ -110,7 +112,7 @@ def _lat_weight(pred: torch.Tensor) -> torch.Tensor:
     """
     num_lat = pred.shape[-2]
     lat_t = torch.arange(start=0, end=num_lat, device=pred.device)
-    s = torch.sum(torch.cos(3.1416 / 180.0 * lat(lat_t, num_lat)))
+    s = torch.sum(torch.cos(math.pi / 180.0 * lat(lat_t, num_lat)))
     factor = latitude_weighting_factor_torch(lat_t, num_lat, s)
     if pred.dim() == 5:
         return torch.reshape(factor, (1, 1, 1, -1, 1))
