@@ -224,7 +224,7 @@ def per_channel_psnr(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
 
 
 def latitude_weighted_rmse(pred: torch.Tensor, target: torch.Tensor, lat_weights: torch.Tensor) -> torch.Tensor:
-    """Latitude-weighted RMSE (точно как utils.losses.weighted_rmse).
+    """Latitude-weighted RMSE (cos(lat)-нормированные веса, как `utils.metrics.weighted_rmse_torch`).
 
     Args:
         pred, target: (B, C, H, W).
@@ -262,7 +262,7 @@ def run_baseline(cfg: BaselineConfig, smoke: bool = False) -> None:
     ).to(cfg.device)
     print(f"[init] Grid H={cfg.H}, W={cfg.W}; kernel={kernel}")
 
-    # --- latitude weights for weighted RMSE (matches utils.losses.weighted_rmse) ---
+    # --- latitude weights for weighted RMSE (cos(lat), как `utils.metrics.weighted_rmse_torch`) ---
     lat_t = torch.arange(0, cfg.H, dtype=torch.float32, device=cfg.device)
     lat_deg = 90.0 - lat_t * 180.0 / float(cfg.H - 1)
     lat_rad = lat_deg * torch.pi / 180.0

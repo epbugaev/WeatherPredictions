@@ -11,7 +11,7 @@ _updated 2026-05-14_
   - WENO-5 (Jiang–Shu) — в [PredFormerGFT.py](../Models/PredFormerGFT.py), [PredFormerGFT_HybridBlock.py](../Models/PredFormerGFT_HybridBlock.py) (продакшен) и [Models/dev/PredFormerGFTSmallWorld.py](../Models/dev/PredFormerGFTSmallWorld.py) (dev).
 - **Временная схема в продакшене — только Forward Euler** (`u_new = u + scale_diff(u_t · dt, u).detach()`). RK4 существует только в dev — [Models/dev/WeatherGFT_3.py](../Models/dev/WeatherGFT_3.py).
 - **`.detach()` после `scale_diff` обрывает autograd через физический шаг** — физика работает как структурированный prior, градиент через `u_t, v_t, t_t, q_t, z_t` не идёт.
-- **PINN/физических лоссов нет.** [utils/losses.py](../utils/losses.py) содержит только lat-weighted RMSE/MAE; никаких residual/H1/Sobolev лоссов.
+- **PINN/физических лоссов нет.** [utils/metrics.py](../utils/metrics.py) содержит только lat-weighted RMSE/ACC и связанные метрики; никаких residual/H1/Sobolev лоссов.
 - **DRY-долг крупный**: ~150 строк FD/WENO кода и `PDE_kernel` дублируются между 4 production-файлами и 3 dev-файлами. Общего модуля `utils/physics.py` нет.
 - **Сетка задаётся на уровне модуля** через константу `latents_size` (`pixel_x`, `pixel_y`, `M_z` — module-globals, вычисляются при `import`). Это вшивает разрешение в модуль; разные файлы имеют разные значения (`[8, 16]` или `[32, 64]`).
 - **Граничные условия везде периодические** по lat/lon/p — нефизично у полюсов и у границ давления, но для USA-кропа 32×64 даёт сглаживание у edge (≈ ≤ 5% узлов).

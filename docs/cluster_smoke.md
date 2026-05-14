@@ -49,8 +49,7 @@ ruff check trainer.py train.py utils/registry.py utils/distributed.py \
   utils/experiment.py utils/checkpointing.py utils/early_stopping.py \
   training_strategies/ train/__init__.py train/_common.py \
   train/train_*.py train/dev/__init__.py train/dev/train.py \
-  train/dev/train_single_imvp.py train/dev/train_single_imvp_v2.py \
-  train/dev/train_single_v1.py train/dev/train_single_v2.py \
+  train/dev/train_single_imvp.py \
   Models/__init__.py Data/__init__.py
 ```
 

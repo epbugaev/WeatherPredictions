@@ -258,7 +258,7 @@ class GeometryCPU:
                     M_z[i, j] = self.pixel_z[0, j, 0, 0]
         self.M_z = M_z
 
-        # Latitude weights (cos(lat) normalised, как в utils.losses.weighted_rmse).
+        # Latitude weights (cos(lat) normalised, как в `utils.metrics.weighted_rmse_torch`).
         cos_w = torch.cos(self.latitudes)
         s = cos_w.sum()
         self.lat_weights = H * cos_w / s
