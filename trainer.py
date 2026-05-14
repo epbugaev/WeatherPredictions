@@ -491,14 +491,23 @@ class Trainer:
         experiment: Experiment,
         global_step: int,
     ) -> None:
-        """Reduce per-batch metrics and log on rank 0."""
-        detached = {k: v.detach().to(self.dist.device).float() for k, v in step_metrics.items()}
-        reduced = reduce_dict(detached, self.dist, average=True)
-        if self.dist.rank == 0:
-            payload = {
-                ("train_loss" if k == "loss" else k): float(v.item()) for k, v in reduced.items()
-            }
-            experiment.log_metrics(payload, step=global_step)
+        """Log rank-0 training metrics without cross-rank ``all_reduce``.
+
+        Train-loss is logged from rank 0's local values rather than the
+        DDP-averaged value. DistributedSampler shards data across ranks,
+        so rank-0 loss is an unbiased estimator on its own shard — the
+        per-step noise is marginally higher, but eliminating the
+        all_reduce + Comet I/O round-trip every ``log_every_n_steps``
+        removes a per-50-step idle hole on rank 1. Validation still
+        reduces (val_loss feeds early-stopping and must be exact).
+        """
+        if self.dist.rank != 0:
+            return
+        payload = {
+            ("train_loss" if k == "loss" else k): float(v.detach().item())
+            for k, v in step_metrics.items()
+        }
+        experiment.log_metrics(payload, step=global_step)
 
     def _write_checkpoints(
         self,
