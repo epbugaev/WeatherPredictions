@@ -812,10 +812,16 @@ class PredFormer_Model(nn.Module):
         for i in range(T - 1):
             # Применяем GFT с помощью hybrid_block
             x_patch = x[:, i, 4:, :, :]  # Берем только каналы с индекса 4, получая Z, Q, U, V, T
-            # x_patch = x_patch.permute(0, 3, 2, 1)  # [B, H, W, C]
 
-            # Получаем входные данные для hybrid_block
+            # Получаем входные данные для hybrid_block.
+            # x_to_zquvtw возвращает [B, H//4, W//4, C]; HybridBlock/PDE_block
+            # ожидают оба входа в одном [B, H, W, C] формате (внутри пермутится
+            # на [B, C, H, W] под Conv2d). До переноса этого варианта на USA
+            # x_patch шёл сюда как [B, C, H, W] — в результате первый permute
+            # внутри PDE_block ломал каналы. Приводим обе ветки к одному
+            # downscale+layout, как в PredFormerGFT.py.
             zquvtw = self.x_to_zquvtw(x_patch)
+            x_patch = zquvtw.clone()
 
             for j in range(12):
                 # Получаем физические эмбеддинги через hybrid_block
