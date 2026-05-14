@@ -194,23 +194,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `trainer._log_train_metrics`: logs rank-0 local train_loss directly,
   no cross-rank ``reduce_dict``. Validation metric reduction (val_loss
   feeds early-stopping) is unchanged.
-- `Data/weatherbench_128_v5.py` and `Data/__init__.py`: new
-  ``WeatherBench128V5`` registered as ``v5``. Identical samples to v4;
-  marker for the prefetched pipeline.
-- `trainer._CudaPrefetcher`: background-thread CPU→GPU prefetcher.
-  Pins batches via ``tensor.pin_memory()`` (cudaHostRegister releases
-  the GIL) in a worker thread, issues async H2D copies on a side CUDA
-  stream, hands the trainer ready-to-use GPU tensors. Designed for
-  ``pin_memory: false`` + ``persistent_workers: true``: PyTorch's
-  leaking pin_memory thread is never spawned, but the workers still
-  survive across epochs (~30-60 s/epoch saved).
-- `trainer.TrainerConfig`: new ``cuda_prefetcher: bool = False`` and
-  ``cuda_prefetcher_depth: int = 2``. Off by default; v5 turns it on.
-- `configs/predformer_usa_v5.yaml`: clone of v4 with ``dataset_version: v5``,
-  ``data.pin_memory: false``, ``data.persistent_workers: true``,
-  ``trainer.cuda_prefetcher: true``.
-- `sh_files/train_PredFormer_USA_2gpu_v5.sh`: 2-GPU DDP launcher for
-  v5 (same STAGE_MEMMAP recipe, same SLURM constraints).
 - `sh_files/train_PredFormer_USA_2gpu_v4.sh`: `#SBATCH --time` 2-18:00:00
   -> 6-00:00:00 to fit the 2000-epoch run (~2.1 min/epoch × 2000 ≈ 70 h).
 - `trainer.TrainerConfig`: new `grad_clip_norm: float | None` and
