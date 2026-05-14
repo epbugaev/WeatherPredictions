@@ -115,6 +115,42 @@ class StepStrategy(ABC):
             )
         return metrics
 
+    def _build_val_metrics(
+        self,
+        ctx: StepContext,
+        val_loss: torch.Tensor,
+        pred_first: torch.Tensor,
+        target_first: torch.Tensor,
+        pred_last: torch.Tensor,
+        target_last: torch.Tensor,
+        index_map: dict[str, int],
+        prefix: str = "",
+    ) -> dict[str, torch.Tensor]:
+        """Собрать val-словарь: ``val_loss`` + per-variable RMSE на 1-м/последнем шаге.
+
+        Args:
+            ctx: StepContext (используется ``ctx.metrics.WRMSE``).
+            val_loss: уже вычисленный скалярный loss валидации.
+            pred_first: предсказание на первом таймстепе (срез вида ``y_hat[:, 0]``).
+            target_first: эталон на первом таймстепе.
+            pred_last: предсказание на последнем таймстепе.
+            target_last: эталон на последнем таймстепе.
+            index_map: имя переменной → индекс канала в WRMSE-векторе.
+            prefix: префикс ключей; пустой у одиночной модели, ``"f "`` у multiout.
+
+        Returns:
+            ``{"val_loss": ..., "{prefix}RMSE_<var>_first/last": ...}``.
+        """
+        rmse_first = ctx.metrics.WRMSE(pred_first, target_first)
+        rmse_last = ctx.metrics.WRMSE(pred_last, target_last)
+        metrics: dict[str, torch.Tensor] = {"val_loss": val_loss}
+        metrics.update(
+            self._per_variable_rmse_metrics(
+                rmse_first, rmse_last, index_map, val_loss.device, prefix=prefix
+            )
+        )
+        return metrics
+
     @abstractmethod
     def train_step(
         self,

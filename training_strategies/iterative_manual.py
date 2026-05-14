@@ -111,14 +111,15 @@ class IterativeManualStep(StepStrategy):
         pred_list, total_loss = self._iterate_timesteps(model, x, y, ctx, backward_each_step=False)
 
         val_loss = total_loss / self.time_prediction
-        rmse_first = ctx.metrics.WRMSE(pred_list[0], y[:, 0])
-        rmse_last = ctx.metrics.WRMSE(pred_list[-1], y[:, -1])
-
-        metrics: dict[str, torch.Tensor] = {"val_loss": val_loss}
-        metrics.update(
-            self._per_variable_rmse_metrics(
-                rmse_first, rmse_last, MULTIOUT_INDEX_MAP, val_loss.device, prefix="f "
-            )
+        metrics = self._build_val_metrics(
+            ctx,
+            val_loss,
+            pred_first=pred_list[0],
+            target_first=y[:, 0],
+            pred_last=pred_list[-1],
+            target_last=y[:, -1],
+            index_map=MULTIOUT_INDEX_MAP,
+            prefix="f ",
         )
 
         if ctx.is_main_process and (not self.log_figures_once or not self._figures_logged):

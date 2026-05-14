@@ -61,13 +61,12 @@ class SimpleStep(StepStrategy):
         x, y = batch
         y_hat = model(x)
         val_loss = self.loss(y_hat, y)
-        rmse_first = ctx.metrics.WRMSE(y_hat[:, 0], y[:, 0])
-        rmse_last = ctx.metrics.WRMSE(y_hat[:, -1], y[:, -1])
-
-        metrics: dict[str, torch.Tensor] = {"val_loss": val_loss}
-        metrics.update(
-            self._per_variable_rmse_metrics(
-                rmse_first, rmse_last, BASEMODEL_INDEX_MAP, val_loss.device
-            )
+        return self._build_val_metrics(
+            ctx,
+            val_loss,
+            pred_first=y_hat[:, 0],
+            target_first=y[:, 0],
+            pred_last=y_hat[:, -1],
+            target_last=y[:, -1],
+            index_map=BASEMODEL_INDEX_MAP,
         )
-        return metrics
