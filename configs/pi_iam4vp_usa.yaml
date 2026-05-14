@@ -45,8 +45,10 @@ trainer:
   log_every_n_steps: 5
   # PI-IAM4VP uses iterative manual backward (training_strategies/iterative_manual.py);
   # parameters are activated incrementally per timestep, so static_graph=True from
-  # the production templates breaks DDP. Disable for this model.
+  # the production templates breaks DDP. Disable both static_graph and rely on
+  # find_unused_parameters=True so DDP tolerates the per-iter graph change.
   static_graph: false
+  find_unused_parameters: true
   num_sanity_val_steps: 0
   float32_matmul_precision: high
 

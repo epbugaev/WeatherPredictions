@@ -907,7 +907,10 @@ class GFT(nn.Module):
         super().__init__()
 
         self.t_emb_dim = 32
-        self.out_layer = [0, 2, 5]
+        # mutiout strategy (training_strategies/timestep_select.py) hardcodes
+        # train_step indices as _TRAIN_HOURS=(0,2,5) and assumes y_hat exposes
+        # all 6 timesteps. Emit 6 outputs so that indexing stays in-bounds.
+        self.out_layer = [0, 1, 2, 3, 4, 5]
         self.PDE_block_seconds_list = self.get_block_seconds(
             body_layers, block_dt * pde_block_depth
         )
