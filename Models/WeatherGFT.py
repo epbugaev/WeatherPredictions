@@ -615,12 +615,29 @@ class RandomOrLearnedSinusoidalPosEmb(nn.Module):
 
 
 class GFT(nn.Module):
-    
+    """WeatherGFT: hierarchical Swin-Transformer-stage + PDE-kernel’ы (FD-4 + Forward Euler).
+
+    Гибридная архитектура: на каждом уровне Swin-стека работает чередование
+    AI-блоков и PDE-блоков (`PDE_kernel` с FD-4 операторами по x/y/p и
+    constant-Coriolis). Routing между AI и физикой контролируется
+    learnable `router_weight`, агрегируется в `GFT.layer_weights` для
+    логирования.
+
+    Args:
+        hidden_dim, mlp_dim, dim_head, drop, heads, window_size, depth_swin,
+            patch_size, attn_drop, drop_path, depth_pde, block_dt, drop_out:
+            типичные Swin / PDE-параметры (см. блоки в этом же файле).
+        in_channel/out_channel: 69 ERA5-каналов на вход/выход.
+        cur_time_step/time_step: индекс текущего шага и общее число шагов
+            прогноза (для шкалы PDE-step).
+        inverse_time: режим обратного rollout (для consistency loss).
+    """
+
     layer_weights = {}  # Глобальный словарь для хранения значений router_weight
-    
+
     gft_name = ""
-    
-    def __init__(self, 
+
+    def __init__(self,
                 hidden_dim=256,
                 physics_part_coef=None,
                 encoder_layers=[2, 2, 2],
@@ -741,11 +758,24 @@ class GFT(nn.Module):
         return x_t_emb
 
     def forward(self, x):
+        """Авторегрессивный rollout `time_step` шагов из клипа `(B, 1, C, H, W)`.
+
+        Очищает `GFT.layer_weights` на каждом forward’е и наполняет его
+        router-весами по слоям (для последующего логирования).
+
+        Args:
+            x: входной клип формы `(B, 1, C, H, W)` (один таймстеп начального
+                состояния; средняя размерность T=1 пробрасывается из
+                DataLoader’а и squeeze’ится).
+
+        Returns:
+            Прогноз формы `(B, time_step, C, H, W)`.
+        """
         x = x.squeeze(1)
-        
+
         GFT.layer_weights.clear()
         GFT.gft_name = ""
-        
+
         output = []
         zquvtw = self.x_to_zquvtw(x)
         for idx, layer in enumerate(self.encoder):

@@ -588,6 +588,19 @@ def sinusoidal_embedding(n_channels, dim):
 
       
 class PredFormer_Model(nn.Module):
+    """PredFormer + Hybrid PDE-блоки (GFT-family) для физически-aware прогноза.
+
+    Расширение `Models.PredFormer.PredFormer_Model` гибридным выходом, где
+    финальные блоки совмещают AI-предсказание и PDE-step (WENO-5 + Forward
+    Euler) через learnable veight `weight_AI vs weight_Physics`. Сетка
+    `latents_size` и физические константы — module-globals (см. начало
+    файла); они **не** мигрируют через `state_dict`, поэтому модель
+    жёстко привязана к фиксированной геометрии.
+
+    Args:
+        model_config: dict с теми же ключами, что у `Models.PredFormer.PredFormer_Model`.
+    """
+
     def __init__(self, model_config, **kwargs):
         super().__init__()
         self.image_height = model_config['height']
@@ -690,6 +703,15 @@ class PredFormer_Model(nn.Module):
                 
      
     def forward(self, x):
+        """Прогон клипа через PredFormer + Hybrid PDE-блоки.
+
+        Args:
+            x: клип `(B, T, C, H, W)`, `C == self.num_channels`.
+
+        Returns:
+            Прогноз `(B, T, C, H, W)`; финальные таймстепы скомбинированы как
+            `weight_AI * AI_pred + weight_Physics * physics_step`.
+        """
         B, T, C, H, W = x.shape
         assert C == self.num_channels
 
@@ -698,7 +720,7 @@ class PredFormer_Model(nn.Module):
         mask_patches = self.rearrange_masks(self.static_masks.to(x.device)) # [1, num_patches, 3*ps*ps]
         mask_embed = self.mask_embedding(mask_patches) # [1, num_patches, dim]
         mask_embed = mask_embed.unsqueeze(1) # [1, 1, num_patches, dim]
-        mask_embed = mask_embed.to(x.device) 
+        mask_embed = mask_embed.to(x.device)
 
         # Patch Embedding для входа x
         x_embed = self.to_patch_embedding(x) # [B, T, num_patches, dim]

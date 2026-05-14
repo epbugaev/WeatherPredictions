@@ -511,6 +511,21 @@ def build_latlon_time_fourier_pe(
     return pe.unsqueeze(0)
       
 class PredFormer_Model(nn.Module):
+    """Видеопредиктор PredFormer: ViT-блоки с patch-эмбеддингом + статичная маска ландшафта.
+
+    Конфигурация передаётся одним dict’ом `model_config` (для совместимости
+    с YAML-фабрикой). Patch-эмбеддинг разбивает каждый кадр на сетку
+    `num_patches_h × num_patches_w` патчей размером `patch_size`. Глобальная
+    «маска ландшафта» (z, lat, lon с `path_to_constants`) добавляется к
+    патч-эмбеддингам как обучаемый landscape prior.
+
+    Args:
+        model_config: dict с ключами `height`, `width`, `num_channels`,
+            `pre_seq`, `after_seq`, `patch_size`, `dim`, `heads`, `dim_head`,
+            `dropout`, `attn_dropout`, `drop_path`, `scale_dim`, `depth`,
+            `Ndepth`, `path_to_constants`.
+    """
+
     def __init__(self, model_config, **kwargs):
         super().__init__()
         self.image_height = model_config['height']
@@ -656,13 +671,21 @@ class PredFormer_Model(nn.Module):
         return count
 
     def forward(self, x):
+        """Прогон клипа `(B, T, C, H, W)` через стек PredFormer-блоков.
+
+        Args:
+            x: входной клип формы `(B, T, C, H, W)`, `C == self.num_channels`.
+
+        Returns:
+            Прогноз формы `(B, T, C, H, W)`.
+        """
         B, T, C, H, W = x.shape
         assert C == self.num_channels
 
         mask_patches = self.rearrange_masks(self.static_masks.to(x.device)) # [1, num_patches, 3*ps*ps]
         mask_embed = self.mask_embedding(mask_patches) # [1, num_patches, dim]
         mask_embed = mask_embed.unsqueeze(1) # [1, 1, num_patches, dim]
-        mask_embed = mask_embed.to(x.device) 
+        mask_embed = mask_embed.to(x.device)
 
         # Patch Embedding для входа x
         x_embed = self.to_patch_embedding(x) # [B, T, num_patches, dim]

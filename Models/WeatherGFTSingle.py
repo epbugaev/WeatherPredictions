@@ -616,12 +616,23 @@ class RandomOrLearnedSinusoidalPosEmb(nn.Module):
 
 
 class GFT(nn.Module):
-    
+    """WeatherGFT Single-block вариант: один глобальный PDE-блок вместо чередующихся.
+
+    Архитектурно похож на `Models.WeatherGFT.GFT`, но физика применяется единым
+    блоком в конце стека, а не пер-stage. Используется для baseline-сравнения
+    и для конфигов с `latents_size=[32, 64]`.
+
+    Args:
+        hidden_dim, physics_part_coef, encoder_layers, edcoder_heads,
+            encoder_scaling_factors: типичные Swin/PDE-параметры
+            (см. блоки в этом файле).
+    """
+
     layer_weights = {}  # Глобальный словарь для хранения значений router_weight
-    
+
     gft_name = ""
-    
-    def __init__(self, 
+
+    def __init__(self,
                 hidden_dim=256,
                 physics_part_coef=None,
                 encoder_layers=[2, 2, 2],
@@ -777,8 +788,16 @@ class GFT(nn.Module):
         return torch.squeeze(torch.stack(total_coefs, dim=0))
 
     def forward(self, x):
+        """Авторегрессивный rollout `time_step` шагов из клипа `(B, 1, C, H, W)`.
+
+        Args:
+            x: входной клип `(B, 1, C, H, W)`; T=1 squeeze’ится.
+
+        Returns:
+            Прогноз `(B, time_step, C, H, W)`.
+        """
         x = x.squeeze(1)
-        
+
         GFT.layer_weights.clear()
         GFT.gft_name = ""
         

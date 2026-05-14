@@ -7,11 +7,21 @@ from Models.SimVP_utils import (ConvSC, ConvNeXtSubBlock, ConvMixerSubBlock, GAS
 
 
 class SimVP_Model(nn.Module):
-    r"""SimVP Model
+    r"""Видеопредиктор SimVP: encoder → mid → decoder с U-Net skip-connection’ами.
 
-    Implementation of `SimVP: Simpler yet Better Video Prediction
-    <https://arxiv.org/abs/2206.05099>`_.
+    Реализация `SimVP: Simpler yet Better Video Prediction
+    <https://arxiv.org/abs/2206.05099>`_. Все таймстепы пропускаются через
+    общий per-frame encoder/decoder, временные зависимости моделирует
+    middle-блок над `(B, T·hid_S, H', W')` или `(B, T, hid_S, H', W')`.
 
+    Args:
+        in_shape: кортеж `(T, C, H, W)` — длина входного клипа и shape кадра.
+        hid_S, hid_T: размерности скрытых пространств encoder’а и middle-блока.
+        N_S, N_T: число слоёв в encoder’е/decoder’е и middle-блоке.
+        model_type: тип middle-блока (`gSTA`, `IncepU`, `ConvNeXt`, …).
+        mlp_ratio, drop, drop_path: типичные dropout/MLP-параметры.
+        spatio_kernel_enc/dec: kernel-size для spatial-сверток.
+        act_inplace: использовать ли in-place активации (для torch.compile = False).
     """
 
     def __init__(self, in_shape, hid_S=16, hid_T=256, N_S=4, N_T=4, model_type='gSTA',
@@ -33,6 +43,14 @@ class SimVP_Model(nn.Module):
                 mlp_ratio=mlp_ratio, drop=drop, drop_path=drop_path)
 
     def forward(self, x_raw, **kwargs):
+        """Прогон клипа `(B, T, C, H, W)` → клип той же формы.
+
+        Args:
+            x_raw: входной клип формы `(B, T, C, H, W)`.
+
+        Returns:
+            Прогноз формы `(B, T, C, H, W)`.
+        """
         B, T, C, H, W = x_raw.shape
         x = x_raw.view(B*T, C, H, W)
 

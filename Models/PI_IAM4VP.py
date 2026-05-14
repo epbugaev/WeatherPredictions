@@ -130,6 +130,21 @@ class Predictor(nn.Module):
 
 
 class IAM4VP(nn.Module):
+    """Iterative Auto-regressive Model for Video Prediction + опциональный physics-prior.
+
+    На каждом шаге `t` модель видит `(x_raw, pred_list, t)` — начальное
+    состояние, накопленный список prev-predictions и timestep-эмбеддинг.
+    Backward сделан per-step снаружи (см. `IterativeManualStep` в стратегиях).
+
+    При `use_physics=True` параллельный путь через `HybridBlock` добавляет
+    в выход physics-step из `Models.PredFormerGFT_HybridBlock`.
+
+    Args:
+        T_data, C_data, H_data, W_data: длина клипа и shape кадра.
+        hid_S, hid_T, N_S, N_T: размерности и глубины encoder/predictor/decoder.
+        use_physics: если True, выход — `AI + physics_correction`.
+    """
+
     def __init__(self, T_data=6, C_data=69, H_data=32, W_data=64, hid_S=64, hid_T=256, N_S=4, N_T=6, use_physics=True):
         super(IAM4VP, self).__init__()
         self.time_mlp = Time_MLP(dim=hid_S)
@@ -177,6 +192,20 @@ class IAM4VP(nn.Module):
 
 
     def forward(self, x_raw, y_raw=None, t=None):
+        """Один шаг авторегрессивного прогноза + опциональный physics-correction.
+
+        Сигнатура отличается от обычных `forward(self, x)`-моделей: используется
+        вместе с `IterativeManualStep`, где трейнер делает per-timestep loop.
+
+        Args:
+            x_raw: начальное состояние `(B, T, C, H, W)`.
+            y_raw: накопленный список prev-predictions от `IterativeManualStep`
+                (передаётся как кортеж/список тензоров) или None.
+            t: 1-D тензор `(B,)` — timestep-эмбеддинг (значение `(idx_time+1)*100`).
+
+        Returns:
+            Прогноз на текущий timestep, форма `(B, C, H, W)`.
+        """
         B, T, C, H, W = x_raw.shape
         x = x_raw.view(B * T, C, H, W)
         time_emb = self.time_mlp(t)
