@@ -56,7 +56,14 @@ training:
 trainer:
   precision: 32
   log_every_n_steps: 5
-  static_graph: true
+  # PredRNN-V2's shared `adapter` conv only feeds the internal decoupling
+  # loss, which PredRNNStep discards (`y_hat, _ = model(...)`), so those
+  # params never receive a gradient from the task loss. That makes the
+  # autograd graph non-static across ranks; disable static_graph and let
+  # DDP tolerate the unused params. PredRNN v1 has no such param and keeps
+  # static_graph=true.
+  static_graph: false
+  find_unused_parameters: true
   num_sanity_val_steps: 0
   float32_matmul_precision: high
 
