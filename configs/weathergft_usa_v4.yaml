@@ -1,0 +1,132 @@
+# WeatherGFT-USA-v4-72h: v4 raw-memmap (WeatherNormalize in trainer) + 72h horizon.
+# farthest target = (end_time_y-end_time_x)*interval + lead_time = 72h.
+# Models/strategies unchanged; only the data block differs vs *_usa_train.yaml.
+experiment:
+  name: WeatherGFT-USA-v4-72h
+model:
+  type: WeatherGFT
+  params:
+    hidden_dim: 256
+    physics_part_coef: 0.1
+    encoder_layers:
+    - 2
+    - 2
+    - 2
+    edcoder_heads:
+    - 2
+    - 4
+    - 4
+    encoder_scaling_factors:
+    - 0.5
+    - 0.5
+    - 1
+    encoder_dim_factors:
+    - -1
+    - 2
+    - 2
+    body_layers:
+    - 2
+    - 2
+    - 2
+    - 2
+    - 2
+    - 2
+    body_heads:
+    - 6
+    - 6
+    - 6
+    - 6
+    - 6
+    - 6
+    body_scaling_factors:
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    body_dim_factors:
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    decoder_layers:
+    - 2
+    - 2
+    - 2
+    decoder_heads:
+    - 4
+    - 4
+    - 2
+    decoder_scaling_factors:
+    - 1
+    - 2
+    - 1
+    decoder_dim_factors:
+    - 1
+    - 0.5
+    - 1
+    channels: 69
+    head_dim: 128
+    window_size:
+    - 4
+    - 8
+    relative_pos_embedding: false
+    out_kernel:
+    - 2
+    - 2
+    pde_block_depth: 3
+    block_dt: 300
+    inverse_time: false
+    use_checkpoint: true
+data:
+  dataset_version: v4
+  cut:
+  - - 75
+    - 107
+  - - 164
+    - 228
+  include_target: false
+  lead_time: 0
+  interval: 6
+  muti_target_steps: 1
+  start_time_x: 0
+  end_time_x: 0
+  start_time_y: 1
+  end_time_y: 12
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: false
+  prefetch_factor: 4
+  train:
+    start_time: '2000-01-01 00:00:00'
+    end_time: '2003-12-30 00:00:00'
+    batch_size: 16
+    shuffle: true
+  val:
+    start_time: '2004-01-01 00:00:00'
+    end_time: '2004-12-30 00:00:00'
+    batch_size: 16
+    shuffle: false
+  memmap_path: /home/fa.buzaev/era5_memmap/predformer_usa_2000_2004.dat
+training:
+  litmodel: multiout_double
+  lr: 0.0001
+  eta_min: 0.0
+  max_epoch: 15
+  loss_type: MAE
+  early_stopping_patience: 5
+  extra_kwargs:
+    muti_out_nums: 6
+trainer:
+  precision: 32
+  log_every_n_steps: 50
+  static_graph: true
+  num_sanity_val_steps: 0
+  float32_matmul_precision: high
+logging:
+  checkpoint_base: /home/fa.buzaev/WeatherPredictions/checkpoints/
+  comet_project: WeatherPredictions
+  log_code_file: null
