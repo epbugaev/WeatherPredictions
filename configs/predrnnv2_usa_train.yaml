@@ -1,0 +1,73 @@
+experiment:
+  name: PredRNNv2-USA-train
+
+model:
+  type: PredRNNv2
+  params:
+    num_layers: 4
+    num_hidden: [128, 128, 128, 128]
+    configs:
+      in_shape: [12, 69, 32, 64]
+      patch_size: 1
+      filter_size: 3
+      stride: 1
+      layer_norm: true
+      pre_seq_length: 12
+      aft_seq_length: 12
+      reverse_scheduled_sampling: 0
+      decouple_beta: 0.1
+
+data:
+  dataset_version: v3
+  cut: [[75, 107], [164, 228]]
+  include_target: false
+  lead_time: 1
+  interval: 1
+  muti_target_steps: 1
+  start_time_x: 0
+  end_time_x: 11
+  start_time_y: 12
+  end_time_y: 23
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+  train:
+    start_time: "2000-01-01 00:00:00"
+    end_time: "2003-12-30 00:00:00"
+    batch_size: 8
+    shuffle: true
+    subset_step: 23
+  val:
+    start_time: "2004-01-01 00:00:00"
+    end_time: "2004-12-30 00:00:00"
+    batch_size: 8
+    shuffle: false
+
+training:
+  litmodel: mutiout_predrnn
+  lr: 1.0e-4
+  eta_min: 0.0
+  max_epoch: 50
+  loss_type: MAE
+  early_stopping_patience: 5
+  extra_kwargs:
+    muti_out_nums: 6
+    time_prediction: 6
+
+trainer:
+  precision: 32
+  log_every_n_steps: 50
+  # PredRNN-V2's shared "adapter" conv only feeds the internal decoupling
+  # loss, which PredRNNStep discards (y_hat, _ = model(...)), so those
+  # params never receive a gradient from the task loss. Disable static_graph
+  # and let DDP tolerate the unused params (PredRNN v1 keeps static_graph).
+  static_graph: false
+  find_unused_parameters: true
+  num_sanity_val_steps: 0
+  float32_matmul_precision: high
+
+logging:
+  checkpoint_base: /home/fa.buzaev/WeatherPredictions/checkpoints/
+  comet_project: WeatherPredictions
+  log_code_file: null
