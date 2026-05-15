@@ -61,12 +61,14 @@ training:
   litmodel: mutiout_predrnn
   lr: 0.0001
   eta_min: 0.0
-  max_epoch: 50
+  max_epoch: 2000
   loss_type: MAE
-  early_stopping_patience: 5
+  early_stopping_patience: 34
   extra_kwargs:
     muti_out_nums: 6
     time_prediction: 6
+  warmup_ratio: 0.05
+  warmup_start_factor: 0.001
 trainer:
   precision: 32
   log_every_n_steps: 50
@@ -74,6 +76,7 @@ trainer:
   find_unused_parameters: true
   num_sanity_val_steps: 0
   float32_matmul_precision: high
+  val_every_n_epochs: 3
 logging:
   checkpoint_base: /home/fa.buzaev/WeatherPredictions/checkpoints/
   comet_project: WeatherPredictions
