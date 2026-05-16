@@ -183,41 +183,31 @@ def laplacian_tensor(u):
     return d2u_dx2 + d2u_dy2
 
 
-# ===== Функции для адаптивного уточнения сетки (AMR) =====
+# ===== Пространственная производная на нативной латент-сетке =====
 
 
-def adaptive_mesh_refinement(field, grad_threshold=1e-3, upscale_factor=2):
-    """
-    Если максимальное значение градиента (вычисляемого с помощью d_x и d_y) превышает grad_threshold,
-    возвращает уточнённое поле с увеличенным разрешением (с использованием F.interpolate).
-    """
-    grad_field = torch.sqrt(d_x(field) ** 2 + d_y(field) ** 2)
-    if grad_field.max() > grad_threshold:
-        refined_field = F.interpolate(
-            field, scale_factor=upscale_factor, mode="bilinear", align_corners=True
-        )
-        return refined_field, True
-    else:
-        return field, False
+def compute_spatial_derivative(field, derivative_fn, boundary="reflect"):
+    """Производная ``field`` по ``derivative_fn`` (d_x/d_y) на исходной сетке.
 
+    Ранее здесь был AMR: при ``grad.max() > 1e-3`` поле апскейлилось
+    ``F.interpolate(scale_factor=2)`` перед взятием производной. Но d_x_weno
+    /d_y_weno масштабируют результат на module-level ``pixel_x``/``pixel_y``,
+    форма которых жёстко привязана к ``latents_size`` (для USA-кропа —
+    8×16). На уточнённой сетке (16×32) ``pixel_x.expand(B, C, H, 1)`` падал
+    с ``expanded size (16) must match existing size (8)`` (job 3998966).
+    Срабатывание AMR data-dependent: на v3/нормированных smoke-данных порог
+    не достигался, на v4 (raw memmap) — достигался. AMR убран: производная
+    всегда считается на нативном латенте, где ``pixel_*`` согласованы.
 
-def compute_derivative_with_amr(
-    field, derivative_fn, grad_threshold=1e-3, upscale_factor=2, boundary="reflect"
-):
+    Args:
+        field: ``torch.Tensor`` ``(B, C, H, W)`` на латент-сетке.
+        derivative_fn: ``d_x``/``d_y`` (WENO-5).
+        boundary: режим границ, пробрасывается в ``derivative_fn``.
+
+    Returns:
+        ``torch.Tensor`` той же формы, что ``field``.
     """
-    Вычисляет производную поля с использованием AMR.
-    Если поле имеет сильные градиенты (макс. значение > grad_threshold), оно уточняется,
-    затем вычисляется производная на уточнённом поле, и результат обратно интерполируется до исходного разрешения.
-    """
-    refined_field, refined = adaptive_mesh_refinement(field, grad_threshold, upscale_factor)
-    if refined:
-        refined_deriv = derivative_fn(refined_field, boundary=boundary)
-        deriv = F.interpolate(
-            refined_deriv, scale_factor=1 / upscale_factor, mode="bilinear", align_corners=True
-        )
-        return deriv
-    else:
-        return derivative_fn(field, boundary=boundary)
+    return derivative_fn(field, boundary=boundary)
 
 
 # ===== Класс PDE_kernel с учётом бета-подхода, улучшенных граничных условий и AMR =====
@@ -312,13 +302,13 @@ class PDE_kernel(nn.Module):
     def get_uv_dt(self, u, v, w):
         # Консервативное представление нелинейных членов с применением AMR для уточнения
         adv_u = (
-            compute_derivative_with_amr(u * u, d_x)
-            + compute_derivative_with_amr(u * v, d_y)
+            compute_spatial_derivative(u * u, d_x)
+            + compute_spatial_derivative(u * v, d_y)
             + d_z(u * w)
         )  # вертикальная производная без AMR
         adv_v = (
-            compute_derivative_with_amr(u * v, d_x)
-            + compute_derivative_with_amr(v * v, d_y)
+            compute_spatial_derivative(u * v, d_x)
+            + compute_spatial_derivative(v * v, d_y)
             + d_z(v * w)
         )
 
