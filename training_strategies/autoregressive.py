@@ -61,7 +61,6 @@ class AutoregressiveStep(StepStrategy):
             pred_last=y_hat_full[:, -1],
             target_last=y[:, -1],
             index_map=MULTIOUT_INDEX_MAP,
-            prefix="f ",
         )
 
         if ctx.is_main_process and (not self.log_figures_once or not self._figures_logged):
