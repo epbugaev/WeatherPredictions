@@ -60,7 +60,9 @@ class CometExperiment:
 
     Args:
         project_name: Comet project name.
-        experiment_name: Human-readable name for the run.
+        experiment_name: Human-readable base name; a run-unique suffix
+            (``$SLURM_JOB_ID`` on the cluster, else a random token) is
+            appended so re-runs of one config stay distinguishable in Comet.
         api_key: Comet API key; if empty, an environment-variable lookup is
             performed inside ``comet_ml``.
     """
@@ -68,12 +70,19 @@ class CometExperiment:
     def __init__(self, project_name: str, experiment_name: str, api_key: str = "") -> None:
         if api_key:
             os.environ["COMET_API_KEY"] = api_key
-        os.environ["COMET_EXPERIMENT_KEY"] = "".join(
-            random.choices(string.ascii_lowercase + string.digits, k=50)
-        )
+        run_key = "".join(random.choices(string.ascii_lowercase + string.digits, k=50))
+        os.environ["COMET_EXPERIMENT_KEY"] = run_key
         comet_ml.login()
         self._experiment = comet_ml.Experiment(project_name=project_name)
-        self._experiment.set_name(experiment_name)
+        # Comet does not enforce unique display names: re-running the same
+        # YAML config (e.g. round-1 vs round-2, or after a fix) would create
+        # several experiments all literally named ``experiment_name`` and they
+        # collapse into indistinguishable rows on comparison panels. Append a
+        # run-unique suffix — the SLURM job id when launched on the cluster
+        # (also ties the Comet run to its sbatch job), else the random run key.
+        slurm_job_id = os.environ.get("SLURM_JOB_ID", "")
+        run_suffix = slurm_job_id if slurm_job_id else run_key[:6]
+        self._experiment.set_name(f"{experiment_name}-{run_suffix}")
 
     def log_metrics(self, metrics: dict[str, float], step: int | None = None) -> None:
         """Forward a scalar metrics dict to Comet."""
