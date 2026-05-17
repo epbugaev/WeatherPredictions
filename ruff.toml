@@ -19,7 +19,12 @@ select = ["F", "E", "W", "B", "I", "UP", "SIM", "T100", "T201"]
 # Models/dev/ — archival snapshots + single-card sanity scripts; tolerate
 # diagnostic print() and a few bugbear/simplify quirks from the original
 # upstream sources so the one-shot lint pass doesn't fight the archive.
-"Models/dev/*.py" = ["B007", "SIM117", "T201", "E501", "B006", "F841", "E741", "E731"]
+# E402: sanity scripts inject REPO_ROOT into sys.path before importing local
+# packages (so they run both via `python -m Models.dev.xxx` и прямой
+# `python Models/dev/xxx.py`); тот же паттерн, что уже принят в tools/.
+"Models/dev/*.py" = [
+    "B007", "SIM117", "T201", "E501", "B006", "F841", "E741", "E731", "E402",
+]
 
 [format]
 quote-style = "double"

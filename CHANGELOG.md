@@ -7,6 +7,78 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Per-variable val RMSE для всех 69 каналов.** `BASEMODEL_INDEX_MAP` /
+  `MULTIOUT_INDEX_MAP` (`training_strategies/_index_maps.py`) расширены с
+  13-канального суррогата до полного 69-канального покрытия (surface +
+  z/t/r/u/v × 13 уровней), построенного алгоритмически из канонического
+  v4-layout. Цель Парето-улучшения по всем каналам теперь наблюдаема в
+  Comet (namespace без префикса, наложится на baseline там, где индекс не
+  менялся, напр. `z500`). Затрагивает все `SimpleStep`-/multiout-стратегии
+  (значения существующих корректных ключей не изменились).
+- **`Models/dev/sanity_train_probe.py`** — single-card training-пробник:
+  прогоняет реальный per-batch путь (PredFormer + `WeatherNormalize` +
+  `SimpleStep` + AdamW + `Metrics.WRMSE`) N optimiser-шагов на
+  синтетическом батче, печатает траекторию loss, train/val gap и per-69
+  RMSE; падает на NaN/Inf или не убывающем loss. Дешёвый go/no-go перед
+  6-суточным DDP-раном (loss-scale при MAE→MSE, регрессы pipeline).
+- **`training.weight_decay`** — поле конфига, пробрасывается в
+  `AdamW(weight_decay=...)` (`train.py`). Default `0.0` сохраняет
+  numerical parity; включается как L2-регуляризатор против overfit
+  (job 3991633).
+
+- **Pure-physics stabilization ablation (E1–E5).** Forward-ablation of
+  `utils.physics.PurePDEKernel` to make pure-physics rollout numerically
+  stable (post-БАГ-1 it blows up at h=1 on real ERA5). Each idea is an
+  opt-in flag with a backward-compatible default (kernel behaviour
+  unchanged unless enabled), a CPU sanity gate in `Models/dev/`, and a
+  dedicated Comet experiment:
+  - `time_scheme="ssp_rk3"` — Shu–Osher 3-stage SSP Runge–Kutta
+    (E1; resolves docs/physics.md open question #5 «WENO-5 + Forward
+    Euler → RK3-TVD»). Default stays `euler`.
+  - `hyperdiffusion`, `hyperdiff_tau_hours` — scale-selective ∇⁴
+    hyperdiffusion via a 3-point second difference (NOT `d_x∘d_x`,
+    which has a zero Nyquist response); K4 calibrated to e-fold the
+    2Δx mode in `tau` (E2; principled replacement for `scale_diff`,
+    docs/physics.md open question #4).
+  - `polar_filter`, `polar_filter_lat_deg` — zonal Fourier filter
+    truncating `m > (W/2)·cosφ/cosφ₀` poleward of φ₀ (E3; removes
+    polar-convergence CFL of the regular lat-lon grid). Adds
+    `import torch.fft`.
+  - `advection_form="flux"` — conservative divergence form
+    `−∇·(VX)` (E5; conserves ∑X to round-off on the periodic grid;
+    `advective` default unchanged).
+  - `w_diagnostic="mass_consistent"` — subtract the p-weighted column-
+    mean divergence so ∫div·dp≈0 per column (E5).
+  - `tools.check_physics_common.balance_initial_state` + `prepare_hook`
+    parameter of `run_72h_rollout` — IC balancing (E4): `geostrophic`
+    (wind from mass) and forward-only stabilized `dfi`
+    (Lynch–Huang-style digital filter on `kernel.step`), `--balance-ic`
+    default `none`. LBYL fallback to the raw IC on non-finite output.
+  - `time_scheme="semi_implicit"` — Crank–Nicolson на линейной быстрой
+    подсистеме (PGF↔div↔hydrostatic), сведённой к Гельмгольцу для z;
+    решается спектрально с **масс-взвешенно-симметризованным** модальным
+    разложением (cumsum-`integral_z`-вертикаль не самосопряжена → нужна
+    Δp-симметризация для well-conditioned модального базиса) (E6). Default
+    остаётся `euler`.
+- `tools/check_physics_new_kernel.py`: CLI flags `--time-scheme ssp_rk3|
+  semi_implicit`, `--hyperdiffusion[/-tau-hours]`, `--polar-filter[/-lat-deg]`,
+  `--balance-ic`, `--advection-form`, `--w-diagnostic`, `--abl-label`;
+  `method_name`/tags carry the active stabilizers so each ablation step
+  is a distinct Comet experiment.
+- `sh_files/check_physics_ablation.sh` — cumulative E0..E6 + fixC anchor
+  runner (cpu-e-quick); `Models/dev/smoke_ablation.py` local synthetic
+  smoke gate; `Models/dev/sanity_{ssp_rk3,hyperdiffusion,polar_filter,
+  ic_balance,conservation,semi_implicit}.py` per-idea invariants;
+  `Models/dev/fetch_ablation_summary.py` Comet→table; `experiments/`
+  ablation log (`README.md` + `E0..E6_*.md`).
+- **Ablation outcome (job 3998911, real ERA5, 48h, 12 IC):** ни одна из
+  6 идей (E1–E6) ни их полный стек не предотвращают и не задерживают
+  взрыв pure-physics — `frac_ic_blown_up` 0→1.0 на h=1 тождественно для
+  E0..E5; E6-машинерия корректна (Helmholtz roundtrip 9e-7) но scoped SI
+  не безусловно устойчив (λ-зависимая метрика + cumsum-вертикаль). Только
+  `fixC` (`scale_diff`+`.detach()`) численно конечен, но физически
+  расходится (acc/z 0.44→0.24). Подтверждает архитектуру WeatherGFT
+  (scale_diff + NN-коррекция обязательны). Детали — `experiments/`.
 - `ruff.toml`: expanded the lint selects to `F, E, W, B, I, UP, SIM,
   T100, T201` and pinned `target-version = "py310"`. New rule families
   enforce CLAUDE.md requirements: `UP` for PEP 604 (`|`, `list[...]`),
@@ -93,6 +165,80 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- Унифицирован namespace per-variable RMSE-метрик: multiout-стратегии
+  (`autoregressive`, `predrnn`, `iterative_manual`, `timestep_select`)
+  больше не добавляют legacy-префикс `"f "` к ключам — теперь все модели
+  (включая SimVP/PredFormer-семейство на `SimpleStep`) логируют
+  `RMSE_<var>_first/last` под одним именем. Без этого на общих панелях
+  Comet модели не накладывались (SimVP писал `RMSE_z500_last`, остальные
+  — `f RMSE_z500_last`). Старые раны multiout-моделей сохраняют префикс
+  `"f "` в истории; новые — единый ключ.
+- `tools/check_physics_common.py`: surface-метрики переименованы
+  `weighted_rmse/surface/{t2m,u10,v10,tp}` → `persistence/surface/{...}`.
+  Физика их не прогнозирует (passthrough IC) → метрика тождественна у
+  ВСЕХ методов = persistence-ошибка данных; новый префикс явно отделяет
+  baseline-пол от метод-различающих `weighted_rmse/{prog}/{lvl}hPa`
+  (иначе совпадающие кривые читались как «баг-дубликат»).
+- `utils.physics.Grid` Coriolis variants теперь все используют единое
+  `2Ω·sin(...)` приближение: `f_constant = 2Ω·sin(45°) ≈ 1.03e-4`,
+  `f_beta_plane = 2Ω·sin(45°) + β·R·φ`, `f_spherical = 2Ω·sin(φ)`. Был
+  «зоопарк» с f=Ω (без множителя 2 и без sin) в beta_plane и константном
+  варианте. Старая физика байт-в-байт сохранена в `utils/old_physics.py`.
+- `utils.physics.PurePDEKernel` гидростатика: дефолт сменился с
+  универсальной `R=8.314 Дж/(моль·К)` на `R_d=287 Дж/(кг·К)` — это
+  физически корректная константа для воздуха per-mass. Флаг
+  `use_R_d_in_hydrostatic` переименован в `use_universal_R` (default
+  `False`); установка `True` восстанавливает старое поведение для
+  регрессии чекпоинтов. CLI-флаг `--use-R-d` → `--use-universal-R` в
+  `tools/check_physics_new_kernel.py` и `tools/physics_baseline.py`.
+- `tools/physics_baseline.py` теперь имеет явный CLI-флаг
+  `--memmap-is-normalized` (default False, т.к. v4 raw — текущий стандарт).
+  Раньше денормализация `x*std + mean` срабатывала только по факту передачи
+  `--mean-std-path`, что было неявным и портило данные при ошибочной комбинации
+  «v4 raw + переданный mean_std» (вело к ×std + mean поверх raw, физическая
+  чушь). Теперь: без флага и без mean_std_path memmap читается как есть
+  (v4 raw); `--memmap-is-normalized` без `--mean-std-path` → `ValueError` на
+  старте.
+- `utils.physics.GridConfig` параметризован полем `lat_range_deg: (low, high)`
+  (дефолт `(-90, 90)`). Раньше широты строились хардкодом от -90 до 90 без
+  возможности задать региональный кроп, что давало ошибочные `pixel_x` /
+  `pixel_y` / `f_spherical` для не-глобальных данных. Аналогично в
+  `tools.check_physics_common.GeometryCPU`. Все check-скрипты и
+  `tools/physics_baseline.py` получили CLI-флаг `--lat-range-deg LOW HIGH`.
+  Поле `GridConfig.lat_scheme` (с веткой `'arange'`) удалено — на равномерной
+  сетке оно численно идентично `linspace`, ветка только вводила в заблуждение.
+- `utils.physics.PurePDEKernel.get_t_t` теперь по умолчанию использует
+  физически корректную адиабатику `dT/dt|_adia = R_d·T·ω/(c_p·p)` (где
+  `ω = 100·w`, w из `get_w` в hPa/s). Старая формула `(Q − z_z·w)/c_p` с
+  `Q = −L·z_z·w` — это legacy_paper-вариант через параметр
+  `t_t_formulation='legacy_paper'`. Старый дефолт давал 7-порядковый
+  overflow за один substep на ERA5. Те же изменения в
+  `tools/check_physics_weathergft.py`, `check_physics_predformergft.py`,
+  `check_physics_weathergft_3.py` (используют новый helper
+  `tools.check_physics_common.adiabatic_temperature_tendency`).
+  `tools/check_physics_fix.py` сохранён как тест трёх вариантов (включая
+  legacy broken Q как контроль).
+- Magnus saturation теперь работает в SI везде: `tools.check_physics_common.magnus_qs`
+  и `relhum_to_specific` принимают давление в Па (раньше в гПа), формула
+  `e_s = 611.2·exp(...)`. Согласовано с `utils.physics.PurePDEKernel._get_qs`
+  и `Grid.pressure`. Поле `GeometryCPU.pressure_hpa_t` удалено (использовалось
+  только во внутреннем расчёте); все вызовы используют `pressure_pa_t`.
+- `utils.physics.FiniteDifference` и `WENO5` теперь принимают три значения
+  boundary: `'periodic' | 'reflect' | 'replicate'`. Старое 'periodic' для оси
+  H (lat) и оси P (pressure) делало cat-pad первых/последних строк — это
+  было *replicate*, а не периодика; имя теперь соответствует поведению.
+  По умолчанию `boundary_x='periodic'` (lon циклична), `boundary_y='replicate'`,
+  `boundary_z='replicate'` (`'periodic'` по оси давления запрещён в __init__).
+  `PurePDEKernel` параметр `boundary_horiz` распался на отдельные `boundary_x`
+  и `boundary_y`; CLI флаги `--boundary-h` → `--boundary-x`/`--boundary-y` в
+  `tools/check_physics_new_kernel.py` и `tools/physics_baseline.py`.
+- `tools.check_physics_common.coriolis_constant` default value сменился с
+  `7.29e-5` (Ω) на `2Ω·sin(45°) ≈ 1.03e-4`; `coriolis_beta_plane` дефолт
+  `f0` так же. `coriolis_spherical` теперь использует `omega=7.2921e-5`
+  (явный SI-литерал, не округлённый 7.29e-5). Скрипты
+  `tools/check_physics_weathergft.py` и `tools/check_physics_predformergft.py`
+  пробрасывают `7.29e-5` явно через `--coriolis-value`/`--f0` — они
+  гоняют регрессию старой физики через `utils.old_physics`.
 - Pinned `xarray==2024.7.0`, `h5netcdf==1.6.1` and `h5py==3.15.1` (the
   previous `xarray==2025.6.1` / `h5netcdf==1.8.1` pins required `numpy>=2`,
   which broke the rest of the stack). `numpy==1.26.3` is unchanged.
@@ -241,6 +387,46 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Неверные legacy-индексы `BASEMODEL_INDEX_MAP`** для v4-layout
+  (`training_strategies/_index_maps.py`, используется `SimpleStep` —
+  PredFormer/SimVP). Прежние hand-written индексы ссылались на старый
+  LitModels-layout: напр. `t500`→канал 20 (= t@200 hPa) вместо 24,
+  `u500`→32 (= r@150 hPa) вместо 50, `t50`→23 вместо 17, `t1000`→19
+  вместо 29; корректным был только `z500` (11). Per-variable RMSE в
+  Comet для PredFormer-USA-v4 (вкл. job 3991633) под этими именами
+  измерял **не те физические каналы**. Исправлено алгоритмическим
+  построением из канонического 69-layout (см. Added).
+
+- **Ablation stabilizer bugs B1–B4** (`utils/physics.py`,
+  `tools/check_physics_*`). Аудит показал, что прежний результат «E0–E6
+  тождественно взрываются@h1» (job 3998911) был во многом BUG-артефактом,
+  а не чистой физикой:
+  - **B1** — `hyperdiffusion` был ЯВНЫМ `−K4·∇⁴` с единым K4 на самой
+    крупной ячейке; т.к. ∇⁴-собств.знач. ∝ 1/Δx⁴, на полюсе явный
+    множитель ≈ −172 → гипердиффузия УСИЛИВАЛА 2Δx ×172/шаг (E2–E5
+    активно хуже E0). Заменено безусловно-устойчивым НЕЯВНЫМ зональным
+    спектральным фильтром `1/(1+(dt/τ)·((2−2cos kx)/4)²)` в `_finalize`;
+    удалены `_biharmonic`/`_laplacian`/`hyperdiff_k4`.
+  - **B2** — semi-implicit `lam.clamp_min(0)` зануляло БЫСТРЕЙШИЕ
+    гравитационные моды (внешняя c≈309 м/с → λ<0 из-за знака
+    cumsum-вертикали) → `_si_solve` ≈ identity (E6 был no-op).
+    Заменено `lam.abs()` (все моды); implicit-strength стал O(1)=2.4.
+  - **B4** — CN ∇²-несогласованность (спектральный const-Δx implicit vs
+    физический `_laplacian` в RHS, 52%); + const-Δx «не видел» полюсные
+    стиффовые моды. Заменено ЗОНАЛЬНО-неявной схемой с λ-зависимым Δx
+    (rfft по долготе, символ ∂²ₓ зависит от широты), один и тот же ∂²ₓ
+    (`_si_xlap`/`_si_solve`) по обе стороны CN.
+  - **B3** — DFI span=6ч → 145 forward-шагов на нестабильном ядре →
+    всегда NaN → silent fallback (E4≡E3). Дефолт span 6ч→1ч
+    (`balance_initial_state`, `--balance-span-hours`, ABL[E4–E6]).
+  Проверено КОРРЕКТНЫМ (не баг): БАГ-1 фикс, единицы Pa/hPa, проводка
+  флагов, знаки flux/polar/geostrophic, GeometryCPU↔Grid. Все 6
+  `Models/dev/sanity_*.py` переписаны/усилены (ловят B1: контракция ≤1
+  при любых τ/dt; B2: implicit O(1) не identity) и PASS. Локальный
+  re-run на гладком сбалансированном synthetic
+  (`Models/dev/{make_synthetic_era5_smooth,rerun_ablation_local}.py`)
+  показал: после фикса методы РАЗЛИЧАЮТСЯ (blow@substep 3..26, не
+  идентично). Кластерный re-run исправленного кода — pending.
 - `Data/weatherbench_128_v3.py`: moved the `import json` from inside
   `WeatherBench128.get_mean_std` to the module top (CLAUDE.md §2 forbids
   local imports).

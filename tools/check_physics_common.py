@@ -15,12 +15,14 @@ NaN значение логируется в Comet как nan-метрика.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
@@ -29,6 +31,9 @@ import torch
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+if TYPE_CHECKING:
+    from utils.physics import PurePDEKernel
 
 
 # =============================================================================
@@ -66,9 +71,6 @@ SURFACE_VARS = ("t2m", "u10", "v10", "tp")
 # но НЕ обновляется в rollout. Из forecast/NaN-метрик исключаем — иначе ловим
 # persistence baseline (rmse между init r и truth r at h), а не физический прогноз.
 PROGNOSTIC_VARS = ("z", "t", "u", "v", "q")
-# Уровни давления для дополнительных per-level physics-метрик.
-KEY_PRESSURE_LEVELS_HPA = (500, 850, 1000)
-KEY_LEVEL_INDICES = tuple(PRESSURE_LEVELS_HPA.index(p) for p in KEY_PRESSURE_LEVELS_HPA)
 
 CHANNEL_RANGES = {
     "t2m": (0, 1),
@@ -272,30 +274,64 @@ def default_initial_conditions(year: int = 2005, hour: int = 0) -> list[pd.Times
 # =============================================================================
 
 
-def magnus_qs(t_kelvin: torch.Tensor, p_hpa: torch.Tensor) -> torch.Tensor:
-    """Saturation specific humidity q_s через Magnus formula.
+def magnus_qs(t_kelvin: torch.Tensor, p_pa: torch.Tensor) -> torch.Tensor:
+    """Saturation specific humidity q_s через Magnus formula (SI: давление в Па).
 
     Args:
         t_kelvin: (B, P, H, W), температура в К.
-        p_hpa: (1, P, 1, 1), давление в гПа (НЕ Па).
+        p_pa: (1, P, 1, 1), давление в Па (НЕ гПа). Согласовано с
+            ``utils.physics.PurePDEKernel._get_qs`` и ``utils.physics.Grid.pressure``.
 
     Returns:
-        q_s: (B, P, H, W), безразмерное.
+        q_s: (B, P, H, W), безразмерное (кг/кг).
 
     Уравнение:
-        e_s(T) = 6.112 · exp(17.67 · (T-273.15) / (T-273.15 + 243.5))   [гПа]
-        q_s    = 0.622 · e_s / (p - 0.378 · e_s)
+        e_s(T) = 611.2 · exp(17.67 · (T-273.15) / (T-273.15 + 243.5))   [Па]
+        q_s    = 0.622 · e_s / (p_pa - 0.378 · e_s)
     """
     t_c = t_kelvin - 273.15
-    e_s = 6.112 * torch.exp(17.67 * t_c / (t_c + 243.5))  # гПа
-    return 0.622 * e_s / (p_hpa - 0.378 * e_s)
+    e_s = 611.2 * torch.exp(17.67 * t_c / (t_c + 243.5))  # Па
+    return 0.622 * e_s / (p_pa - 0.378 * e_s)
 
 
 def relhum_to_specific(
-    r_percent: torch.Tensor, t_kelvin: torch.Tensor, p_hpa: torch.Tensor
+    r_percent: torch.Tensor, t_kelvin: torch.Tensor, p_pa: torch.Tensor
 ) -> torch.Tensor:
-    """q ≈ (r/100) · q_s(T, p). Простое приближение."""
-    return (r_percent / 100.0) * magnus_qs(t_kelvin, p_hpa)
+    """q ≈ (r/100) · q_s(T, p_pa). Простое приближение."""
+    return (r_percent / 100.0) * magnus_qs(t_kelvin, p_pa)
+
+
+# =============================================================================
+# Adiabatic temperature tendency (correct dT/dt|_adia = α·ω/c_p)
+# =============================================================================
+
+
+def adiabatic_temperature_tendency(
+    t_kelvin: torch.Tensor,
+    w_legacy_hpa_s: torch.Tensor,
+    p_pa: torch.Tensor,
+    r_d: float = 287.0,
+    c_p: float = 1005.0,
+) -> torch.Tensor:
+    """Адиабатическая температура: dT/dt|_adia = α·ω / c_p = R_d·T·ω / (c_p·p).
+
+    Заменяет сломанную ``Q = -L·z_z·w`` формулу из старого WeatherGFT.py.
+    Принимает «legacy» вертикальную скорость w в hPa/s (как возвращает
+    `integral_z(-(u_x+v_y))` на сетке с pixel_z в гПа) и конвертирует её в
+    ω (Pa/s) фактором ×100.
+
+    Args:
+        t_kelvin: (B, P, H, W) температура.
+        w_legacy_hpa_s: (B, P, H, W) вертикальная скорость в **hPa/s**.
+        p_pa: (1, P, 1, 1) или broadcastable, давление в Па.
+        r_d: газовая постоянная сухого воздуха (J/(kg·K)).
+        c_p: теплоёмкость при постоянном давлении (J/(kg·K)).
+
+    Returns:
+        dT/dt|_adia в К/с, та же форма что и t_kelvin.
+    """
+    omega_pa = 100.0 * w_legacy_hpa_s
+    return r_d * t_kelvin * omega_pa / (c_p * p_pa)
 
 
 # =============================================================================
@@ -309,30 +345,35 @@ class GeometryCPU:
     W: int
     radius: float = 6371.0 * 1000.0
     pressure_hpa: tuple[int, ...] = PRESSURE_LEVELS_HPA
+    lat_range_deg: tuple[float, float] = (-90.0, 90.0)
 
     latitudes: torch.Tensor = field(init=False)  # (H,) радианы
     pixel_x: torch.Tensor = field(init=False)  # (1, 1, H, 1) метры
     pixel_y: torch.Tensor = field(init=False)  # () метры
-    pressure_hpa_t: torch.Tensor = field(init=False)  # (1, 13, 1, 1) гПа
-    pressure_pa_t: torch.Tensor = field(init=False)  # (1, 13, 1, 1) Па
-    pixel_z: torch.Tensor = field(init=False)  # (1, 13, 1, 1) гПа
+    pressure_pa_t: torch.Tensor = field(init=False)  # (1, 13, 1, 1) Па (SI)
+    pixel_z: torch.Tensor = field(init=False)  # (1, 13, 1, 1) гПа (Δp)
     M_z: torch.Tensor = field(init=False)  # (13, 13)
     lat_weights: torch.Tensor = field(init=False)  # (H,)
 
     def __post_init__(self) -> None:
         H, W = self.H, self.W
-        # Линейное распределение широт от -90 до 90, без полюсов.
-        lat_deg = torch.linspace(-90.0, 90.0, steps=H + 2)[1:-1]
+        lat_low, lat_high = self.lat_range_deg
+        if not (-90.0 <= lat_low < lat_high <= 90.0):
+            raise ValueError(
+                f"Invalid lat_range_deg {self.lat_range_deg!r}: expected "
+                "(low, high) with -90 ≤ low < high ≤ 90."
+            )
+        # Линейное распределение широт в заданном диапазоне, без крайних точек.
+        lat_deg = torch.linspace(lat_low, lat_high, steps=H + 2)[1:-1]
         self.latitudes = lat_deg / 180.0 * torch.pi
 
         c_lats = 2 * torch.pi * self.radius * torch.cos(self.latitudes)
         self.pixel_x = (c_lats / W).reshape(1, 1, H, 1)
-        self.pixel_y = torch.tensor(torch.pi * self.radius / (H + 1), dtype=torch.float32)
+        lat_span_rad = (lat_high - lat_low) / 180.0 * torch.pi
+        self.pixel_y = torch.tensor(lat_span_rad * self.radius / (H + 1), dtype=torch.float32)
 
-        self.pressure_hpa_t = torch.tensor(self.pressure_hpa, dtype=torch.float32).reshape(
-            1, -1, 1, 1
-        )
-        self.pressure_pa_t = self.pressure_hpa_t * 100.0
+        pressure_hpa = torch.tensor(self.pressure_hpa, dtype=torch.float32).reshape(1, -1, 1, 1)
+        self.pressure_pa_t = pressure_hpa * 100.0
         # Δp между уровнями (как в WeatherGFT.py:29)
         pixel_z_values = (50, 50, 50, 50, 50, 75, 100, 100, 100, 125, 112, 75, 75)
         self.pixel_z = torch.tensor(pixel_z_values, dtype=torch.float32).reshape(1, -1, 1, 1)
@@ -351,34 +392,41 @@ class GeometryCPU:
         self.lat_weights = H * cos_w / s
 
 
-def integral_z_cpu(field: torch.Tensor, M_z: torch.Tensor) -> torch.Tensor:
-    """Кумулятивное интегрирование по давлению, CPU-friendly."""
-    B, P, H, W = field.shape
-    flat = field.reshape(B, P, H * W)
-    out = M_z @ flat
-    return out.reshape(B, P, H, W)
-
-
 # =============================================================================
 # Coriolis factories
 # =============================================================================
 
 
-def coriolis_constant(geom: GeometryCPU, value: float = 7.29e-5) -> torch.Tensor:
-    """Скалярный f (как в Models/WeatherGFT.py:125)."""
+_OMEGA_EARTH = 7.2921e-5  # рад/с — угловая скорость вращения Земли
+_F_MID_LATITUDE = 2 * _OMEGA_EARTH * float(torch.sin(torch.tensor(torch.pi / 4)))  # ≈ 1.03e-4
+
+
+def coriolis_constant(geom: GeometryCPU, value: float = _F_MID_LATITUDE) -> torch.Tensor:
+    """Скалярный Coriolis. **Дефолт функции** = 2Ω·sin(45°) ≈ 1.03e-4 (каноничный).
+
+    ВАЖНО: возвращаемое значение определяется аргументом `value`, НЕ дефолтом
+    функции. `tools/check_physics_weathergft.py` намеренно передаёт легаси
+    `--coriolis-value 7.29e-5` (= Ω, paper-вариант, без множителя 2 и sin) для
+    воспроизведения старых экспериментов — там method_name/tags честно содержат
+    `constOmega_legacy`, так что в Comet это не перепутать с каноничным.
+    Каноничный 2Ω·sin(45°) — это дефолт здесь и в `utils.physics.Grid.f_constant`.
+    """
     return torch.tensor(value)
 
 
 def coriolis_beta_plane(
-    geom: GeometryCPU, f0: float = 7.29e-5, beta: float = 1.6e-11
+    geom: GeometryCPU, f0: float = _F_MID_LATITUDE, beta: float = 1.6e-11
 ) -> torch.Tensor:
-    """f = f0 + β·R·φ (как в Models/PredFormerGFT.py:222-225)."""
+    """f = f0 + β·R·φ, где f0 = 2Ω·sin(45°).
+
+    NB: дефолт f0 изменён с легаси 7.29e-5 на 2Ω·sin(45°). См. coriolis_constant.
+    """
     y = geom.radius * geom.latitudes
     return (f0 + beta * y).reshape(1, 1, -1, 1)
 
 
-def coriolis_spherical(geom: GeometryCPU, omega: float = 7.29e-5) -> torch.Tensor:
-    """f = 2Ω sin φ (как в Models/dev/WeatherGFT_3.py:183)."""
+def coriolis_spherical(geom: GeometryCPU, omega: float = _OMEGA_EARTH) -> torch.Tensor:
+    """f = 2Ω·sin(φ) — полное сферическое приближение."""
     return (2 * omega * torch.sin(geom.latitudes)).reshape(1, 1, -1, 1)
 
 
@@ -390,30 +438,15 @@ def coriolis_spherical(geom: GeometryCPU, omega: float = 7.29e-5) -> torch.Tenso
 class Comet72hLogger:
     """Обёртка над comet_ml.Experiment с per-(variable, plvl, lead_hour) логированием.
 
-    Имена метрик (Comet группирует по `/`):
-        Forecast (lat-weighted):
-            weighted_rmse/<var>/<plvl>hPa     — 5 prog vars × 13 lvls
-            weighted_mae/<var>/<plvl>hPa
-            weighted_bias/<var>/<plvl>hPa
-            acc/<var>/<plvl>hPa               — spatial-Pearson ACC
-            weighted_rmse/surface/<var>       — 4 surface (persistence baseline)
-            weighted_bias/surface/<var>
+    Слим-набор (по запросу пользователя — только weighted_rmse и ACC):
+        weighted_rmse/<var>/<plvl>hPa     — 5 prog vars × 13 lvls
+        acc/<var>/<plvl>hPa               — spatial-Pearson ACC, 5 × 13
+        persistence/surface/<var>         — 4 surface vars (persistence-пол,
+            тождествен у всех методов: физика surface не прогнозирует)
+        nan_count/<var>                   — счётчик NaN/Inf клеток в state
+        frac_ic_blown_up                  — фракция IC, сломанных к моменту h
 
-        Physics consistency:
-            physics/mass_div_abs_mean[/<plvl>hPa]
-            physics/ke_mean, physics/ke_max
-            physics/geo_u_resid_abs_mean[/<plvl>hPa]
-            physics/geo_v_resid_abs_mean[/<plvl>hPa]
-            physics/cfl_x_max, physics/cfl_y_max    (по СУБ-STEP dt)
-            physics/Q_abs_max                       (root-cause heating term)
-            physics/{u_t,v_t,t_t,q_t,z_t}_abs_max   (на каждом step, включая h=0)
-
-        Stability:
-            nan_count/<var>                  — счётчик NaN/Inf клеток в state
-            frac_ic_blown_up                 — фракция IC, для которых rollout
-                                                сломан к моменту h
-
-    step = lead-hour ∈ {0, 1, ..., 72}.
+    step = lead-hour ∈ {0, 1, ..., horizon_hours} (default 48).
     Среднее по IC — НО: если хоть один IC дал non-finite, итог = NaN
     (раньше тихо пропускалось → метрики между методами выглядели одинаковыми).
     """
@@ -482,38 +515,33 @@ class Comet72hLogger:
 
 def _weighted_stats(
     pred: torch.Tensor, truth: torch.Tensor, lat_w: torch.Tensor
-) -> tuple[float, float, float, float]:
-    """Lat-weighted RMSE / MAE / signed bias / spatial-anomaly ACC.
+) -> tuple[float, float]:
+    """Lat-weighted RMSE + spatial-anomaly ACC. Слим-набор по запросу пользователя.
 
     Args:
         pred, truth: одинаковые формы ``(B, H, W)`` или ``(B, 1, H, W)``.
         lat_w: ``(H,)`` — нормированные cos(lat)·H/Σcos.
 
     Returns:
-        (wrmse, wmae, wbias, acc).
+        (wrmse, acc).
 
-    ACC берётся как lat-weighted **spatial-Pearson** между prediction и truth:
-    аномалия = поле − его lat-weighted spatial mean (за-IC, on-the-fly), так
-    что климатология вычисляется *на ходу* из самого `truth`. Это не каноничный
-    ECMWF-ACC (нужна 30-летняя climatology), но валидно для коротких rollout’ов:
-    ACC=1 ↔ полностью совпадают пространственные паттерны.
+    ACC = lat-weighted **spatial-Pearson** между prediction и truth: аномалия =
+    поле − его lat-weighted spatial mean (on-the-fly из truth). Не каноничный
+    ECMWF-ACC (нужна 30-летняя climatology), но валидно для коротких rollout’ов.
     """
-    # Squeeze to (B, H, W) if there's a singleton level/channel axis.
     if pred.dim() == 4 and pred.shape[1] == 1:
         pred = pred.squeeze(1)
         truth = truth.squeeze(1)
     assert pred.dim() == 3, f"Expected (B, H, W), got {pred.shape}"
-    B, H, W = pred.shape
-    w = lat_w.view(1, H, 1)                              # (1, H, 1)
-    w_sum = float(lat_w.sum().item()) * W                # scalar per-sample weight total
+    _, H, W = pred.shape
+    w = lat_w.view(1, H, 1)
+    w_sum = float(lat_w.sum().item()) * W
 
     diff = pred - truth
-    wmse_sum = (w * diff * diff).sum(dim=(-1, -2))       # (B,)
+    wmse_sum = (w * diff * diff).sum(dim=(-1, -2))
     wrmse = torch.sqrt((wmse_sum / w_sum).mean()).item()
-    wmae = ((w * diff.abs()).sum(dim=(-1, -2)) / w_sum).mean().item()
-    wbias = ((w * diff).sum(dim=(-1, -2)) / w_sum).mean().item()
 
-    p_mean = (w * pred).sum(dim=(-1, -2), keepdim=True) / w_sum   # (B, 1, 1)
+    p_mean = (w * pred).sum(dim=(-1, -2), keepdim=True) / w_sum
     t_mean = (w * truth).sum(dim=(-1, -2), keepdim=True) / w_sum
     p_anom = pred - p_mean
     t_anom = truth - t_mean
@@ -523,7 +551,7 @@ def _weighted_stats(
     )
     acc = (num / den).mean().item()
 
-    return wrmse, wmae, wbias, acc
+    return wrmse, acc
 
 
 def compute_forecast_metrics(
@@ -531,141 +559,50 @@ def compute_forecast_metrics(
     truth_state: dict[str, torch.Tensor],
     geom: GeometryCPU,
 ) -> dict[str, float]:
-    """Lat-weighted RMSE / MAE / signed bias / spatial-ACC per (var, level).
+    """Слим набор: только lat-weighted RMSE и spatial-anomaly ACC.
 
     Metric naming (Comet groups by `/`):
-        weighted_rmse/surface/<var>          — 4 vars (persistence baseline)
-        weighted_bias/surface/<var>          — 4 vars
-        weighted_rmse/<var>/<plvl>hPa        — 5 vars × 13 levels = 65
-        weighted_mae/<var>/<plvl>hPa         — 65
-        weighted_bias/<var>/<plvl>hPa        — 65
-        acc/<var>/<plvl>hPa                  — 65
+        persistence/surface/<var>            — 4 surface vars: физика их НЕ
+            прогнозирует (passthrough IC), поэтому метрика тождественна у
+            ВСЕХ методов = persistence-ошибка данных. Префикс `persistence/`
+            (не `weighted_rmse/`) явно сигналит, что это baseline-пол, а не
+            метод-различающая метрика — иначе совпадающие кривные читаются
+            как «баг-дубликат» (см. experiments/README.md).
+        weighted_rmse/<var>/<plvl>hPa        — 5 prog vars × 13 levels = 65
+        acc/<var>/<plvl>hPa                  — 65 (метод-различающие)
 
-    Удалено vs прежней версии:
-        rmse/* (unweighted, дублирует weighted на coarse-grid)
-        mae/* (unweighted)
-        psnr/* (PSNR для weather полей нерелевантен — dynamic range разнороден)
-        weighted_rmse/r/* (persistence — `r` не обновляется в rollout)
+    Удалено vs прежней версии (по запросу пользователя):
+        weighted_mae/*, weighted_bias/*, rmse/*, mae/*, psnr/*, weighted_bias/surface/*.
     """
     metrics: dict[str, float] = {}
     lat_w = geom.lat_weights
 
-    # Surface — persistence baseline (физика их не трогает).
     for var in SURFACE_VARS:
-        wrmse, _, wbias, _ = _weighted_stats(pred_state[var], truth_state[var], lat_w)
-        metrics[f"weighted_rmse/surface/{var}"] = wrmse
-        metrics[f"weighted_bias/surface/{var}"] = wbias
+        wrmse, _ = _weighted_stats(pred_state[var], truth_state[var], lat_w)
+        metrics[f"persistence/surface/{var}"] = wrmse
 
-    # Prognostic per pressure level.
     for var in PROGNOSTIC_VARS:
-        p_full = pred_state[var]                          # (B, P, H, W)
+        p_full = pred_state[var]
         t_full = truth_state[var]
         for lvl_idx, plvl in enumerate(PRESSURE_LEVELS_HPA):
-            wrmse, wmae, wbias, acc = _weighted_stats(
-                p_full[:, lvl_idx], t_full[:, lvl_idx], lat_w
-            )
+            wrmse, acc = _weighted_stats(p_full[:, lvl_idx], t_full[:, lvl_idx], lat_w)
             metrics[f"weighted_rmse/{var}/{plvl}hPa"] = wrmse
-            metrics[f"weighted_mae/{var}/{plvl}hPa"] = wmae
-            metrics[f"weighted_bias/{var}/{plvl}hPa"] = wbias
             metrics[f"acc/{var}/{plvl}hPa"] = acc
 
     return metrics
 
 
-def compute_physics_metrics(
-    state: dict[str, torch.Tensor],
-    rhs: dict[str, torch.Tensor] | None,
-    geom: GeometryCPU,
-    f_field: torch.Tensor,
-    d_x_fn: Callable[[torch.Tensor], torch.Tensor],
-    d_y_fn: Callable[[torch.Tensor], torch.Tensor],
-    dt_seconds: float,
-) -> dict[str, float]:
-    """Physics consistency на текущем state.
-
-    Удалено vs прежней версии:
-      * physics/pv_abs_mean — псевдо-PV (без ∂θ/∂p), вводящий в заблуждение.
-      * physics/mass_div_abs_max — дублирует mean на coarse-grid.
-
-    Добавлено:
-      * physics/{mass_div,geo_u_resid,geo_v_resid}/<plvl>hPa
-            — per-level срезы для 500/850/1000 hPa (диагностика тропосферы).
-      * physics/Q_abs_max
-            — log абс. размера диабатического heating Q = -L·z_z·w
-              (root cause overflow, см. tools/diagnose_first_substep.py).
-      * physics/<rhs>_abs_max — теперь логируется на каждом step (h=0..N).
-
-    CFL теперь считается по СУБ-STEP dt (=block_dt_seconds), а не по часу.
-    """
-    u, v, z = state["u"], state["v"], state["z"]
-    m: dict[str, float] = {}
-    n_lvls = u.shape[1]
-
-    div = d_x_fn(u) + d_y_fn(v)                          # mass divergence (1/s)
-    div_abs = div.abs()
-    m["physics/mass_div_abs_mean"] = div_abs.mean().item()
-    for plvl, idx in zip(KEY_PRESSURE_LEVELS_HPA, KEY_LEVEL_INDICES, strict=True):
-        if idx < n_lvls:
-            m[f"physics/mass_div_abs_mean/{plvl}hPa"] = div_abs[:, idx].mean().item()
-
-    ke = 0.5 * (u * u + v * v)
-    m["physics/ke_mean"] = ke.mean().item()
-    m["physics/ke_max"] = ke.max().item()
-
-    z_x = d_x_fn(z)
-    z_y = d_y_fn(z)
-    geo_u = f_field * u + z_y                            # геострофическая невязка по u
-    geo_v = f_field * v - z_x                            # и по v
-    geo_u_abs = geo_u.abs()
-    geo_v_abs = geo_v.abs()
-    m["physics/geo_u_resid_abs_mean"] = geo_u_abs.mean().item()
-    m["physics/geo_v_resid_abs_mean"] = geo_v_abs.mean().item()
-    for plvl, idx in zip(KEY_PRESSURE_LEVELS_HPA, KEY_LEVEL_INDICES, strict=True):
-        if idx < n_lvls:
-            m[f"physics/geo_u_resid_abs_mean/{plvl}hPa"] = geo_u_abs[:, idx].mean().item()
-            m[f"physics/geo_v_resid_abs_mean/{plvl}hPa"] = geo_v_abs[:, idx].mean().item()
-
-    # CFL вычисляется по реальному substep dt, переданному снаружи.
-    cfl_x = (u.abs() * dt_seconds / geom.pixel_x).max().item()
-    cfl_y = (v.abs() * dt_seconds / geom.pixel_y).max().item()
-    m["physics/cfl_x_max"] = cfl_x
-    m["physics/cfl_y_max"] = cfl_y
-
-    # Q-term — главный виновник blow-up в legacy формуле. Считаем явно из state,
-    # независимо от RHS, чтобы видеть `|Q|` даже когда rollout_step_fn её не отдаёт.
-    # Q = -L · z_z · w, где w = integral_z(-(u_x + v_y)). Это repeats работы rhs,
-    # но дёшево и единственный надёжный отрезок прямой диагностики формулы.
-    L = 2.5e6
-    w_z = -(d_x_fn(u) + d_y_fn(v))                       # NB d_x_fn(u) повторно — кеш не делаем (CPU дешёво)
-    w = integral_z_cpu(w_z, geom.M_z)
-    # z_z по pressure: используем простую FD-2 по pressure axis, чтобы не тянуть d_z_fn.
-    # На state[z] shape (B, P, H, W). FD-2: (z[i+1] - z[i-1]) / (p[i+1]-p[i-1]).
-    z_pad = torch.cat([z[:, :1], z, z[:, -1:]], dim=1)
-    p_pad = geom.pressure_hpa_t                          # (1, P, 1, 1)
-    p_diff = torch.cat([p_pad[:, 1:2] - p_pad[:, :1], p_pad[:, 2:] - p_pad[:, :-2], p_pad[:, -1:] - p_pad[:, -2:-1]], dim=1)
-    z_z = (z_pad[:, 2:] - z_pad[:, :-2]) / p_diff
-    Q = -L * z_z * w
-    m["physics/Q_abs_max"] = Q.abs().max().item()
-
-    if rhs is not None:
-        for k in ("u_t", "v_t", "t_t", "q_t", "z_t"):
-            if k in rhs:
-                m[f"physics/{k}_abs_max"] = rhs[k].abs().max().item()
-
-    return m
-
-
 def count_nans_per_var(state: dict[str, torch.Tensor]) -> dict[str, float]:
     """Количество NaN/Inf на каждый prognostic var. q теперь включён (раньше пропускался)."""
     out: dict[str, float] = {}
-    for var in PROGNOSTIC_VARS:                          # ("z", "t", "u", "v", "q") — теперь с q
+    for var in PROGNOSTIC_VARS:  # ("z", "t", "u", "v", "q") — теперь с q
         s = state[var]
         out[f"nan_count/{var}"] = float(torch.isnan(s).sum().item() + torch.isinf(s).sum().item())
     return out
 
 
 # =============================================================================
-# Generic 72h rollout driver
+# Generic rollout driver (default 48h; раньше 72h)
 # =============================================================================
 
 
@@ -673,71 +610,74 @@ def run_72h_rollout(
     *,
     method_name: str,
     rollout_step_fn: Callable[
-        [dict[str, torch.Tensor]], tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]
+        [dict[str, torch.Tensor]],
+        tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]],
     ],
-    d_x_fn: Callable[[torch.Tensor], torch.Tensor],
-    d_y_fn: Callable[[torch.Tensor], torch.Tensor],
-    f_field: torch.Tensor,
     geom: GeometryCPU,
     initial_conditions: list[pd.Timestamp],
     memmap_path: str,
     memmap_meta_path: str | None,
     mean_std_path: str,
-    horizon_hours: int = 72,
+    horizon_hours: int = 48,
     block_dt_seconds: float = 300.0,
     project_name: str = "WeatherPredictions",
     workspace: str | None = None,
     api_key: str | None = None,
     tags: list[str] | None = None,
     offline: bool = False,
+    prepare_hook: Callable[[dict[str, torch.Tensor]], dict[str, torch.Tensor]] | None = None,
+    # Параметры ниже остались только для backward-compat сигнатуры — больше не
+    # используются (physics-метрики удалены по запросу пользователя).
+    d_x_fn: Callable[[torch.Tensor], torch.Tensor] | None = None,
+    d_y_fn: Callable[[torch.Tensor], torch.Tensor] | None = None,
+    f_field: torch.Tensor | None = None,
 ) -> None:
-    """Прогнать 72h rollout по всем IC, логируя в Comet ML.
+    """Прогнать N-часовой rollout по всем IC, логируя в Comet ML.
+
+    Слим-набор метрик: `weighted_rmse/{var}/{plvl}hPa`, `acc/{var}/{plvl}hPa`,
+    `persistence/surface/{var}` (пол, тождествен у всех), `nan_count/{var}`,
+    `frac_ic_blown_up`.
 
     Args:
-        method_name: human-readable id метода (например ``weathergft``).
-        rollout_step_fn: функция, принимающая текущий state-dict и возвращающая
-            (state_next, rhs_dict). RHS опционально (можно вернуть {}).
-        d_x_fn, d_y_fn: операторы для physics-consistency метрик.
-        f_field: Coriolis.
-        geom: геометрия.
+        method_name: human-readable id метода.
+        rollout_step_fn: функция (state-dict) → (state_next, rhs_dict). Возвращает
+            tuple для backward-compat; второй элемент игнорируется (physics-метрики
+            убраны).
+        geom: геометрия (для lat_weights).
         initial_conditions: список pd.Timestamp.
-        memmap_path: ERA5.
-        memmap_meta_path: meta.json (если None — derived).
-        mean_std_path: per-channel mean/std (пустая строка — данные считаются
-            уже в физических единицах).
-        horizon_hours: горизонт прогноза.
-        block_dt_seconds: внутренний шаг substep’а. Substeps per hour =
-            3600 / block_dt_seconds (целое).
+        memmap_path: путь к ERA5 memmap.
+        memmap_meta_path: meta.json (если None — derived из memmap_path).
+        mean_std_path: пустая строка → memmap считается raw физическими единицами.
+        horizon_hours: горизонт прогноза (default 48).
+        block_dt_seconds: substep, 3600 / block_dt_seconds — substeps per hour.
         project_name, workspace, api_key: Comet creds.
         tags: тэги Comet.
-        offline: запись в OfflineExperiment (нужен upload_experiment позже).
+        offline: писать OfflineExperiment (нужен upload_experiment позже).
+        prepare_hook: опц. трансформер стартового state после `_prepare_state`
+            (E4: балансировка IC). Применяется только к IC, не к truth.
+        d_x_fn, d_y_fn, f_field: устарели, игнорируются (оставлены для совместимости).
     """
+    del d_x_fn, d_y_fn, f_field  # больше не используются
+
     if 3600 % int(block_dt_seconds) != 0:
         raise ValueError(f"3600 must be divisible by block_dt={block_dt_seconds}")
     substeps_per_hour = int(3600 // int(block_dt_seconds))
 
-    # Comet setup
     print(f"[init] Comet experiment for method={method_name}")
-    if offline:
-        api_key_eff = None
-    else:
-        api_key_eff = api_key or os.environ.get("COMET_API_KEY")
+    api_key_eff = None if offline else (api_key or os.environ.get("COMET_API_KEY"))
     workspace_eff = workspace or os.environ.get("COMET_WORKSPACE")
     project_name_eff = project_name or os.environ.get("COMET_PROJECT_NAME") or "WeatherPredictions"
 
-    # Comet experiment name: method first, then context, then timestamp. Это
-    # сразу выделяет метод в Comet UI и позволяет фильтровать по prefix’у.
     timestamp_str = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
-    run_name = f"{method_name}_72h_{timestamp_str}"
+    run_name = f"{method_name}_{horizon_hours}h_{timestamp_str}"
     logger = Comet72hLogger(
         project_name=project_name_eff,
         workspace=workspace_eff,
         api_key=api_key_eff,
         run_name=run_name,
         offline_dir=f"logs/comet_offline/{method_name}",
-        tags=(tags or []) + [method_name, f"H{geom.H}", f"W{geom.W}", "cpu", "72h"],
+        tags=(tags or []) + [method_name, f"H{geom.H}", f"W{geom.W}", "cpu", f"{horizon_hours}h"],
     )
-    # Дополнительно отдельным метаполем — для group-by в Comet.
     logger.experiment.log_other("method", method_name)
     logger.experiment.log_other("run_timestamp", timestamp_str)
 
@@ -757,110 +697,88 @@ def run_72h_rollout(
         }
     )
 
-    # ERA5
     print(f"[init] Opening memmap {memmap_path}")
     handle = open_memmap(memmap_path, memmap_meta_path)
     print(f"[init] Memmap shape={handle.shape}, years={handle.meta.get('years')}")
     mean, std = load_mean_std(mean_std_path)
 
-    # Aggregator: для каждого (h, metric) храним сумму конечных значений,
-    # счётчик конечных IC, и флаг «есть ли non-finite». Финальная семантика —
-    # если хоть один IC дал NaN/Inf, логируем NaN (раньше тихо пропускали,
-    # из-за чего метрики казались идентичными между методами).
+    # БАГ-2 fix: усреднение по ФИНИТНЫМ IC (а не «poison-all», который выбрасывал
+    # сигнал выживших траекторий, как только 1/12 IC давал NaN). Сигнал
+    # нестабильности несёт отдельная метрика frac_ic_blown_up.
     sum_metrics: dict[int, dict[str, float]] = {h: {} for h in range(horizon_hours + 1)}
     cnt_metrics: dict[int, dict[str, int]] = {h: {} for h in range(horizon_hours + 1)}
-    poisoned: dict[int, set[str]] = {h: set() for h in range(horizon_hours + 1)}
+    seen_metrics: dict[int, set[str]] = {h: set() for h in range(horizon_hours + 1)}
     nan_ic_count: dict[int, int] = {h: 0 for h in range(horizon_hours + 1)}
 
     def _accumulate(h: int, m: dict[str, float]) -> None:
         bucket_s = sum_metrics[h]
         bucket_c = cnt_metrics[h]
-        bucket_p = poisoned[h]
+        bucket_seen = seen_metrics[h]
         for k, v in m.items():
             if v is None:
                 continue
+            bucket_seen.add(k)  # метрика встречалась (даже если на этом IC NaN)
             if isinstance(v, float) and (np.isnan(v) or np.isinf(v)):
-                bucket_p.add(k)
-                continue
+                continue  # пропускаем только этот IC, не отравляем остальные
             bucket_s[k] = bucket_s.get(k, 0.0) + float(v)
             bucket_c[k] = bucket_c.get(k, 0) + 1
-
-    def _rhs_at(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor] | None:
-        """Один substep на копии state, чтобы получить RHS без модификации state."""
-        cloned = {k: v.clone() for k, v in state_dict.items()}
-        _, rhs_dict = rollout_step_fn(cloned)
-        return rhs_dict
 
     t_start = time.time()
     for ic_idx, ts0 in enumerate(initial_conditions):
         print(f"\n[IC {ic_idx + 1}/{len(initial_conditions)}] {ts0}")
-        # Init state в физических единицах.
         x0 = load_snapshot(handle, ts0, mean, std)
         state = _prepare_state(x0, geom)
+        if prepare_hook is not None:
+            # E4: балансировка IC (DFI/geostrophic). Только стартовое
+            # состояние — truth_state остаётся сырым ERA5 для честных метрик.
+            state = prepare_hook(state)
 
-        # h=0: forecast = identity (RMSE=0), physics ON ERA5 c RHS-baseline.
-        # RHS считаем через copy-step, чтобы получить tendency без интегрирования.
-        rhs_h0 = _rhs_at(state)
+        # h=0: forecast == truth (identity), wrmse=0, acc=1.
         _accumulate(0, compute_forecast_metrics(state, state, geom))
-        _accumulate(
-            0,
-            compute_physics_metrics(
-                state, rhs_h0, geom, f_field, d_x_fn, d_y_fn, dt_seconds=block_dt_seconds
-            ),
-        )
-        _accumulate(0, count_nans_per_var(state))
+        nan_m0 = count_nans_per_var(state)
+        _accumulate(0, nan_m0)
 
+        # БАГ-3 fix: IC, мёртвая уже на инициализации (битая строка memmap,
+        # деление в Magnus при p≈0.378·e_s), должна попасть в frac_ic_blown_up@h0.
         ic_blew_up_at: int | None = None
+        if any(v > 0 for v in nan_m0.values()):
+            ic_blew_up_at = 0
+            nan_ic_count[0] += 1
         for hour in range(1, horizon_hours + 1):
-            last_rhs: dict[str, torch.Tensor] | None = None
             for _ in range(substeps_per_hour):
-                state, last_rhs = rollout_step_fn(state)
+                state, _ = rollout_step_fn(state)
 
             ts_truth = ts0 + pd.Timedelta(hours=hour)
             x_truth = load_snapshot(handle, ts_truth, mean, std)
             truth_state = _prepare_state(x_truth, geom)
 
             forecast_m = compute_forecast_metrics(state, truth_state, geom)
-            physics_m = compute_physics_metrics(
-                state, last_rhs, geom, f_field, d_x_fn, d_y_fn, dt_seconds=block_dt_seconds
-            )
             nan_m = count_nans_per_var(state)
             _accumulate(hour, forecast_m)
-            _accumulate(hour, physics_m)
             _accumulate(hour, nan_m)
 
-            # Отслеживаем «первый час, на котором IC сломался».
-            if ic_blew_up_at is None:
-                if any(v > 0 for v in nan_m.values()):
-                    ic_blew_up_at = hour
-                    nan_ic_count[hour] += 1
+            if ic_blew_up_at is None and any(v > 0 for v in nan_m.values()):
+                ic_blew_up_at = hour
+                nan_ic_count[hour] += 1
 
-            if hour % 12 == 0 or hour in (1, 6, 24, 48, 72):
+            if hour % 12 == 0 or hour in (1, 6, 24, 48):
                 elapsed = time.time() - t_start
                 u_blow = state["u"].abs().max().item()
                 wrmse_u500 = forecast_m.get("weighted_rmse/u/500hPa", float("nan"))
                 print(
                     f"  h={hour:3d}  |u|max={u_blow:.2e}  "
-                    f"wrmse(u@500)={wrmse_u500:.3e}  "
-                    f"cfl_x={physics_m['physics/cfl_x_max']:.3e}  elapsed={elapsed:.0f}s"
+                    f"wrmse(u@500)={wrmse_u500:.3e}  elapsed={elapsed:.0f}s"
                 )
 
-    # Average across IC. Если хоть один IC дал non-finite на metric+hour,
-    # финальное значение = NaN (точная семантика «есть сломанные траектории»).
-    print("\n[log] Pushing per-step metrics to Comet (NaN-propagating)…")
+    print("\n[log] Pushing per-step metrics to Comet (mean over finite IC)…")
     n_ic = len(initial_conditions)
     for h in range(horizon_hours + 1):
         agg: dict[str, float] = {}
-        all_keys = set(sum_metrics[h].keys()) | poisoned[h]
-        for k in all_keys:
-            if k in poisoned[h]:
-                agg[k] = float("nan")
-            else:
-                c = cnt_metrics[h][k]
-                agg[k] = sum_metrics[h][k] / c if c > 0 else float("nan")
-        # Дополнительная сводка: какая фракция IC уже сломана к этому часу.
-        # nan_ic_count считает «впервые сломавшихся на h»; cumulative — сумма
-        # по hours ≤ h.
+        for k in seen_metrics[h]:
+            c = cnt_metrics[h].get(k, 0)
+            # Среднее по финитным IC; NaN только если ВСЕ IC дали non-finite
+            # (тогда метрика честно неопределена).
+            agg[k] = sum_metrics[h][k] / c if c > 0 else float("nan")
         cum_broken = sum(nan_ic_count[hh] for hh in range(h + 1))
         agg["frac_ic_blown_up"] = cum_broken / float(n_ic)
         logger.log_step(h, agg)
@@ -874,9 +792,116 @@ def run_72h_rollout(
 def _prepare_state(x: torch.Tensor, geom: GeometryCPU) -> dict[str, torch.Tensor]:
     """Расщепить (1, 69, H, W) на dict, перевести r → q через Magnus."""
     parts = split_channels_69(x)
-    q = relhum_to_specific(parts["r"], parts["t"], geom.pressure_hpa_t)
+    q = relhum_to_specific(parts["r"], parts["t"], geom.pressure_pa_t)
     parts["q"] = q
     return parts
+
+
+_PROG = ("u", "v", "t", "q", "z")
+
+
+def _lanczos_lowpass(n: int) -> list[float]:
+    """Lanczos-оконный идеальный low-pass на 2n+1 отсчётах (k=−n..n).
+
+    Cutoff θ_c = π/n → период отсечки = 2·n·Δt = полный размах фильтра:
+    медленные (Россби) моды проходят, быстрые (гравитационные) гасятся.
+    Нормирован Σ h_k = 1. Возвращает список длины 2n+1, индекс i ↔ k=i−n.
+    """
+    coeffs: list[float] = []
+    for k in range(-n, n + 1):
+        if k == 0:
+            h = 1.0 / n  # θ_c/π при θ_c=π/n
+        else:
+            ideal = math.sin(math.pi * k / n) / (math.pi * k)
+            window = math.sin(math.pi * k / n) / (math.pi * k / n)  # Lanczos
+            h = ideal * window
+        coeffs.append(h)
+    s = sum(coeffs)
+    return [c / s for c in coeffs]
+
+
+def _dfi_balance(
+    s0: dict[str, torch.Tensor], kernel: PurePDEKernel, span_hours: float
+) -> dict[str, torch.Tensor]:
+    """Forward-only DFI на СТАБИЛИЗИРОВАННОМ kernel.step + Lanczos low-pass.
+
+    Явный backward-Эйлер на сырой (неустойчивой) физике расходится за
+    несколько шагов, поэтому DFI интегрирует ВПЕРЁД через ``kernel.step``
+    (на E4 это уже ssp_rk3 + ∇⁴ + polar из E1–E3 — устойчиво). Окно
+    [0, 2n]·dt, симметричный Lanczos-low-pass с пиком в n → сбалансированное
+    состояние валидно ≈ на n·dt (малый сдвиг ≪ 48 ч; стандартное
+    приближение forward-only DFI). Убирает быстрые по времени
+    (гравитационные) моды, сохраняет медленный (Россби) поток.
+    """
+    n = max(1, round(span_hours * 3600.0 / kernel.block_dt))
+    h = _lanczos_lowpass(n)  # длина 2n+1, пик в индексе n
+    cur = {k: s0[k] for k in _PROG}
+    acc = {k: h[0] * cur[k] for k in _PROG}
+    with torch.no_grad():
+        for i in range(1, 2 * n + 1):
+            out = kernel.step(cur["u"], cur["v"], cur["t"], cur["q"], cur["z"])
+            cur = {k: out[k] for k in _PROG}
+            acc = {k: acc[k] + h[i] * cur[k] for k in _PROG}
+    return acc
+
+
+def _geostrophic_balance(
+    s0: dict[str, torch.Tensor], kernel: PurePDEKernel
+) -> dict[str, torch.Tensor]:
+    """Геострофическая инициализация: ветер из массы (u_g,v_g) = (−z_y,z_x)/f.
+
+    Убирает агеострофический дисбаланс конструктивно. У экватора |f|
+    ограничивается снизу (2Ω·sin5°), чтобы не делить на ~0.
+    """
+    z = s0["z"]
+    z_x = kernel.diff.d_x(z)
+    z_y = kernel.diff.d_y(z)
+    f = kernel.f_field
+    f_min = 2.0 * 7.2921e-5 * math.sin(math.radians(5.0))
+    sign = torch.sign(f)
+    sign = torch.where(sign == 0.0, torch.ones_like(sign), sign)
+    f_safe = torch.where(f.abs() < f_min, sign * f_min, f)
+    out = dict(s0)
+    out["u"] = -z_y / f_safe
+    out["v"] = z_x / f_safe
+    return out
+
+
+def balance_initial_state(
+    state: dict[str, torch.Tensor],
+    kernel: PurePDEKernel,
+    mode: str,
+    span_hours: float = 1.0,
+) -> dict[str, torch.Tensor]:
+    """Сбалансировать IC до rollout (E4): убрать initialization-shock.
+
+    Args:
+        state: dict с прогностическими (u,v,t,q,z) + surface/r полями.
+        kernel: PurePDEKernel (нужны `.step`, `.block_dt`, `.f_field`, `.diff`).
+        mode: ``none`` (passthrough) | ``dfi`` | ``geostrophic``.
+        span_hours: полу-размах DFI-окна в часах (forward-only, см.
+            :func:`_dfi_balance`). Не используется для ``geostrophic``.
+
+    Returns:
+        Новый dict: прогностические заменены сбалансированными, остальные
+        (t2m/u10/v10/tp/r) — passthrough. LBYL-guard: если балансировка
+        дала NaN/Inf — возвращается исходный state (с предупреждением).
+    """
+    if mode == "none":
+        return state
+    s0 = {k: state[k] for k in _PROG}
+    if mode == "dfi":
+        bal = _dfi_balance(s0, kernel, span_hours)
+    elif mode == "geostrophic":
+        bal = _geostrophic_balance(s0, kernel)
+    else:
+        raise ValueError(f"Unknown balance-ic mode {mode!r}")
+    if not all(bool(torch.isfinite(v).all()) for v in bal.values()):
+        print(f"[balance_ic] mode={mode} дал NaN/Inf → fallback на сырой IC")
+        return state
+    out = dict(state)
+    out.update(bal)
+    return out
 
 
 __all__ = [
@@ -893,14 +918,14 @@ __all__ = [
     "default_initial_conditions",
     "magnus_qs",
     "relhum_to_specific",
+    "adiabatic_temperature_tendency",
     "GeometryCPU",
-    "integral_z_cpu",
     "coriolis_constant",
     "coriolis_beta_plane",
     "coriolis_spherical",
     "Comet72hLogger",
     "compute_forecast_metrics",
-    "compute_physics_metrics",
     "count_nans_per_var",
+    "balance_initial_state",
     "run_72h_rollout",
 ]

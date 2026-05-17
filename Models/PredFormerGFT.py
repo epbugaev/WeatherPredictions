@@ -7,6 +7,8 @@ from einops.layers.torch import Rearrange
 from timm.layers import DropPath, to_2tuple, trunc_normal_
 from torch import einsum, nn
 
+from utils.regions import USA_CROP
+
 # ===== Исходные расчёты параметров дискретизации =====
 latents_size = [
     8,
@@ -728,7 +730,8 @@ class PredFormer_Model(nn.Module):
         self.downscaling_factor_all = 4  # Default downscaling factor for GFT
         self.gft_weight = 0.1  # Вес физических эмбеддингов при добавлении к основным данным
 
-        self.static_masks = self.static_masks[..., 128 - 92 : 128 - 60, 256 - 131 : 256 - 67]
+        (lat0, lat1), (lon0, lon1) = USA_CROP
+        self.static_masks = self.static_masks[..., lat0:lat1, lon0:lon1]
 
         assert self.image_height % self.patch_size == 0, (
             "Image height must be divisible by the patch size."

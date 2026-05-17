@@ -1,17 +1,25 @@
 """72-h rollout проверка метода WeatherGFT: FD-4 + Forward Euler + const Coriolis.
 
-Семантика (1:1 с Models/WeatherGFT.py:113-307, **без** scale_diff и .detach()):
+Геометрия и операторы воспроизводят Models/WeatherGFT.py через
+:mod:`utils.old_physics.make_weathergft_ops`. Семантика **физики** — обновлённая
+(см. CHANGELOG): сломанная формула `Q = -L·z_z·w` заменена на правильную
+адиабатику `dT/dt|_adia = R_d·T·ω/(c_p·p)`, гидростатика использует `R_d`
+вместо универсальной `R`.
 
     Momentum:    u_t = -u·u_x - v·u_y - w·u_z + f·v - z_x
                  v_t = -u·v_x - v·v_y - w·v_z - f·u - z_y
-    Temperature: t_t = (Q - z_z·w)/c_p - u·t_x - v·t_y - w·t_z,  Q = -L·z_z·w
-    Geopotent.:  z_t = integral_z(-R / p · t_t)
+    Temperature: t_t = R_d·T·ω/(c_p·p) - u·t_x - v·t_y - w·t_z,
+                 где ω = 100·w (w в hPa/s → ω в Pa/s).
+    Geopotent.:  z_t = integral_z(-R_d / p · t_t)
     Continuity:  w   = integral_z(-(u_x + v_y))   [diagnostic]
-    Humidity:    q_t = -(u·q_x + v·q_y + w·q_z) + adiabatic-Kuo term
+    Humidity:    q_t = -(u·q_x + v·q_y + w·q_z)   [advection-only]
 
-Время: Forward Euler, block_dt=300 s, 12 substep’ов/час, 72 часа = 864 substep’а.
-Сетка: 128×256 (ERA5 1.4°). Coriolis: const 7.29e-5 (как в оригинале).
-Boundary: periodic (как в оригинале, через torch.cat).
+Время: Forward Euler, block_dt=300 s, 12 substep’ов/час.
+Сетка: 32×64 (ERA5 1.4°). Coriolis: --coriolis-value override (default
+тот же легаси 7.29e-5 = Ω, чтобы конфигурация воспроизводила старые
+численные эксперименты; для физически правильного 2Ω·sin(45°) передайте
+`--coriolis-value 1.03e-4` или используйте tools/check_physics_new_kernel.py).
+Boundary: replicate-через-cat (как в оригинале старой физики).
 
 CPU-only. Запуск:
     python tools/check_physics_weathergft.py \
@@ -33,16 +41,16 @@ if str(REPO_ROOT) not in sys.path:
 
 from tools.check_physics_common import (
     GeometryCPU,
+    adiabatic_temperature_tendency,
     coriolis_constant,
     default_initial_conditions,
     run_72h_rollout,
 )
 from utils.old_physics import make_weathergft_ops
 
-# Физические константы (WeatherGFT.py:125-131).
-L = 2.5e6
-R = 8.314
-c_p = 1005.0
+# Физические константы — R_d (per-mass) в гидростатике + адиабатика.
+R_D = 287.0  # сухой воздух, J/(kg·K)
+C_P = 1005.0  # теплоёмкость, J/(kg·K)
 
 
 def main() -> None:
@@ -69,8 +77,16 @@ def main() -> None:
         default=64,
         help="Grid width. Default matches predformer_globe memmap (64).",
     )
+    p.add_argument(
+        "--lat-range-deg",
+        nargs=2,
+        type=float,
+        default=[-90.0, 90.0],
+        metavar=("LOW", "HIGH"),
+        help="Диапазон широт. Дефолт global. USA-кроп: 24 56.",
+    )
     p.add_argument("--year", type=int, default=2005)
-    p.add_argument("--horizon-hours", type=int, default=72)
+    p.add_argument("--horizon-hours", type=int, default=48)
     p.add_argument("--block-dt-seconds", type=float, default=300.0)
     p.add_argument("--coriolis-value", type=float, default=7.29e-5)
     p.add_argument(
@@ -85,7 +101,7 @@ def main() -> None:
     print(f"[init] device={device}, threads={torch.get_num_threads()}")
 
     # Geometry + ops.
-    geom = GeometryCPU(H=args.H, W=args.W)
+    geom = GeometryCPU(H=args.H, W=args.W, lat_range_deg=tuple(args.lat_range_deg))
     ops = make_weathergft_ops(latents_size=(args.H, args.W))
     d_x = ops.d_x
     d_y = ops.d_y
@@ -122,18 +138,20 @@ def main() -> None:
         q_z = d_z(q)
         z_x = d_x(z)
         z_y = d_y(z)
-        z_z = d_z(z)
+        # z_z не нужен: правильная адиабатика использует ω (=100·w), не z_z·w.
 
         # u, v tendencies (momentum)
         u_t = -u * u_x - v * u_y - w * u_z + f_field * v - z_x
         v_t = -u * v_x - v * v_y - w * v_z - f_field * u - z_y
 
-        # t tendency (temperature)
-        Q = -L * z_z * w
-        t_t = (Q - z_z * w) / c_p - u * t_x - v * t_y - w * t_z
+        # t tendency: адиабатика R_d·T·ω/(c_p·p) + горизонтальная адвекция
+        t_t_adia = adiabatic_temperature_tendency(t, w, pressure_pa, r_d=R_D, c_p=C_P)
+        t_t = t_t_adia - u * t_x - v * t_y - w * t_z
 
-        # z tendency via hydrostatic
-        z_zt = -R / pressure_pa * t_t
+        # z tendency via hydrostatic (R_d, не универсальная).
+        # integral_z интегрирует с pixel_z в hPa, поэтому делитель давления
+        # тоже в hPa (pressure_pa/100). Иначе z_t был бы ×100 меньше.
+        z_zt = -R_D / (pressure_pa / 100.0) * t_t
         z_t = integral_z(z_zt)
 
         # q tendency (упрощённая, без condensation switch).
@@ -161,8 +179,17 @@ def main() -> None:
         rhs = {"u_t": u_t, "v_t": v_t, "t_t": t_t, "q_t": q_t, "z_t": z_t}
         return new_state, rhs
 
+    # БАГ-4 fix: имя метода и тег самодокументируют реальное значение Coriolis,
+    # чтобы Comet-эксперимент не вводил в заблуждение (legacy Ω=7.29e-5 vs
+    # каноничное 2Ω·sin45°≈1.03e-4). 7.29e-5 — это Ω (paper), не f.
+    cval = args.coriolis_value
+    is_legacy_omega = abs(cval - 7.29e-5) < 1e-7
+    coriolis_tag = "constOmega_legacy" if is_legacy_omega else f"const_{cval:.3e}"
+    method_name = f"fd4_euler_{coriolis_tag}"
+    print(f"[init] method_name={method_name} (coriolis f={cval:.3e})")
+
     run_72h_rollout(
-        method_name="fd4_euler_constCoriolis",
+        method_name=method_name,
         rollout_step_fn=rollout_step,
         d_x_fn=d_x,
         d_y_fn=d_y,
@@ -175,7 +202,7 @@ def main() -> None:
         horizon_hours=args.horizon_hours,
         block_dt_seconds=args.block_dt_seconds,
         project_name=args.project_name,
-        tags=["fd4", "euler", "coriolis_constant", "method_weathergft"],
+        tags=["fd4", "euler", coriolis_tag, f"coriolis_value_{cval:.3e}", "method_weathergft"],
         offline=args.offline,
     )
 

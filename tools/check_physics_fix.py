@@ -8,7 +8,8 @@ periodic boundaries (минимальная конфигурация, чтобы
   --fix-mode=A  «alpha-omega heating»
         Заменяем broken `Q = -L·z_z·w` на правильную адиабатику
         `dT/dt|_adia = α·ω/(c_p) = R_d·T·ω/(c_p·p)`, где `ω` приведён к Pa/s.
-        Также гидростатика: `z_zt = -R_d/p_Pa · t_t` (R_d вместо универсальной).
+        Также гидростатика: `z_zt = -R_d/p_hPa · t_t` (R_d вместо универсальной;
+        p в hPa под hPa-интеграл integral_z — см. БАГ-1 fix).
         Это устраняет 7-порядковый overflow `t_t` за substep.
 
   --fix-mode=B  «Pa units + R_d»
@@ -87,8 +88,16 @@ def main() -> None:
     p.add_argument("--mean-std-path", default="")
     p.add_argument("--H", type=int, default=32)
     p.add_argument("--W", type=int, default=64)
+    p.add_argument(
+        "--lat-range-deg",
+        nargs=2,
+        type=float,
+        default=[-90.0, 90.0],
+        metavar=("LOW", "HIGH"),
+        help="Диапазон широт. Дефолт global. USA-кроп: 24 56.",
+    )
     p.add_argument("--year", type=int, default=2005)
-    p.add_argument("--horizon-hours", type=int, default=72)
+    p.add_argument("--horizon-hours", type=int, default=48)
     p.add_argument("--block-dt-seconds", type=float, default=300.0)
     p.add_argument("--fix-mode", choices=["A", "B", "C"], required=True)
     p.add_argument("--offline", action="store_true")
@@ -98,7 +107,7 @@ def main() -> None:
     device = torch.device("cpu")
     print(f"[init] device={device}, threads={torch.get_num_threads()}, fix_mode={args.fix_mode}")
 
-    geom = GeometryCPU(H=args.H, W=args.W)
+    geom = GeometryCPU(H=args.H, W=args.W, lat_range_deg=tuple(args.lat_range_deg))
     ops = make_weathergft_ops(latents_size=(args.H, args.W))
     d_x = ops.d_x
     d_y = ops.d_y
@@ -107,7 +116,6 @@ def main() -> None:
 
     f_field = coriolis_spherical(geom).to(device)
     pressure_pa = geom.pressure_pa_t.to(device)  # (1, 13, 1, 1) — Pa
-    pressure_hpa = geom.pressure_hpa_t.to(device)
 
     fix = args.fix_mode
 
@@ -160,8 +168,9 @@ def main() -> None:
         omega_Pa = 100.0 * w
         t_t_adia = R_D * t * omega_Pa / (C_P * pressure_pa)
         t_t = t_t_adia - u * D["t_x"] - v * D["t_y"] - w * D["t_z"]
-        # Hydrostatic with R_d (correct gas constant for dry air).
-        z_zt = -R_D / pressure_pa * t_t
+        # Hydrostatic with R_d. integral_z в hPa → делитель в hPa
+        # (pressure_pa/100), иначе z_t ×100 меньше корректного.
+        z_zt = -R_D / (pressure_pa / 100.0) * t_t
         z_t = integral_z(z_zt)
         u_t = -u * D["u_x"] - v * D["u_y"] - w * D["u_z"] + f_field * v - D["z_x"]
         v_t = -u * D["v_x"] - v * D["v_y"] - w * D["v_z"] - f_field * u - D["z_y"]
@@ -174,8 +183,8 @@ def main() -> None:
         w = D["w"]
         Q = -L * D["z_z"] * w  # ← still dimensionally broken
         t_t = (Q - D["z_z"] * w) / C_P - u * D["t_x"] - v * D["t_y"] - w * D["t_z"]
-        # Use R_d and pressure in Pa for hydrostatic.
-        z_zt = -R_D / pressure_pa * t_t
+        # R_d, делитель в hPa (pressure_pa/100) под hPa-интеграл integral_z.
+        z_zt = -R_D / (pressure_pa / 100.0) * t_t
         z_t = integral_z(z_zt)
         u_t = -u * D["u_x"] - v * D["u_y"] - w * D["u_z"] + f_field * v - D["z_x"]
         v_t = -u * D["v_x"] - v * D["v_y"] - w * D["v_z"] - f_field * u - D["z_y"]
@@ -188,7 +197,8 @@ def main() -> None:
         w = D["w"]
         Q = -L * D["z_z"] * w
         t_t = (Q - D["z_z"] * w) / C_P - u * D["t_x"] - v * D["t_y"] - w * D["t_z"]
-        z_zt = -R_UNIVERSAL / pressure_pa * t_t
+        # Универсальная R (легаси-некорректность fixC), делитель в hPa под integral_z.
+        z_zt = -R_UNIVERSAL / (pressure_pa / 100.0) * t_t
         z_t = integral_z(z_zt)
         u_t = -u * D["u_x"] - v * D["u_y"] - w * D["u_z"] + f_field * v - D["z_x"]
         v_t = -u * D["v_x"] - v * D["v_y"] - w * D["v_z"] - f_field * u - D["z_y"]

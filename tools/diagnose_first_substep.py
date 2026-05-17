@@ -93,10 +93,9 @@ def main() -> None:
     dump("pixel_y (m, const)", geom.pixel_y)
     dump("pixel_z (hPa, levels)", geom.pixel_z)
     dump("pressure_pa (Pa)", geom.pressure_pa_t)
-    dump("pressure_hpa (hPa)", geom.pressure_hpa_t)
 
-    print("\n[STAGE 2] q = (r/100) · q_s(t, p_hpa) via Magnus:")
-    q = relhum_to_specific(parts["r"], parts["t"], geom.pressure_hpa_t)
+    print("\n[STAGE 2] q = (r/100) · q_s(t, p_pa) via Magnus (SI: Pa):")
+    q = relhum_to_specific(parts["r"], parts["t"], geom.pressure_pa_t)
     dump("q (kg/kg)", q)
 
     # Build state for rollout

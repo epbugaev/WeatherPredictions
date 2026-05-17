@@ -26,7 +26,7 @@ source "${_sc_here}/_shell_contract.sh" "${_sc_here}"
 
 MEMMAP_PATH="${MEMMAP_PATH:-/home/fa.buzaev/era5_memmap/predformer_globe_2000_2018.dat}"
 MEAN_STD_PATH="${MEAN_STD_PATH:-}"
-HORIZON="${HORIZON_HOURS:-72}"
+HORIZON="${HORIZON_HOURS:-48}"
 BLOCK_DT="${BLOCK_DT_SECONDS:-300}"
 YEAR="${YEAR:-2005}"
 
@@ -37,8 +37,9 @@ python tools/check_physics_new_kernel.py \
   --stencil fd4 \
   --time-scheme rk4 \
   --coriolis spherical \
-  --boundary-h periodic \
-  --boundary-z periodic \
+  --boundary-x periodic \
+  --boundary-y replicate \
+  --boundary-z replicate \
   --memmap-path "${MEMMAP_PATH}" \
   --mean-std-path "${MEAN_STD_PATH}" \
   --horizon-hours "${HORIZON}" \

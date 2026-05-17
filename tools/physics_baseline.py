@@ -1,10 +1,18 @@
 """Физический бейзлайн на ERA5 1.4° глобус 2000-2010.
 
-Прогоняет чистый PurePDEKernel (без обучаемых слоёв) поверх пар снимков
-ERA5, считает метрики прогноза и метрики физической согласованности,
-сохраняет в parquet/npy под `checkpoints/physics_baseline/<tag>/`.
+Прогоняет чистый PurePDEKernel (без обучаемых слоёв) `n_substeps` шагов
+между ERA5-снимками `(t, t+lead_hours)`, считает per-channel метрики и
+физическую consistency, сохраняет в parquet/npy под
+`checkpoints/physics_baseline/<tag>/`.
 
-Запуск (cluster):
+Memmap convention:
+    * v4 (default, raw): данные уже в физических единицах. Не передавайте
+      `--memmap-is-normalized`; `--mean-std-path` опционален и игнорируется.
+    * v3 (legacy normalised): данные хранятся как `(x - mean) / std`.
+      Передайте `--memmap-is-normalized` И `--mean-std-path /path/to/mean_std.npy`,
+      чтобы код выполнил `x*std + mean` к физическим единицам.
+
+Запуск (cluster, v4 raw):
     python tools/physics_baseline.py \
         --memmap-path /home/fa.buzaev/era5_memmap/predformer_globe_2000_2018.dat \
         --start-time 2000-01-01 --end-time 2010-12-31 \
@@ -100,14 +108,17 @@ class BaselineConfig:
     time_scheme: Literal["euler", "rk4"]
     block_dt: float
     n_substeps: int
-    boundary_horiz: Literal["periodic", "reflect"]
-    boundary_z: Literal["periodic", "reflect"]
-    use_R_d_in_hydrostatic: bool
+    boundary_x: Literal["periodic", "reflect", "replicate"]
+    boundary_y: Literal["periodic", "reflect", "replicate"]
+    boundary_z: Literal["reflect", "replicate"]
+    use_universal_R: bool
     device: str
     batch_size: int
     output_dir: str
     H: int
     W: int
+    lat_range_deg: tuple[float, float]
+    memmap_is_normalized: bool
 
 
 # =============================================================================
@@ -257,26 +268,25 @@ def run_baseline(cfg: BaselineConfig, smoke: bool = False) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # --- Build grid + kernel ---
-    grid = Grid(GridConfig(H=cfg.H, W=cfg.W, lat_scheme="linear_minus90_90")).to(cfg.device)
+    grid = Grid(GridConfig(H=cfg.H, W=cfg.W, lat_range_deg=tuple(cfg.lat_range_deg))).to(cfg.device)
     kernel = PurePDEKernel(
         grid,
         stencil=cfg.stencil,
         coriolis=cfg.coriolis,
         block_dt=cfg.block_dt,
         time_scheme=cfg.time_scheme,
-        boundary_horiz=cfg.boundary_horiz,
+        boundary_x=cfg.boundary_x,
+        boundary_y=cfg.boundary_y,
         boundary_z=cfg.boundary_z,
-        use_R_d_in_hydrostatic=cfg.use_R_d_in_hydrostatic,
+        use_universal_R=cfg.use_universal_R,
     ).to(cfg.device)
     print(f"[init] Grid H={cfg.H}, W={cfg.W}; kernel={kernel}")
 
-    # --- latitude weights for weighted RMSE (cos(lat), как `utils.metrics.weighted_rmse_torch`) ---
-    lat_t = torch.arange(0, cfg.H, dtype=torch.float32, device=cfg.device)
-    lat_deg = 90.0 - lat_t * 180.0 / float(cfg.H - 1)
-    lat_rad = lat_deg * torch.pi / 180.0
-    cos_w = torch.cos(lat_rad)
-    s = cos_w.sum()
-    lat_weights = cfg.H * cos_w / s
+    # --- latitude weights for weighted RMSE ---
+    # B-1 fix: используем grid.latitudes напрямую (linspace(-90, 90, H+2)[1:-1]),
+    # чтобы совпадало с check_physics_common.py и не было расхождения на крае.
+    cos_w = torch.cos(grid.latitudes)
+    lat_weights = cfg.H * cos_w / cos_w.sum()
 
     if smoke:
         print("[smoke] Synthetic random ERA5-like state, single batch, no memmap.")
@@ -311,10 +321,23 @@ def run_baseline(cfg: BaselineConfig, smoke: bool = False) -> None:
         rows_next = [r for r, m in zip(rows_next, valid_mask, strict=True) if m]
         print(f"[init] {len(timestamps)} valid samples after stride/lead filtering.")
 
-        # Normalization (apply at load, then we work in raw units inside physics)
-        the_mean, the_std = load_mean_std(cfg.mean_std_path)
-        the_mean_t = torch.from_numpy(the_mean).to(cfg.device).view(1, -1, 1, 1)
-        the_std_t = torch.from_numpy(the_std).to(cfg.device).view(1, -1, 1, 1)
+        # Нормализация: денормализуем `raw * std + mean` к физическим единицам
+        # ТОЛЬКО если memmap хранит уже нормализованные данные (v3 convention) —
+        # это явно отмечено флагом `memmap_is_normalized`. Для v4 raw memmap
+        # денормализация ничего не делает только если mean=0, std=1, что не так
+        # для ERA5 — пропуск этого шага раньше «бесшумно» портил данные.
+        if cfg.memmap_is_normalized:
+            if not cfg.mean_std_path:
+                raise ValueError(
+                    "memmap_is_normalized=True requires --mean-std-path (нужен для "
+                    "обратного преобразования к физ. единицам)."
+                )
+            the_mean, the_std = load_mean_std(cfg.mean_std_path)
+            the_mean_t = torch.from_numpy(the_mean).to(cfg.device).view(1, -1, 1, 1)
+            the_std_t = torch.from_numpy(the_std).to(cfg.device).view(1, -1, 1, 1)
+        else:
+            the_mean_t = None
+            the_std_t = None
 
     # --- Iterate in batches ---
     n_samples = cfg.batch_size if smoke else len(timestamps)
@@ -322,8 +345,6 @@ def run_baseline(cfg: BaselineConfig, smoke: bool = False) -> None:
     print(f"[run] {n_samples} samples in {n_batches} batches of {cfg.batch_size}")
 
     records: list[dict] = []
-    residual_buffer: dict[str, list[float]] = {k: [] for k in ("u", "v", "t", "q", "z")}
-    cfl_max_per_sample: list[float] = []
 
     t_start = time.time()
     for bi in range(n_batches):
@@ -346,11 +367,11 @@ def run_baseline(cfg: BaselineConfig, smoke: bool = False) -> None:
                 .float()
                 .to(cfg.device)
             )
-            # NOTE: memmap is already RAW (per Data.weatherbench_128_v4 docstring),
-            # but in V3 it's pre-normalised. We undo normalisation if mean/std loaded;
-            # the user-passed mean_std should match the memmap convention.
-            x_now_raw = x_now_raw * the_std_t + the_mean_t  # de-normalise to physical units
-            x_next_raw = x_next_raw * the_std_t + the_mean_t
+            # Денормализация только если флаг `--memmap-is-normalized` (v3
+            # convention). Дефолт — v4 raw, ничего не делать.
+            if the_mean_t is not None:
+                x_now_raw = x_now_raw * the_std_t + the_mean_t
+                x_next_raw = x_next_raw * the_std_t + the_mean_t
 
         now = split_channels_69(x_now_raw)
         nxt = split_channels_69(x_next_raw)
@@ -381,55 +402,42 @@ def run_baseline(cfg: BaselineConfig, smoke: bool = False) -> None:
                 }
             state_pred = cur
 
-            # Forecast metrics
+            # Forecast metrics — слим до weighted_rmse + spatial-anomaly ACC
+            # (по запросу пользователя). Реализованы здесь локально, чтобы не
+            # тянуть check_physics_common (это отдельный entry-point).
             for var in ("u", "v", "t", "q", "z"):
-                rmse_pc, mae_pc = per_channel_rmse_mae(state_pred[var], state_truth[var])
-                psnr_pc = per_channel_psnr(state_pred[var], state_truth[var])
-                wrmse_pc = latitude_weighted_rmse(state_pred[var], state_truth[var], lat_weights)
-                for lvl in range(rmse_pc.shape[0]):
+                pred_full = state_pred[var]  # (B, P, H, W)
+                truth_full = state_truth[var]
+                P = pred_full.shape[1]
+                wgrid = lat_weights.view(1, -1, 1)  # (1, H, 1)
+                w_sum = float(lat_weights.sum().item()) * cfg.W
+                for lvl in range(P):
+                    p_2d = pred_full[:, lvl]  # (B, H, W)
+                    t_2d = truth_full[:, lvl]
+                    diff = p_2d - t_2d
+                    wmse = (wgrid * diff * diff).sum(dim=(-1, -2)) / w_sum
+                    wrmse = float(torch.sqrt(wmse.mean()).cpu())
+                    p_mean = (wgrid * p_2d).sum(dim=(-1, -2), keepdim=True) / w_sum
+                    t_mean = (wgrid * t_2d).sum(dim=(-1, -2), keepdim=True) / w_sum
+                    p_anom = p_2d - p_mean
+                    t_anom = t_2d - t_mean
+                    num = (wgrid * p_anom * t_anom).sum(dim=(-1, -2))
+                    den = torch.sqrt(
+                        (wgrid * p_anom * p_anom).sum(dim=(-1, -2))
+                        * (wgrid * t_anom * t_anom).sum(dim=(-1, -2))
+                        + 1e-30
+                    )
+                    acc = float((num / den).mean().cpu())
                     for ts in ts_batch:
                         records.append(
                             {
                                 "timestamp": ts.isoformat(),
                                 "variable": var,
                                 "pressure_level_hpa": int(grid.config.pressure_levels[lvl]),
-                                "rmse": float(rmse_pc[lvl].cpu()),
-                                "mae": float(mae_pc[lvl].cpu()),
-                                "psnr_db": float(psnr_pc[lvl].cpu()),
-                                "weighted_rmse": float(wrmse_pc[lvl].cpu()),
+                                "weighted_rmse": wrmse,
+                                "acc": acc,
                             }
                         )
-
-            # Physics consistency on (state_now, state_truth)
-            dt_total = cfg.block_dt * cfg.n_substeps
-            resid = pde_residual(kernel, state_now, state_truth, dt_seconds=dt_total)
-            div = mass_divergence(kernel, state_now["u"], state_now["v"])
-            ke = kinetic_energy_density(state_now["u"], state_now["v"])
-            pv = potential_vorticity_proxy(kernel, state_now["u"], state_now["v"])
-            geo = geostrophic_residual(kernel, state_now["u"], state_now["v"], state_now["z"])
-            cfl = cfl_number(kernel, state_now["u"], state_now["v"], dt=dt_total)
-
-            for var in ("u", "v", "t", "q", "z"):
-                residual_buffer[var].append(float(resid[var].abs().mean().cpu()))
-            cfl_max_per_sample.append(
-                float(max(cfl["cfl_x"].max().cpu(), cfl["cfl_y"].max().cpu()))
-            )
-
-            for i, ts in enumerate(ts_batch):
-                records.append(
-                    {
-                        "timestamp": ts.isoformat(),
-                        "variable": "_consistency_",
-                        "pressure_level_hpa": -1,
-                        "mass_div_abs_mean": float(div[i].abs().mean().cpu()),
-                        "ke_max": float(ke[i].max().cpu()),
-                        "pv_abs_mean": float(pv[i].abs().mean().cpu()),
-                        "geo_u_resid_abs_mean": float(geo["u_residual"][i].abs().mean().cpu()),
-                        "geo_v_resid_abs_mean": float(geo["v_residual"][i].abs().mean().cpu()),
-                        "cfl_x_max": float(cfl["cfl_x"][i].max().cpu()),
-                        "cfl_y_max": float(cfl["cfl_y"][i].max().cpu()),
-                    }
-                )
 
         if bi % 10 == 0 or bi == n_batches - 1:
             elapsed = time.time() - t_start
@@ -439,12 +447,6 @@ def run_baseline(cfg: BaselineConfig, smoke: bool = False) -> None:
     # --- Save outputs ---
     df = pd.DataFrame(records)
     df.to_parquet(out_dir / "metrics.parquet", index=False)
-    np.save(
-        out_dir / "residual_mean_abs.npy",
-        {k: np.asarray(v) for k, v in residual_buffer.items()},
-        allow_pickle=True,
-    )
-    np.save(out_dir / "cfl_max.npy", np.asarray(cfl_max_per_sample))
 
     with open(out_dir / "config.json", "w") as f:
         json.dump(asdict(cfg), f, indent=2, default=str)
@@ -452,8 +454,13 @@ def run_baseline(cfg: BaselineConfig, smoke: bool = False) -> None:
     elapsed_total = time.time() - t_start
     print(f"[done] {len(df)} records → {out_dir / 'metrics.parquet'}")
     print(f"[done] Elapsed: {elapsed_total:.1f}s")
-    print(f"[done] CFL max (over all samples): {max(cfl_max_per_sample):.3e}")
-    print(f"[done] Residual |u_t| mean: {np.mean(residual_buffer['u']):.3e}")
+    # Summary: median weighted_rmse и ACC по 500hPa уровню как индикатор pipeline.
+    z500 = df[(df["variable"] == "z") & (df["pressure_level_hpa"] == 500)]
+    if not z500.empty:
+        print(
+            f"[done] z@500hPa median weighted_rmse={z500['weighted_rmse'].median():.3e}  "
+            f"ACC={z500['acc'].median():.3f}"
+        )
 
 
 def parse_args(argv: list[str] | None = None) -> tuple[BaselineConfig, bool]:
@@ -463,7 +470,10 @@ def parse_args(argv: list[str] | None = None) -> tuple[BaselineConfig, bool]:
     )
     p.add_argument("--memmap-meta-path", default=None)
     p.add_argument(
-        "--mean-std-path", default="/home/fratnikov/weather_bench/1.40625deg/mean_std.npy"
+        "--mean-std-path",
+        default="",
+        help="Пустая строка → memmap уже в физических единицах (v4 convention). "
+        "Передавайте путь только если memmap содержит нормализованные данные (v3).",
     )
     p.add_argument("--start-time", default="2000-01-01 00:00:00")
     p.add_argument("--end-time", default="2010-12-31 23:00:00")
@@ -476,14 +486,51 @@ def parse_args(argv: list[str] | None = None) -> tuple[BaselineConfig, bool]:
     p.add_argument("--time-scheme", choices=["euler", "rk4"], default="euler")
     p.add_argument("--block-dt", type=float, default=300.0)
     p.add_argument("--n-substeps", type=int, default=12)
-    p.add_argument("--boundary-horiz", choices=["periodic", "reflect"], default="periodic")
-    p.add_argument("--boundary-z", choices=["periodic", "reflect"], default="periodic")
-    p.add_argument("--use-R-d-in-hydrostatic", action="store_true")
+    p.add_argument(
+        "--boundary-x",
+        choices=["periodic", "reflect", "replicate"],
+        default="periodic",
+        help="Граничное условие по lon. Дефолт 'periodic'.",
+    )
+    p.add_argument(
+        "--boundary-y",
+        choices=["periodic", "reflect", "replicate"],
+        default="replicate",
+        help="Граничное условие по lat. Дефолт 'replicate' (lat не циклична).",
+    )
+    p.add_argument(
+        "--boundary-z",
+        choices=["reflect", "replicate"],
+        default="replicate",
+        help="Граничное условие по pressure. 'periodic' запрещён.",
+    )
+    p.add_argument(
+        "--memmap-is-normalized",
+        action="store_true",
+        help="Если True, memmap хранит per-channel-нормализованные данные (v3 convention) "
+        "и будет денормализован через --mean-std-path к физическим единицам. "
+        "Дефолт False — memmap считается raw (v4 convention).",
+    )
+    p.add_argument(
+        "--use-universal-R",
+        action="store_true",
+        help="Использовать универсальную R=8.314 Дж/(моль·К) в гидростатике вместо "
+        "дефолтного R_d=287 Дж/(кг·К). Opt-in для регрессии старой физики.",
+    )
     p.add_argument("--device", default="cuda")
     p.add_argument("--batch-size", type=int, default=4)
     p.add_argument("--output-dir", default="checkpoints/physics_baseline/default")
     p.add_argument("--H", type=int, default=128)
     p.add_argument("--W", type=int, default=256)
+    p.add_argument(
+        "--lat-range-deg",
+        nargs=2,
+        type=float,
+        default=[-90.0, 90.0],
+        metavar=("LOW", "HIGH"),
+        help="Диапазон широт в градусах (low high). Дефолт (-90 90) — global. "
+        "Для USA-кропа: --lat-range-deg 24 56.",
+    )
     p.add_argument(
         "--smoke", action="store_true", help="Run on synthetic random tensor, skip memmap."
     )
@@ -507,14 +554,17 @@ def parse_args(argv: list[str] | None = None) -> tuple[BaselineConfig, bool]:
         time_scheme=args.time_scheme,
         block_dt=args.block_dt,
         n_substeps=args.n_substeps,
-        boundary_horiz=args.boundary_horiz,
+        boundary_x=args.boundary_x,
+        boundary_y=args.boundary_y,
         boundary_z=args.boundary_z,
-        use_R_d_in_hydrostatic=args.use_R_d_in_hydrostatic,
+        use_universal_R=args.use_universal_R,
         device=args.device,
         batch_size=args.batch_size,
         output_dir=args.output_dir,
         H=args.H,
         W=args.W,
+        lat_range_deg=tuple(args.lat_range_deg),
+        memmap_is_normalized=args.memmap_is_normalized,
     )
     return cfg, smoke
 

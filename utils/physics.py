@@ -4,34 +4,43 @@
 (Models/WeatherGFT*.py, Models/PredFormerGFT*.py, Models/dev/WeatherGFT_3.py).
 В отличие от старых копий:
 
-  * Сетка параметризуется через `Grid` (любые H, W; не hardcoded module-globals).
-  * Буферы регистрируются через `nn.Module.register_buffer` — корректно
-    переезжают на GPU и попадают в `state_dict`.
-  * Чистый `PurePDEKernel` без обучаемых Conv2d/BatchNorm — для бейзлайнов
-    и для residual-метрик «физика vs ERA5».
-  * Граничные условия (`periodic` / `reflect`) выставляются явно.
-  * Все физические константы — атрибуты класса, видны в `repr`.
+  * Сетка параметризуется через :class:`Grid` (любые H, W; не hardcoded
+    module-globals; широты — через ``lat_range_deg``).
+  * Буферы регистрируются через ``nn.Module.register_buffer`` — корректно
+    переезжают на GPU и попадают в ``state_dict``.
+  * Чистый :class:`PurePDEKernel` без обучаемых Conv2d/BatchNorm — для
+    бейзлайнов и для residual-метрик «физика vs ERA5».
+  * Граничные условия (``periodic`` / ``reflect`` / ``replicate``)
+    выставляются явно для каждой оси.
+  * Все физические константы — атрибуты класса, видны в ``repr``.
 
-Что НЕ изменено по сравнению со старой физикой (чтобы сохранить численную
-эквивалентность baseline-у):
-  * Стенсили FD-4 и WENO-5 — байт-в-байт из оригинала.
-  * Гидростатика `z_t = integral_z(-R / p * t_t)` использует `R=8.314` как
-    в оригинале (см. open question в docs/physics.md о R vs R_d).
-  * Constant-Coriolis `f=7.29e-5` сохранён как один из режимов (см. также
-    `coriolis='beta_plane'` и `coriolis='spherical'`).
-  * Magnus-формула для q_s с `scale_tensor(-3.47, 3.01)` clipping’ом.
+**Изменения семантики по сравнению со старой физикой** (см. CHANGELOG):
 
-Этот модуль не импортируется production-моделями автоматически — рефакторинг
-`Models/*GFT*.py` для использования `utils.physics` оставлен как отдельный
-коммит, чтобы избежать риска поломки уже обученных чекпоинтов.
+  * Coriolis: везде ``f = 2·Ω·sin(...)`` (в старой физике было ``f = Ω``
+    без множителя 2 в constant- и beta_plane-вариантах).
+  * Гидростатика: дефолт ``R_d = 287 Дж/(кг·К)`` (per-mass), не универсальная
+    ``R = 8.314``. Старое поведение восстанавливается флагом
+    ``use_universal_R=True``.
+  * Температурная tendency: дефолт ``adiabatic_omega``
+    ``dT/dt = R_d·T·ω/(c_p·p)``, не сломанная ``(Q − z_z·w)/c_p`` с
+    ``Q = −L·z_z·w``. Старая формула — ``t_t_formulation='legacy_paper'``.
+  * Magnus saturation работает в SI: ``e_s`` в Па, ``p`` в Па.
+  * Boundary ``'periodic'`` теперь настоящее периодическое замыкание (на
+    оси W — единственной физически цикличной); cat-pad-поведение, ранее
+    ошибочно звавшееся ``'periodic'``, переименовано в ``'replicate'``.
+
+Старая физика байт-в-байт сохранена в :mod:`utils.old_physics` для регрессии
+чекпоинтов; новые модели должны использовать только этот модуль.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Literal
 
 import torch
+import torch.fft
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -50,10 +59,13 @@ class GridConfig:
         pressure_levels: давления в гПа, по умолчанию ERA5-13 уровней.
         pixel_z_values: межуровневые расстояния по давлению в гПа.
         radius: радиус Земли в метрах.
-        lat_scheme: 'linear_minus90_90' — torch.linspace(-90, 90, H+2)[1:-1]
-            (как в PredFormerGFT.py); 'arange' — старая формула из
-            WeatherGFT.py (90 - j * 180/(H+1)). На равномерной сетке оба дают
-            идентичные значения; разница только при неравномерном lat_t.
+        lat_range_deg: (low, high) широт в градусах. Сетка строится как
+            ``linspace(low, high, H+2)[1:-1]`` (без крайних точек). Дефолт
+            ``(-90, 90)`` соответствует глобальной сетке без полюсов. Для
+            региональных кропов (например USA ≈ 24°N..56°N — см.
+            ``utils.regions.USA_CROP``) передавайте свои значения, чтобы
+            ``pixel_x``, ``pixel_y`` и Coriolis-буферы соответствовали
+            реальным широтам данных.
     """
 
     H: int
@@ -75,11 +87,13 @@ class GridConfig:
     )
     pixel_z_values: tuple[int, ...] = (50, 50, 50, 50, 50, 75, 100, 100, 100, 125, 112, 75, 75)
     radius: float = 6371.0 * 1000.0
-    lat_scheme: Literal["linear_minus90_90", "arange"] = "linear_minus90_90"
+    lat_range_deg: tuple[float, float] = (-90.0, 90.0)
 
 
 class Grid(nn.Module):
-    """Coordinate-буферы как nn.Module: `pixel_x`, `pixel_y`, `pixel_z`, `M_z`, `pressure`, `latitudes`.
+    """Coordinate-буферы как nn.Module.
+
+    Регистрирует `pixel_x`, `pixel_y`, `pixel_z`, `M_z`, `pressure`, `latitudes`.
 
     Registered buffers (попадают в state_dict и переезжают через `.to(device)`):
         * `latitudes`: (H,) — широты в радианах, без полюсов.
@@ -88,9 +102,10 @@ class Grid(nn.Module):
         * `pressure`: (1, P, 1, 1) — давления в Па (×100 от гПа).
         * `pixel_z`: (1, P, 1, 1) — Δp между уровнями в гПа.
         * `M_z`: (P, P) — нижнетреугольная для вертикального интегрирования.
-        * `f_constant`: (1,) — `2 * Ω * sin(45°)` ≈ 1.03e-4 (на случай константного Coriolis).
-        * `f_beta_plane`: (1, 1, H, 1) — `f0 + β·R·φ` (beta-plane).
-        * `f_spherical`: (1, 1, H, 1) — `2 * Ω * sin(φ)` (корректное сферическое).
+        * `f_constant`: (1,) — `2·Ω·sin(45°)` ≈ 1.03e-4 (mid-latitude скаляр).
+        * `f_beta_plane`: (1, 1, H, 1) — `2·Ω·sin(45°) + β·R·φ` (beta-plane
+          вокруг 45°). NB: f0 — это `2·Ω·sin(45°)`, а не `Ω`; см. CHANGELOG.
+        * `f_spherical`: (1, 1, H, 1) — `2·Ω·sin(φ)` (полное сферическое).
     """
 
     def __init__(self, config: GridConfig):
@@ -98,17 +113,23 @@ class Grid(nn.Module):
         self.config = config
         H, W = config.H, config.W
 
-        if config.lat_scheme == "linear_minus90_90":
-            latitudes_deg = torch.linspace(-90.0, 90.0, steps=H + 2)[1:-1]
-        else:  # 'arange'
-            lat_t = torch.arange(start=0, end=H + 2).float()
-            latitudes_deg = 90.0 - lat_t * 180.0 / float(H + 2 - 1)
-            latitudes_deg = latitudes_deg[1:-1]
+        lat_low, lat_high = config.lat_range_deg
+        if not (-90.0 <= lat_low < lat_high <= 90.0):
+            raise ValueError(
+                f"Invalid lat_range_deg {config.lat_range_deg!r}: expected "
+                "(low, high) with -90 ≤ low < high ≤ 90."
+            )
+        # linspace(low, high, H+2)[1:-1] — равномерная сетка широт в указанном
+        # диапазоне без крайних точек.
+        latitudes_deg = torch.linspace(lat_low, lat_high, steps=H + 2)[1:-1]
 
         latitudes = latitudes_deg / 180.0 * torch.pi  # (H,)
         c_lats = 2 * torch.pi * config.radius * torch.cos(latitudes)
         pixel_x = (c_lats / W).reshape(1, 1, H, 1)
-        pixel_y = torch.tensor([torch.pi * config.radius / (H + 1)])
+        # pixel_y соответствует длине одного шага широты в метрах:
+        # (high - low) [deg] / (H + 1) * π/180 * R.
+        lat_span_rad = (lat_high - lat_low) / 180.0 * torch.pi
+        pixel_y = torch.tensor([lat_span_rad * config.radius / (H + 1)])
 
         pressure_hpa = torch.tensor(config.pressure_levels, dtype=torch.float32)
         pressure = (pressure_hpa * 100.0).reshape(1, -1, 1, 1)  # Па
@@ -121,12 +142,15 @@ class Grid(nn.Module):
                 if i <= j:
                     M_z[i, j] = pixel_z[0, j, 0, 0]
 
-        # Coriolis variants
+        # Coriolis variants. Все используют один и тот же `omega`; во всех
+        # вариантах множитель 2 присутствует (f = 2Ω·sin(φ) с разными
+        # приближениями по широте). См. docstring класса.
         omega = 7.2921e-5  # рад/с
-        f_constant = torch.tensor([2 * omega * torch.sin(torch.tensor(torch.pi / 4))])  # f на 45°
-        # Beta-plane: y = R * φ
+        f_mid_latitude = 2 * omega * torch.sin(torch.tensor(torch.pi / 4))  # f0 = 2Ω·sin(45°)
+        f_constant = f_mid_latitude.reshape(1)
+        # Beta-plane: f ≈ f0 + β·y, где f0 = 2Ω·sin(45°), y = R·φ.
         y_coords = config.radius * latitudes
-        f_beta_plane = (7.29e-5 + 1.6e-11 * y_coords).reshape(1, 1, H, 1)
+        f_beta_plane = (f_mid_latitude + 1.6e-11 * y_coords).reshape(1, 1, H, 1)
         # Spherical: f = 2Ω sin φ
         f_spherical = (2 * omega * torch.sin(latitudes)).reshape(1, 1, H, 1)
 
@@ -141,7 +165,11 @@ class Grid(nn.Module):
         self.register_buffer("f_spherical", f_spherical)
 
     def extra_repr(self) -> str:
-        return f"H={self.config.H}, W={self.config.W}, P={len(self.config.pressure_levels)}, lat_scheme={self.config.lat_scheme!r}"
+        return (
+            f"H={self.config.H}, W={self.config.W}, "
+            f"P={len(self.config.pressure_levels)}, "
+            f"lat_range_deg={self.config.lat_range_deg!r}"
+        )
 
 
 # =============================================================================
@@ -165,53 +193,80 @@ def integral_z(field: torch.Tensor, M_z: torch.Tensor) -> torch.Tensor:
     return out.reshape(B, P, H, W)
 
 
+BoundaryMode = Literal["periodic", "reflect", "replicate"]
+
+
 class FiniteDifference(nn.Module):
     """Центральные разности 4-го порядка `[1, -8, 0, 8, -1] / 12`.
 
     Параметры:
         grid: объект :class:`Grid` с буферами `pixel_x`, `pixel_y`, `pixel_z`.
-        boundary_x: `'periodic'` (cat last2 + first2) или `'reflect'` (F.pad).
-        boundary_y: то же для axis=H.
-        boundary_z: то же для axis=P.
+        boundary_x: один из 'periodic' / 'reflect' / 'replicate' для оси W (lon).
+            Дефолт 'periodic' — долгота циклична.
+        boundary_y: то же для оси H (lat). Дефолт 'replicate' — широта не
+            циклична, а 'reflect' через полюс физически бессмыслен.
+        boundary_z: то же для оси P (pressure). Дефолт 'replicate'; 'periodic'
+            запрещён (давление не цикличное).
 
-    Не имеет обучаемых параметров.
+    Семантика опций:
+        * 'periodic' — настоящая периодика: cat(last2, …, first2) на циклической
+          оси (lon). Для lat и pressure возможно, но физически интерпретируется
+          как замыкание через полюс/верх → используйте осознанно.
+        * 'reflect' — F.pad(..., mode='reflect'): отражение **через** границу,
+          не дублируя крайнюю точку.
+        * 'replicate' — cat((:2, …, -2:)): дублирование первых/последних строк.
+          В старой физике это поведение ошибочно называлось 'periodic'.
     """
 
     def __init__(
         self,
         grid: Grid,
-        boundary_x: Literal["periodic", "reflect"] = "periodic",
-        boundary_y: Literal["periodic", "reflect"] = "periodic",
-        boundary_z: Literal["periodic", "reflect"] = "periodic",
+        boundary_x: BoundaryMode = "periodic",
+        boundary_y: BoundaryMode = "replicate",
+        boundary_z: BoundaryMode = "replicate",
     ):
         super().__init__()
+        if boundary_z == "periodic":
+            raise ValueError(
+                "boundary_z='periodic' physically meaningless: pressure axis is not cyclic. "
+                "Use 'replicate' or 'reflect'."
+            )
         self.grid = grid
         self.boundary_x = boundary_x
         self.boundary_y = boundary_y
         self.boundary_z = boundary_z
 
     @staticmethod
-    def _pad_2d(field: torch.Tensor, dim: int, boundary: str) -> torch.Tensor:
-        """Добавить по 2 ячейки с каждой стороны вдоль `dim` (2 или 3)."""
+    def _pad_2d(field: torch.Tensor, dim: int, boundary: BoundaryMode) -> torch.Tensor:
+        """Добавить по 2 ячейки с каждой стороны вдоль `dim` (2 или 3).
+
+        Args:
+            field: тензор формы ``(B, C, H, W)``.
+            dim: 2 (lat) или 3 (lon).
+            boundary: см. :class:`FiniteDifference`.
+
+        Returns:
+            Поле, расширенное по 2 точки с каждой стороны.
+        """
+        if dim not in (2, 3):
+            raise ValueError(f"Unsupported dim={dim}")
         if boundary == "periodic":
-            # Для periodic по lon (dim=3) cat -2: и :2; по lat (dim=2) cat :2 и -2:
-            # см. WeatherGFT.py:58-60 (dim=3) и L80-82 (dim=2).
+            # Настоящее периодическое замыкание: первые 2 точки добавляются
+            # в конец, последние 2 — в начало.
             if dim == 3:
                 return torch.cat((field[:, :, :, -2:], field, field[:, :, :, :2]), dim=3)
-            elif dim == 2:
-                return torch.cat((field[:, :, :2], field, field[:, :, -2:]), dim=2)
-            else:
-                raise ValueError(f"Unsupported dim={dim}")
-        elif boundary == "reflect":
-            # F.pad берёт пары снизу-вверх по dim. (left, right, top, bottom).
+            return torch.cat((field[:, :, -2:], field, field[:, :, :2]), dim=2)
+        if boundary == "reflect":
+            # F.pad: (left, right, top, bottom).
             if dim == 3:
                 return F.pad(field, pad=(2, 2, 0, 0), mode="reflect")
-            elif dim == 2:
-                return F.pad(field, pad=(0, 0, 2, 2), mode="reflect")
-            else:
-                raise ValueError(f"Unsupported dim={dim}")
-        else:
-            raise ValueError(f"Unknown boundary {boundary!r}")
+            return F.pad(field, pad=(0, 0, 2, 2), mode="reflect")
+        if boundary == "replicate":
+            # Дублирование крайних строк (раньше ошибочно звалось periodic).
+            if dim == 3:
+                return torch.cat((field[:, :, :, :2], field, field[:, :, :, -2:]), dim=3)
+            return torch.cat((field[:, :, :2], field, field[:, :, -2:]), dim=2)
+        raise ValueError(f"Unknown boundary {boundary!r}")
 
     def d_x(self, field: torch.Tensor) -> torch.Tensor:
         """∂f/∂λ (along W, axis=3) — FD-4 / pixel_x(lat)."""
@@ -229,7 +284,14 @@ class FiniteDifference(nn.Module):
         return out / self.grid.pixel_x
 
     def d_y(self, field: torch.Tensor) -> torch.Tensor:
-        """∂f/∂φ (along H, axis=2) — FD-4 / pixel_y."""
+        """∂f/∂y (along H, axis=2) — FD-4 / pixel_y.
+
+        NB: стенсиль ``[-1, 8, 0, -8, 1]/12`` — отрицательный стандартный FD-4,
+        потому что в нашем массиве индекс ``j`` растёт **к югу** (поле lat
+        упорядочено high→low), а y-координата (метров) растёт к северу. Этот
+        знак сохранён байт-в-байт из оригинальной физики, чтобы новая семья
+        давала те же численные значения на тех же входах.
+        """
         B, C, H, W = field.shape
         kernel = torch.zeros([1, 1, 5, 1], device=field.device, dtype=field.dtype)
         kernel[0, 0, 0] = -1
@@ -244,14 +306,18 @@ class FiniteDifference(nn.Module):
         return out / self.grid.pixel_y
 
     def d_z(self, field: torch.Tensor) -> torch.Tensor:
-        """∂f/∂p (along P, axis=1) — FD-4 / pixel_z."""
+        """∂f/∂p (along P, axis=1) — FD-4 / pixel_z.
+
+        boundary_z='periodic' запрещён в __init__; здесь поддерживаются
+        'replicate' (старое cat-pad поведение) и 'reflect'.
+        """
         kernel = torch.zeros([1, 1, 5, 1, 1], device=field.device, dtype=field.dtype)
         kernel[0, 0, 0] = -1
         kernel[0, 0, 1] = 8
         kernel[0, 0, 3] = -8
         kernel[0, 0, 4] = 1
 
-        if self.boundary_z == "periodic":
+        if self.boundary_z == "replicate":
             padded = torch.cat((field[:, :2], field, field[:, -2:]), dim=1)
         elif self.boundary_z == "reflect":
             padded = F.pad(field, pad=(0, 0, 0, 0, 2, 2), mode="reflect")
@@ -271,39 +337,56 @@ class WENO5(nn.Module):
     Параметры:
         grid: :class:`Grid`.
         epsilon: стабилизатор знаменателя ω-весов.
-        boundary: `'periodic'` или `'reflect'`.
+        boundary_x: 'periodic' / 'reflect' / 'replicate' для оси W (lon).
+            Дефолт 'periodic'.
+        boundary_y: то же для оси H (lat). Дефолт 'replicate'.
+        boundary_z: 'replicate' или 'reflect' для оси P (pressure); 'periodic'
+            запрещён (давление не цикличное). Дефолт 'replicate'.
     """
 
     def __init__(
         self,
         grid: Grid,
         epsilon: float = 1e-6,
-        boundary: Literal["periodic", "reflect"] = "reflect",
-        boundary_z: Literal["periodic", "reflect"] = "periodic",
+        boundary_x: BoundaryMode = "periodic",
+        boundary_y: BoundaryMode = "replicate",
+        boundary_z: BoundaryMode = "replicate",
     ):
         super().__init__()
+        if boundary_z == "periodic":
+            raise ValueError(
+                "boundary_z='periodic' physically meaningless: pressure axis is not cyclic."
+            )
         self.grid = grid
         self.epsilon = epsilon
-        self.boundary = boundary
+        self.boundary_x = boundary_x
+        self.boundary_y = boundary_y
         self.boundary_z = boundary_z
 
-    def _weno5_flux(self, u: torch.Tensor) -> torch.Tensor:
+    def _weno5_flux(self, u: torch.Tensor, boundary: BoundaryMode) -> torch.Tensor:
         eps = self.epsilon
-        if self.boundary == "periodic":
+        if boundary == "periodic":
             u_m2 = torch.roll(u, shifts=2, dims=-1)
             u_m1 = torch.roll(u, shifts=1, dims=-1)
             u_0 = u
             u_p1 = torch.roll(u, shifts=-1, dims=-1)
             u_p2 = torch.roll(u, shifts=-2, dims=-1)
-        elif self.boundary == "reflect":
+        elif boundary == "reflect":
             u_pad = F.pad(u, pad=(2, 2), mode="reflect")
             u_m2 = u_pad[..., 0:-4]
             u_m1 = u_pad[..., 1:-3]
             u_0 = u_pad[..., 2:-2]
             u_p1 = u_pad[..., 3:-1]
             u_p2 = u_pad[..., 4:]
+        elif boundary == "replicate":
+            u_pad = F.pad(u, pad=(2, 2), mode="replicate")
+            u_m2 = u_pad[..., 0:-4]
+            u_m1 = u_pad[..., 1:-3]
+            u_0 = u_pad[..., 2:-2]
+            u_p1 = u_pad[..., 3:-1]
+            u_p2 = u_pad[..., 4:]
         else:
-            raise ValueError(f"Unknown boundary {self.boundary!r}")
+            raise ValueError(f"Unknown boundary {boundary!r}")
 
         f1 = (2 * u_m2 - 7 * u_m1 + 11 * u_0) / 6.0
         f2 = (-u_m1 + 5 * u_0 + 2 * u_p1) / 6.0
@@ -320,11 +403,16 @@ class WENO5(nn.Module):
 
         return (a1 * f1 + a2 * f2 + a3 * f3) / asum
 
-    def _weno_derivative(self, u: torch.Tensor, dx: torch.Tensor) -> torch.Tensor:
-        flux_iphalf = self._weno5_flux(u)
-        if self.boundary == "periodic":
+    def _weno_derivative(
+        self, u: torch.Tensor, dx: torch.Tensor, boundary: BoundaryMode
+    ) -> torch.Tensor:
+        flux_iphalf = self._weno5_flux(u, boundary)
+        if boundary == "periodic":
             flux_imhalf = torch.roll(flux_iphalf, shifts=1, dims=-1)
-        else:  # reflect
+        else:
+            # reflect/replicate: на левой границе используем сам flux_iphalf[0]
+            # (one-sided), затем сдвинутый ряд. Та же асимметрия, что в оригинале;
+            # см. docs/physics.md.
             flux_imhalf = flux_iphalf.clone()
             flux_imhalf[..., 1:] = flux_iphalf[..., :-1]
             flux_imhalf[..., 0] = flux_iphalf[..., 0]
@@ -337,7 +425,7 @@ class WENO5(nn.Module):
         B, C, H, W = field.shape
         flat = field.reshape(B * C * H, W)
         dx_flat = self.grid.pixel_x.expand(B, C, H, 1).reshape(B * C * H)
-        deriv = self._weno_derivative(flat, dx_flat)
+        deriv = self._weno_derivative(flat, dx_flat, self.boundary_x)
         return deriv.reshape(B, C, H, W)
 
     def d_y(self, field: torch.Tensor) -> torch.Tensor:
@@ -345,21 +433,23 @@ class WENO5(nn.Module):
         perm = field.permute(0, 1, 3, 2)
         flat = perm.reshape(B * C * W, H)
         dy = self.grid.pixel_y
-        deriv = self._weno_derivative(flat, dy)
+        deriv = self._weno_derivative(flat, dy, self.boundary_y)
         return deriv.reshape(B, C, W, H).permute(0, 1, 3, 2)
 
     def d_z(self, field: torch.Tensor) -> torch.Tensor:
-        """FD-4 по давлению (как в оригинале PredFormerGFT.py)."""
+        """FD-4 по давлению; 'periodic' по pressure запрещён в __init__."""
         kernel = torch.zeros([1, 1, 5, 1, 1], device=field.device, dtype=field.dtype)
         kernel[0, 0, 0] = -1
         kernel[0, 0, 1] = 8
         kernel[0, 0, 3] = -8
         kernel[0, 0, 4] = 1
 
-        if self.boundary_z == "periodic":
+        if self.boundary_z == "replicate":
             padded = torch.cat((field[:, :2], field, field[:, -2:]), dim=1)
-        else:
+        elif self.boundary_z == "reflect":
             padded = F.pad(field, pad=(0, 0, 0, 0, 2, 2), mode="reflect")
+        else:
+            raise ValueError(f"Unknown boundary_z {self.boundary_z!r}")
 
         out = F.conv3d(padded.unsqueeze(1), kernel) / 12.0
         return out.squeeze(1) / self.grid.pixel_z
@@ -399,15 +489,33 @@ class PurePDEKernel(nn.Module):
     Параметры:
         grid: :class:`Grid`.
         stencil: ``'fd4'`` — центральные разности; ``'weno5'`` — Jiang-Shu.
-        coriolis: ``'constant'`` (f=7.29e-5), ``'beta_plane'`` (f0+β·y),
-            ``'spherical'`` (2Ω sin φ).
+        coriolis: ``'constant'`` (f = 2Ω·sin(45°) ≈ 1.03e-4),
+            ``'beta_plane'`` (f0 = 2Ω·sin(45°), плюс β·R·φ),
+            ``'spherical'`` (f = 2Ω·sin(φ)).
         block_dt: шаг Euler-интегратора в секундах.
         time_scheme: ``'euler'`` или ``'rk4'``.
-        boundary_horiz: для FD/WENO по horizontal axes.
-        boundary_z: вертикальная.
+        boundary_x: для FD/WENO по оси W (lon). Дефолт 'periodic' — долгота
+            циклична.
+        boundary_y: то же для оси H (lat). Дефолт 'replicate' — широта не
+            циклична (через полюс данные не замкнуты).
+        boundary_z: то же для оси P (pressure). 'periodic' запрещён.
+            Дефолт 'replicate'.
         consts: :class:`PhysicsConstants`.
-        use_R_d_in_hydrostatic: если True — заменить ``R=8.314`` на ``R_d=287``
-            в гидростатике (фикс one из open questions в docs/physics.md).
+        use_universal_R: если True — использовать ``R=8.314 Дж/(моль·К)`` в
+            гидростатике вместо ``R_d=287 Дж/(кг·К)``. Дефолт False → R_d.
+            Это opt-in для регрессии старой физики (Models/WeatherGFT.py и
+            Models/PredFormerGFT.py использовали универсальную, что было
+            численной ошибкой ~34× в z-tendency).
+        t_t_formulation: формула температурной тенденции.
+
+            * ``'adiabatic_omega'`` (default, физически корректно):
+              ``dT/dt = R_d·T·ω/(c_p·p) − u·t_x − v·t_y − w·t_z``,
+              где ``ω`` = `dp/dt` в Pa/s, получается из ``w·100`` (legacy
+              ``w`` имеет единицы hPa/s, см. continuity).
+            * ``'legacy_paper'``: ``(Q − z_z·w)/c_p − adv`` с
+              ``Q = −L·z_z·w`` — дословно eq. (17)-(18) WeatherGFT paper.
+              Известно даёт overflow в первом substep (см.
+              ``tools/diagnose_first_substep.py``). Доступно для регрессии.
     """
 
     def __init__(
@@ -416,11 +524,19 @@ class PurePDEKernel(nn.Module):
         stencil: Literal["fd4", "weno5"] = "fd4",
         coriolis: Literal["constant", "beta_plane", "spherical"] = "constant",
         block_dt: float = 300.0,
-        time_scheme: Literal["euler", "rk4"] = "euler",
-        boundary_horiz: Literal["periodic", "reflect"] = "periodic",
-        boundary_z: Literal["periodic", "reflect"] = "periodic",
+        time_scheme: Literal["euler", "rk4", "ssp_rk3", "semi_implicit"] = "euler",
+        boundary_x: BoundaryMode = "periodic",
+        boundary_y: BoundaryMode = "replicate",
+        boundary_z: BoundaryMode = "replicate",
         consts: PhysicsConstants | None = None,
-        use_R_d_in_hydrostatic: bool = False,
+        use_universal_R: bool = False,
+        t_t_formulation: Literal["adiabatic_omega", "legacy_paper"] = "adiabatic_omega",
+        hyperdiffusion: bool = False,
+        hyperdiff_tau_hours: float = 6.0,
+        polar_filter: bool = False,
+        polar_filter_lat_deg: float = 60.0,
+        advection_form: Literal["advective", "flux"] = "advective",
+        w_diagnostic: Literal["plain", "mass_consistent"] = "plain",
     ):
         super().__init__()
         self.grid = grid
@@ -429,16 +545,172 @@ class PurePDEKernel(nn.Module):
         self.block_dt = block_dt
         self.time_scheme = time_scheme
         self.consts = consts if consts is not None else PhysicsConstants()
-        self.use_R_d_in_hydrostatic = use_R_d_in_hydrostatic
+        self.use_universal_R = use_universal_R
+        if t_t_formulation not in ("adiabatic_omega", "legacy_paper"):
+            raise ValueError(f"Unknown t_t_formulation {t_t_formulation!r}")
+        self.t_t_formulation = t_t_formulation
 
         if stencil == "fd4":
             self.diff = FiniteDifference(
-                grid, boundary_x=boundary_horiz, boundary_y=boundary_horiz, boundary_z=boundary_z
+                grid, boundary_x=boundary_x, boundary_y=boundary_y, boundary_z=boundary_z
             )
         elif stencil == "weno5":
-            self.diff = WENO5(grid, boundary=boundary_horiz, boundary_z=boundary_z)
+            self.diff = WENO5(
+                grid, boundary_x=boundary_x, boundary_y=boundary_y, boundary_z=boundary_z
+            )
         else:
             raise ValueError(f"Unknown stencil {stencil!r}")
+
+        # ∇⁴-гипердиффузия — НЕЯВНЫЙ зональный спектральный фильтр
+        # (анти-алиасинг, scale-selective замена scale_diff).
+        #
+        # БАГ-фикс (B1): прежняя реализация — ЯВНЫЙ −K4·∇⁴ с единым K4,
+        # калиброванным на самой КРУПНОЙ ячейке. Т.к. собств. значение ∇⁴
+        # ∝ 1/Δx⁴, на полюсе (Δx ~×10 мельче) явный множитель
+        # 1−K4·k⁴·dt ≈ −172 → усиление 2Δx-моды ×172/шаг вместо демпфирования
+        # (явная схема нестабильна за пределом K4·k⁴·dt<2). Замена: неявный
+        # спектр. фильтр rfft по долготе, множитель
+        #   1/(1 + (dt/τ)·((2−2cos kx)/4)²)  ∈ (0,1]
+        # — БЕЗУСЛОВНО устойчив при любых Δx/dt; нормировка на Найквист (÷4)
+        # делает его Δx-независимым (одинаков на всех широтах), 2Δx-мода
+        # гаснет с e-folding≈τ, крупный масштаб (kx→0) не тронут.
+        self.hyperdiffusion = hyperdiffusion
+        self.hyperdiff_tau_hours = hyperdiff_tau_hours
+        if hyperdiffusion:
+            W = self.grid.config.W
+            tau_s = hyperdiff_tau_hours * 3600.0
+            kx = torch.fft.rfftfreq(W) * 2.0 * math.pi  # [0, π]
+            sx = (2.0 - 2.0 * torch.cos(kx)) / 4.0  # ∈[0,1], =1 на Найквисте
+            hd_inv = 1.0 / (1.0 + (self.block_dt / tau_s) * sx**2)
+            self.register_buffer("hd_zonal_inv", hd_inv.reshape(1, 1, 1, -1))
+        else:
+            self.hd_zonal_inv = None
+
+        # Полярный Фурье-фильтр: убрать зональные m, чьё эфф. разрешение тоньше,
+        # чем на широте φ0 — снимает полюсную CFL регулярной lat-lon сетки.
+        # Маска (1,1,H,n_freq) фиксирована (зависит только от сетки+φ0),
+        # считается один раз и регистрируется буфером (едет на device/.double()).
+        self.polar_filter = polar_filter
+        self.polar_filter_lat_deg = polar_filter_lat_deg
+        if polar_filter:
+            W = self.grid.config.W
+            n_freq = W // 2 + 1
+            lat = self.grid.latitudes  # (H,) рад
+            cphi = torch.cos(lat).clamp_min(1e-6)
+            phi0 = math.radians(polar_filter_lat_deg)
+            c0 = math.cos(phi0)
+            # poleward |φ|>φ0: m_cut = (W/2)·cosφ/cosφ0; экваториальнее — все m.
+            mcut = torch.clamp(torch.round((W / 2.0) * cphi / c0), min=1.0)
+            keep_all = lat.abs() <= phi0
+            mcut = torch.where(keep_all, torch.full_like(mcut, float(n_freq)), mcut)
+            m_idx = torch.arange(n_freq, dtype=torch.float32)
+            mask = (m_idx.reshape(1, 1, 1, n_freq) <= mcut.reshape(1, 1, -1, 1)).float()
+            self.register_buffer("polar_mask", mask)  # (1,1,H,n_freq)
+        else:
+            self.polar_mask = None
+
+        # E5: консервативная форма адвекции + mass-consistent диагностический w.
+        if advection_form not in ("advective", "flux"):
+            raise ValueError(f"Unknown advection_form {advection_form!r}")
+        if w_diagnostic not in ("plain", "mass_consistent"):
+            raise ValueError(f"Unknown w_diagnostic {w_diagnostic!r}")
+        self.advection_form = advection_form
+        self.w_diagnostic = w_diagnostic
+
+        # E6: semi-implicit. Crank–Nicolson на ЛИНЕЙНОЙ быстрой подсистеме
+        # (PGF ↔ дивергенция ↔ гидростатика) — источник взрыва <1ч; остальное
+        # (адвекция/Кориолис/источники) явно. Линейная связка сводится к
+        # Гельмгольцу для z; решается спектрально на reference-операторе
+        # (постоянные коэффициенты, дважды-периодич. приближение — стандарт SI;
+        # разница с истинным L уходит в явный остаток).
+        if time_scheme == "semi_implicit":
+            self._si_setup()
+
+    def _si_setup(self) -> None:
+        """Вертикально-модовый semi-implicit reference-оператор.
+
+        Линейная быстрая связка z_t|_L = −A·δ, где A (P×P) — РЕАЛЬНЫЙ
+        линейный оператор модели (continuity→adiabatic→hydrostatic) при
+        reference T̄=250 K, построенный по-столбцово (без ручной алгебры).
+        Диагонализуем A = V·diag(λ)·V⁻¹ (вертикальные нормальные моды);
+        исключение u,v даёт по каждой моде m скалярный Гельмгольц
+        (I − a²λ_m∇²). λ_m ≈ c_m² (эквивалентные глубины); λ_m≤0 → α=0
+        (непропагирующая мода, явно).
+        """
+        H, W = self.grid.config.H, self.grid.config.W
+        P = len(self.grid.config.pressure_levels)
+        t_ref = 250.0
+        p_col = self.grid.pressure.reshape(P)  # Па
+        # A[:, j] = −(z_t-отклик на δ = e_j): по-столбцовый зонд линейной цепи.
+        a_mat = torch.zeros(P, P)
+        for j in range(P):
+            d = torch.zeros(1, P, 1, 1)
+            d[0, j, 0, 0] = 1.0
+            w = integral_z(-d, self.grid.M_z)
+            t_t = (
+                self.consts.R_d
+                * t_ref
+                * (100.0 * w)
+                / (self.consts.c_p * p_col.reshape(1, P, 1, 1))
+            )
+            p_hpa = p_col.reshape(1, P, 1, 1) / 100.0
+            z_t = integral_z(-self.R_eff / p_hpa * t_t, self.grid.M_z)
+            a_mat[:, j] = -z_t.reshape(P)
+        # A (cumsum-integral_z) НЕ самосопряжён → дефектен (нет
+        # well-conditioned модального базиса; pinv даёт V·Vinv≠I). Стандартный
+        # фикс: масс-взвешенная симметризация во вертикальном Δp-скаляр-произв.
+        # S=diag(pixel_z): M=S^½·A·S^{-½} (подобие, λ сохраняются), берём
+        # симметричную часть Msym (асимметрия = reference-приближение, уходит
+        # в явный остаток). eigh(Msym) → λ вещ., Q ортонормирован (Q⁻¹=Qᵀ) ⇒
+        # V=S^{-½}Q, Vinv=Qᵀ·S^½, V·Vinv=I ТОЧНО (roundtrip-exact).
+        pz = self.grid.pixel_z.reshape(P).clamp_min(1e-6)
+        s_sqrt = torch.sqrt(pz)
+        s_isqrt = 1.0 / s_sqrt
+        m_mat = (s_sqrt.reshape(P, 1) * a_mat) * s_isqrt.reshape(1, P)
+        m_sym = 0.5 * (m_mat + m_mat.T)
+        lam, q_mat = torch.linalg.eigh(m_sym)
+        # B2-фикс: НЕ clamp_min(0) — это зануляло БЫСТРЕЙШИЕ гравитационные
+        # моды (внешняя c≈309 м/с попадала в λ<0 из-за знака
+        # несамосопряжённой cumsum-вертикали) → _si_solve ≈ identity (no-op).
+        # Физически c_m² = |λ| > 0 (эквивалентные глубины); знак — артефакт
+        # симметризации. Берём |λ|, оставляем ВСЕ моды (вкл. внешнюю).
+        lam = lam.abs()
+        v_mat = s_isqrt.reshape(P, 1) * q_mat  # (P,P) modal→physical
+        v_inv = q_mat.T * s_sqrt.reshape(1, P)  # (P,P) physical→modal
+        self.register_buffer("si_A", a_mat)  # (P,P) z_t|_L = −A·δ
+        self.register_buffer("si_V", v_mat)
+        self.register_buffer("si_Vinv", v_inv)
+        # B4/полюс-фикс: ЗОНАЛЬНО-неявный reference. Прежде Гельмгольц брал
+        # ПОСТОЯННЫЙ Δx_ref=mean(pixel_x) → не «видел» полюсные мелко-Δx
+        # быстрые моды (именно они нарушают CFL) и расходился с физическим
+        # _laplacian в RHS (52% mismatch). Теперь rfft ТОЛЬКО по долготе,
+        # символ ∂²/∂x² = −sx(j)/Δx(j)² ЗАВИСИТ ОТ ШИРОТЫ j (на полюсе Δx
+        # мал → sx велик → сильное неявное демпфирование там, где нужно).
+        # Меридиональная/бароклинная часть гравиволны → явный остаток (Δy
+        # однороден и крупен — не стиффовое направление). a=dt/2.
+        a_cn2 = (0.5 * self.block_dt) ** 2
+        dx_lat = self.grid.pixel_x.reshape(H)  # (H,) м, λ-зависимый
+        kx = torch.fft.rfftfreq(W) * 2.0 * math.pi  # (W//2+1,)
+        sx = (2.0 - 2.0 * torch.cos(kx)).reshape(1, -1) / (
+            dx_lat.reshape(H, 1) ** 2
+        )  # (H, W//2+1) = −символ ∂²/∂x² ≥ 0
+        self.register_buffer("si_sx", sx)  # (H, W//2+1) для _si_xlap (B4-консист.)
+        helm = 1.0 / (1.0 + a_cn2 * lam.reshape(P, 1, 1) * sx.reshape(1, H, -1))
+        self.register_buffer("si_helm_inv", helm)  # (P, H, W//2+1)
+
+    def _si_xlap(self, field: torch.Tensor) -> torch.Tensor:
+        """∂²/∂x² через ТОТ ЖЕ зональный спектральный символ, что и в
+        _si_solve (B4-консистентность CN: один ∇² по обе стороны)."""
+        spec = torch.fft.rfft(field, dim=-1) * (-self.si_sx)
+        return torch.fft.irfft(spec, n=field.shape[-1], dim=-1)
+
+    def _si_solve(self, rhs: torch.Tensor) -> torch.Tensor:
+        """Решить (I − a²A·∂²ₓ) z = rhs: модальная проекция + per-mode
+        зональный (rfft по долготе) Гельмгольц с λ-зависимым Δx."""
+        rhs_m = torch.einsum("pq,bqhw->bphw", self.si_Vinv, rhs)
+        spec = torch.fft.rfft(rhs_m, dim=-1) * self.si_helm_inv
+        z_m = torch.fft.irfft(spec, n=rhs.shape[-1], dim=-1)
+        return torch.einsum("pq,bqhw->bphw", self.si_V, z_m)
 
     # ----- buffer accessors -----
 
@@ -455,14 +727,39 @@ class PurePDEKernel(nn.Module):
 
     @property
     def R_eff(self) -> float:
-        return self.consts.R_d if self.use_R_d_in_hydrostatic else self.consts.R
+        """Газовая постоянная в гидростатике. По умолчанию R_d=287 (per-mass)."""
+        return self.consts.R if self.use_universal_R else self.consts.R_d
 
     # ----- RHS computations (no autograd-breaking) -----
 
+    def _horiz_adv(self, field: torch.Tensor, u: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        """Горизонтальный перенос поля X потоком (u, v).
+
+        ``advective`` — материальная производная −(u·∂ₓX + v·∂_yX)
+        (неконсервативна при ∇·V≠0).
+        ``flux`` (E5) — консервативная дивергентная форма −∇·(VX) =
+        −[∂ₓ(uX)+∂_y(vX)]. Отличается от advective на X·∇·V (для
+        бездивергентного потока совпадают); ∑X сохраняется ТОЧНО на
+        периодической сетке (телескопирование потоков) при любом V —
+        стандартная flux-форма динамического ядра.
+        """
+        if self.advection_form == "advective":
+            return -(u * self.diff.d_x(field) + v * self.diff.d_y(field))
+        return -(self.diff.d_x(u * field) + self.diff.d_y(v * field))
+
     def get_w(self, u: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        """Диагностическая вертикальная скорость w из континуити."""
-        w_z = -(self.diff.d_x(u) + self.diff.d_y(v))
-        return integral_z(w_z, self.grid.M_z)
+        """Диагностическая вертикальная скорость w из континуити.
+
+        ``mass_consistent`` (E5): вычесть p-взвешенное колоночное среднее
+        дивергенции, чтобы ∫(∂ₓu+∂_yv) dp ≈ 0 на каждый столб — нет
+        накопления дрейфа массы по вертикали.
+        """
+        div = self.diff.d_x(u) + self.diff.d_y(v)
+        if self.w_diagnostic == "mass_consistent":
+            pz = self.grid.pixel_z  # (1,P,1,1) hPa
+            div_bar = (div * pz).sum(dim=1, keepdim=True) / pz.sum()
+            div = div - div_bar
+        return integral_z(-div, self.grid.M_z)
 
     def get_uv_dt(
         self,
@@ -472,17 +769,13 @@ class PurePDEKernel(nn.Module):
         z_x: torch.Tensor,
         z_y: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Tendency для (u, v) — momentum equations (неконсервативная форма)."""
-        u_x = self.diff.d_x(u)
-        u_y = self.diff.d_y(u)
+        """Tendency для (u, v) — momentum (горизонт. адвекция через _horiz_adv:
+        advective или flux-форма по self.advection_form)."""
         u_z = self.diff.d_z(u)
-        v_x = self.diff.d_x(v)
-        v_y = self.diff.d_y(v)
         v_z = self.diff.d_z(v)
-
         f = self.f_field
-        u_t = -u * u_x - v * u_y - w * u_z + f * v - z_x
-        v_t = -u * v_x - v * v_y - w * v_z - f * u - z_y
+        u_t = self._horiz_adv(u, u, v) - w * u_z + f * v - z_x
+        v_t = self._horiz_adv(v, u, v) - w * v_z - f * u - z_y
         return u_t, v_t
 
     def get_t_t(
@@ -493,24 +786,56 @@ class PurePDEKernel(nn.Module):
         t: torch.Tensor,
         z_z: torch.Tensor,
     ) -> torch.Tensor:
-        """Tendency температуры (как в WeatherGFT.py:195-202)."""
-        t_x = self.diff.d_x(t)
-        t_y = self.diff.d_y(t)
+        """Tendency температуры.
+
+        Две формулы:
+
+        * ``adiabatic_omega`` (default, физически корректно):
+          ``dT/dt|_adia = R_d·T·ω/(c_p·p)``, где ``ω`` — pressure velocity
+          в Pa/s. В этой реализации `w` приходит из `get_w()` в hPa/s, поэтому
+          ``ω = 100·w``. Минус знаки advection как обычно.
+        * ``legacy_paper`` (eq. (17)-(18) WeatherGFT NeurIPS 2024):
+          ``(Q − z_z·w)/c_p`` с ``Q = −L·z_z·w``. Документально точная,
+          но даёт overflow в первый substep на ERA5.
+        """
         t_z = self.diff.d_z(t)
-        # NB: формула из оригинала, Q = -L · z_z · w → (Q - z_z·w)/c_p
-        # подозрительная (open question в docs/physics.md), но сохранена как есть.
+        adv = self._horiz_adv(t, u, v) - w * t_z
+        if self.t_t_formulation == "adiabatic_omega":
+            omega_pa = 100.0 * w  # w в hPa/s → ω в Pa/s
+            t_t_adia = self.consts.R_d * t * omega_pa / (self.consts.c_p * self.grid.pressure)
+            return t_t_adia + adv
+        # legacy_paper:
         Q = -self.consts.L * z_z * w
-        return (Q - z_z * w) / self.consts.c_p - u * t_x - v * t_y - w * t_z
+        return (Q - z_z * w) / self.consts.c_p + adv
 
     def get_z_t(self, t_t: torch.Tensor) -> torch.Tensor:
-        """Tendency геопотенциала через гидростатику."""
-        z_zt = -self.R_eff / self.grid.pressure * t_t
+        """Tendency геопотенциала через гидростатику.
+
+        ∂z/∂t = -∫ (R_eff / p) · ∂T/∂t dp. Переменная интегрирования p и
+        делитель p должны быть в ОДНИХ единицах. `integral_z` использует
+        `M_z`/`pixel_z` в **hPa**, поэтому делитель тоже берётся в hPa
+        (`grid.pressure` зарегистрирован в Pa → /100). Без этого z_t был
+        бы ×100 меньше корректного (геопотенциал «замерзал»).
+        """
+        pressure_hpa = self.grid.pressure / 100.0
+        z_zt = -self.R_eff / pressure_hpa * t_t
         return integral_z(z_zt, self.grid.M_z)
 
     @staticmethod
     def _avoid_inf(tensor: torch.Tensor, threshold: float = 1.0) -> torch.Tensor:
-        tensor = torch.where(torch.abs(tensor) == 0.0, torch.full_like(tensor, 0.1), tensor)
-        return torch.where(torch.abs(tensor) < threshold, torch.sign(tensor) * threshold, tensor)
+        """Clamp |tensor| ≥ threshold с сохранением знака; нули → +threshold.
+
+        Используется в знаменателях Magnus / уравнения состояния, чтобы не
+        делить на 0. В оригинале WeatherGFT была двухшаговая «защита» сначала
+        нулей на 0.1, потом всего <1 на ±1 — но второй шаг перетирал первый,
+        нули на выходе становились +1, а не +0.1. Здесь схлопнули в один where:
+        нули и значения с |x|<threshold заменяются на `sign(x)·threshold`
+        (для x==0 sign=0, поэтому отдельная ветка явно ставит +threshold).
+        """
+        sign = torch.sign(tensor)
+        # x==0 → +1 (sign==0 → нужен «искусственный» знак); иначе sign(x).
+        sign = torch.where(sign == 0.0, torch.ones_like(sign), sign)
+        return torch.where(torch.abs(tensor) < threshold, sign * threshold, tensor)
 
     @staticmethod
     def _scale_tensor(tensor: torch.Tensor, a: float, b: float) -> torch.Tensor:
@@ -519,12 +844,27 @@ class PurePDEKernel(nn.Module):
         scaled = (tensor - mn) / (mx - mn + 1e-12)
         return scaled * (b - a) + a
 
-    def _get_qs(self, p: torch.Tensor, T: torch.Tensor) -> torch.Tensor:
-        """Saturation specific humidity (Magnus formula с clipping’ом как в оригинале)."""
+    def _get_qs(self, p_pa: torch.Tensor, T: torch.Tensor) -> torch.Tensor:
+        """Saturation specific humidity через Magnus formula.
+
+        Args:
+            p_pa: давление в Па (НЕ гПа). Согласовано с
+                :func:`tools.check_physics_common.magnus_qs` и
+                :attr:`Grid.pressure`.
+            T: температура в K.
+
+        Returns:
+            q_s: безразмерное (кг/кг), та же форма что и p_pa·T.
+
+        Note:
+            `_scale_tensor(arg, -3.47, 3.01)` — clipping из оригинала
+            (WeatherGFT.py:336), сохранён для устойчивости при экстремальных T.
+            `e_s` получается в Па (6.112 hPa × 100 = 611.2 Pa).
+        """
         t_c = T - 273.15
         arg = 17.67 * t_c / self._avoid_inf(t_c + 243.5)
-        e_s = 6.112 * torch.exp(self._scale_tensor(arg, -3.47, 3.01)) * 100
-        return 0.622 * e_s / self._avoid_inf(p - 0.378 * e_s)
+        e_s = 6.112 * torch.exp(self._scale_tensor(arg, -3.47, 3.01)) * 100  # Па
+        return 0.622 * e_s / self._avoid_inf(p_pa - 0.378 * e_s)
 
     def get_q_dt(
         self,
@@ -539,8 +879,6 @@ class PurePDEKernel(nn.Module):
         z_t: torch.Tensor,
     ) -> torch.Tensor:
         """Tendency влажности (Magnus + упрощённый Kuo)."""
-        q_x = self.diff.d_x(q)
-        q_y = self.diff.d_y(q)
         q_z = self.diff.d_z(q)
 
         rho = -1.0 / self._avoid_inf(z_z)
@@ -556,11 +894,49 @@ class PurePDEKernel(nn.Module):
             * q_s
             * t
         )
-        return -(u * q_x + v * q_y + w * q_z) + p_t * delta * F_factor / self._avoid_inf(
-            self.consts.R * t
+        return (
+            self._horiz_adv(q, u, v)
+            - w * q_z
+            + p_t * delta * F_factor / self._avoid_inf(self.consts.R * t)
         )
 
     # ----- Time stepping -----
+
+    def _apply_hyperdiffusion(self, field: torch.Tensor) -> torch.Tensor:
+        """Неявная зональная ∇⁴-гипердиффузия: rfft по долготе × hd_zonal_inv.
+
+        Множитель 1/(1+(dt/τ)·((2−2cos kx)/4)²) ∈ (0,1] — безусловно
+        устойчив (любые Δx/dt), Δx-независим (одинаков на всех широтах),
+        2Δx гаснет с e-folding≈τ, m=0/крупный масштаб не тронут.
+        """
+        spec = torch.fft.rfft(field, dim=-1)
+        spec = spec * self.hd_zonal_inv
+        return torch.fft.irfft(spec, n=field.shape[-1], dim=-1)
+
+    def _apply_polar_filter(self, field: torch.Tensor) -> torch.Tensor:
+        """Зональный спектральный фильтр: rFFT по долготе, обрезать m>m_cut(φ).
+
+        m=0 (зональное среднее) всегда сохраняется. Долгота физически
+        периодична → rFFT точен; маска зависит только от широты.
+        """
+        spec = torch.fft.rfft(field, dim=-1)
+        spec = spec * self.polar_mask  # complex × real-маска (broadcast по B,P)
+        return torch.fft.irfft(spec, n=field.shape[-1], dim=-1)
+
+    def _finalize(self, out: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        """Post-step хук: неявная гипердиффузия (E2) + полярный фильтр (E3)
+        к прогностическим полям.
+
+        Едино для euler/rk4/ssp_rk3/semi_implicit (DRY). Оба — безусловно
+        устойчивые спектральные операторы. Тенденции (`*_t`) и `w` не
+        фильтруются — это диагностика, не состояние.
+        """
+        for k in ("u", "v", "t", "q", "z"):
+            if self.hyperdiffusion:
+                out[k] = self._apply_hyperdiffusion(out[k])
+            if self.polar_filter:
+                out[k] = self._apply_polar_filter(out[k])
+        return out
 
     def rhs(
         self,
@@ -571,6 +947,11 @@ class PurePDEKernel(nn.Module):
         z: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         """Полный RHS: словарь с tendency для всех 5 переменных + диагностика w.
+
+        Гипердиффузия здесь НЕ применяется (B1-фикс): она реализована как
+        безусловно-устойчивый НЕЯВНЫЙ спектральный фильтр в ``_finalize``
+        (post-step), а не явный ``−K4·∇⁴`` в tendency (тот усиливал 2Δx
+        на полюсе ×172/шаг — explicit-нестабильность).
 
         Returns:
             dict с ключами ``u_t``, ``v_t``, ``t_t``, ``q_t``, ``z_t``, ``w``,
@@ -598,19 +979,21 @@ class PurePDEKernel(nn.Module):
         if self.time_scheme == "euler":
             rhs = self.rhs(u, v, t, q, z)
             dt = self.block_dt
-            return {
-                "u": u + dt * rhs["u_t"],
-                "v": v + dt * rhs["v_t"],
-                "t": t + dt * rhs["t_t"],
-                "q": q + dt * rhs["q_t"],
-                "z": z + dt * rhs["z_t"],
-                "w": rhs["w"],
-                "u_t": rhs["u_t"],
-                "v_t": rhs["v_t"],
-                "t_t": rhs["t_t"],
-                "q_t": rhs["q_t"],
-                "z_t": rhs["z_t"],
-            }
+            return self._finalize(
+                {
+                    "u": u + dt * rhs["u_t"],
+                    "v": v + dt * rhs["v_t"],
+                    "t": t + dt * rhs["t_t"],
+                    "q": q + dt * rhs["q_t"],
+                    "z": z + dt * rhs["z_t"],
+                    "w": rhs["w"],
+                    "u_t": rhs["u_t"],
+                    "v_t": rhs["v_t"],
+                    "t_t": rhs["t_t"],
+                    "q_t": rhs["q_t"],
+                    "z_t": rhs["z_t"],
+                }
+            )
         elif self.time_scheme == "rk4":
             dt = self.block_dt
             k1 = self.rhs(u, v, t, q, z)
@@ -635,20 +1018,110 @@ class PurePDEKernel(nn.Module):
                 q + dt * k3["q_t"],
                 z + dt * k3["z_t"],
             )
-            comb = lambda k: (k1[k] + 2 * k2[k] + 2 * k3[k] + k4[k]) / 6.0
-            return {
-                "u": u + dt * comb("u_t"),
-                "v": v + dt * comb("v_t"),
-                "t": t + dt * comb("t_t"),
-                "q": q + dt * comb("q_t"),
-                "z": z + dt * comb("z_t"),
-                "w": k1["w"],
-                "u_t": comb("u_t"),
-                "v_t": comb("v_t"),
-                "t_t": comb("t_t"),
-                "q_t": comb("q_t"),
-                "z_t": comb("z_t"),
-            }
+
+            def comb(key: str) -> torch.Tensor:
+                return (k1[key] + 2 * k2[key] + 2 * k3[key] + k4[key]) / 6.0
+
+            # NB: u_t/v_t/.../z_t — это **combined** RK4-tendency, не raw k1.
+            # w_k1 — диагностическая вертикальная скорость на старте шага (из k1),
+            # отличается от семантики Euler-ветки, где `w` = current-state w.
+            return self._finalize(
+                {
+                    "u": u + dt * comb("u_t"),
+                    "v": v + dt * comb("v_t"),
+                    "t": t + dt * comb("t_t"),
+                    "q": q + dt * comb("q_t"),
+                    "z": z + dt * comb("z_t"),
+                    "w_k1": k1["w"],
+                    "u_t": comb("u_t"),
+                    "v_t": comb("v_t"),
+                    "t_t": comb("t_t"),
+                    "q_t": comb("q_t"),
+                    "z_t": comb("z_t"),
+                }
+            )
+        elif self.time_scheme == "ssp_rk3":
+            # SSP-RK3 (Shu–Osher, 3-stage strong-stability-preserving).
+            # Родной интегратор для WENO-5; область устойчивости включает
+            # отрезок мнимой оси (в отличие от Forward Euler).
+            #   s1 = sⁿ + dt·L(sⁿ)
+            #   s2 = ¾·sⁿ + ¼·s1 + ¼·dt·L(s1)
+            #   sⁿ⁺¹ = ⅓·sⁿ + ⅔·s2 + ⅔·dt·L(s2)
+            dt = self.block_dt
+            keys = ("u", "v", "t", "q", "z")
+            s0 = {"u": u, "v": v, "t": t, "q": q, "z": z}
+            k1 = self.rhs(u, v, t, q, z)
+            s1 = {k: s0[k] + dt * k1[f"{k}_t"] for k in keys}
+            k2 = self.rhs(s1["u"], s1["v"], s1["t"], s1["q"], s1["z"])
+            s2 = {k: 0.75 * s0[k] + 0.25 * s1[k] + 0.25 * dt * k2[f"{k}_t"] for k in keys}
+            k3 = self.rhs(s2["u"], s2["v"], s2["t"], s2["q"], s2["z"])
+            s3 = {k: (s0[k] + 2.0 * s2[k] + 2.0 * dt * k3[f"{k}_t"]) / 3.0 for k in keys}
+            # *_t — эффективный шаговый tendency (X⁺ − Xⁿ)/dt (для лога/residual);
+            # w — диагностика начала шага (k1), как в euler-ветке.
+            eff = {f"{k}_t": (s3[k] - s0[k]) / dt for k in keys}
+            return self._finalize(
+                {
+                    "u": s3["u"],
+                    "v": s3["v"],
+                    "t": s3["t"],
+                    "q": s3["q"],
+                    "z": s3["z"],
+                    "w": k1["w"],
+                    **eff,
+                }
+            )
+        elif self.time_scheme == "semi_implicit":
+            # ЗОНАЛЬНО-неявный Crank–Nicolson. Линейная БЫСТРАЯ
+            # (стиффовая на полюсе) подсистема — только зональная:
+            #   u_t|_L = −∂ₓz ,  z_t|_L = −A·(∂ₓu)
+            # неявно (CN); меридиональная PGF (−∂_yz в v_t), −A·∂_yv,
+            # адвекция/Кориолис/источники/бароклин-остаток — явно (Δy
+            # однороден/крупен → не стиффовое направление). Исключение u из
+            # z-уравнения → зональный Гельмгольц для zⁿ⁺¹:
+            #   (I − a²A·∂²ₓ) zⁿ⁺¹ = zⁿ + dt·N_z − aA(∂ₓu*+∂ₓuⁿ) + a²A·∂²ₓzⁿ
+            # a=dt/2; ∂²ₓ — λ-зависимый зональный символ (_si_solve/_si_xlap,
+            # один и тот же → CN-консистентно, B4).
+            dt = self.block_dt
+            a = 0.5 * dt
+            r = self.rhs(u, v, t, q, z)
+            z_x = self.diff.d_x(z)
+
+            def a_op(field: torch.Tensor) -> torch.Tensor:  # вертикальный A·field
+                return torch.einsum("pq,bqhw->bphw", self.si_A, field)
+
+            dux_n = self.diff.d_x(u)
+            # N = full − L_zonal: убираем зональный PGF из u_t и −A·∂ₓu из z_t;
+            # v_t (вкл. меридион. PGF) и −A·∂_yv остаются в r явно.
+            n_u = r["u_t"] + z_x
+            n_v = r["v_t"]
+            n_z = r["z_t"] + a_op(dux_n)
+            n_t = r["t_t"]
+            n_q = r["q_t"]
+            u_star = u + dt * n_u
+            v_star = v + dt * n_v
+            dux_star = self.diff.d_x(u_star)
+            helm_rhs = z + dt * n_z - a * a_op(dux_star + dux_n) + (a * a) * a_op(self._si_xlap(z))
+            z_new = self._si_solve(helm_rhs)
+            z_xn = self.diff.d_x(z_new)
+            u_new = u_star - a * (z_xn + z_x)
+            v_new = v_star
+            t_new = t + dt * n_t
+            q_new = q + dt * n_q
+            return self._finalize(
+                {
+                    "u": u_new,
+                    "v": v_new,
+                    "t": t_new,
+                    "q": q_new,
+                    "z": z_new,
+                    "w": r["w"],
+                    "u_t": (u_new - u) / dt,
+                    "v_t": (v_new - v) / dt,
+                    "t_t": n_t,
+                    "q_t": n_q,
+                    "z_t": (z_new - z) / dt,
+                }
+            )
         else:
             raise ValueError(f"Unknown time_scheme {self.time_scheme!r}")
 

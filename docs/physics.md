@@ -606,9 +606,9 @@ Key flow facts:
 
 3. **`R = 8.314` vs `R_d = 287`** — какая константа физически правильна для уравнения гидростатики `∂z/∂t = -R T_t / p`?
 
-4. **`scale_diff` ad-hoc clipping** — какой физический смысл `diff_ratio = 0.05`? Это эмпирический damping или есть theoretical-основа?
+4. **`scale_diff` ad-hoc clipping** — какой физический смысл `diff_ratio = 0.05`? Это эмпирический damping или есть theoretical-основа? — **Resolved (ablation E2):** `scale_diff` — неселективный по масштабу клиппинг амплитуды; принципиальная замена — scale-selective ∇⁴-гипердиффузия `utils.physics.PurePDEKernel(hyperdiffusion=True)`, K4 калиброван на e-folding моды 2Δx. См. `experiments/E2_hyperdiffusion.md`. `Models/*GFT*.py` не трогается.
 
-5. **WENO-5 + Forward Euler** — для согласования порядков нужен RK3-TVD (Shu–Osher). Стоит ли мигрировать на RK3 в production-PredFormerGFT? Какова стоимость в FLOPs/память (×3 RHS-оценок)?
+5. **WENO-5 + Forward Euler** — для согласования порядков нужен RK3-TVD (Shu–Osher). Стоит ли мигрировать на RK3 в production-PredFormerGFT? Какова стоимость в FLOPs/память (×3 RHS-оценок)? — **Resolved (ablation E1):** SSP-RK3 (Shu–Osher, 3 стадии = ×3 RHS) добавлен как `time_scheme="ssp_rk3"` в `utils.physics.PurePDEKernel`; sanity подтвердил наблюдаемый 3-й порядок (vs Euler 1-й). См. `experiments/E1_ssp_rk3.md`. Миграция production-PredFormerGFT — отдельное решение (чекпоинты), здесь не делается.
 
 6. **Дублирование физического кода между файлами** — выделять в `utils/physics.py` сейчас или ждать стабилизации модели?
 

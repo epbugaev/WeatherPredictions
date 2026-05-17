@@ -1,14 +1,17 @@
 """72-h rollout проверка метода PredFormerGFT: WENO-5 + Forward Euler + beta-plane Coriolis.
 
-Семантика (1:1 с Models/PredFormerGFT.py:207-407, **без** scale_diff и .detach()):
+Геометрия и операторы — через :mod:`utils.old_physics.make_predformergft_ops`,
+семантика физики обновлена (см. CHANGELOG): сломанная `Q = -L·z_z·w` заменена
+на правильную адиабатику `dT/dt|_adia = R_d·T·ω/(c_p·p)`, гидростатика
+использует `R_d` вместо универсальной `R`.
 
     Momentum (conservative form with AMR pseudo-refinement):
         adv_u = ∂(u·u)/∂x + ∂(u·v)/∂y + ∂(u·w)/∂z
         adv_v = ∂(u·v)/∂x + ∂(v·v)/∂y + ∂(v·w)/∂z
         u_t = -adv_u + f_field·v - z_x   (+ eddy_viscosity·∇²u, если включено)
         v_t = -adv_v - f_field·u - z_y   (+ eddy_viscosity·∇²v)
-    Temperature: t_t = (Q - z_z·w)/c_p - u·t_x - v·t_y - w·t_z,  Q = -L·z_z·w
-    Geopotent.:  z_t = integral_z(-R / p · t_t)
+    Temperature: t_t = R_d·T·ω/(c_p·p) - u·t_x - v·t_y - w·t_z, ω = 100·w (hPa/s → Pa/s)
+    Geopotent.:  z_t = integral_z(-R_d / p · t_t)
     Continuity:  w   = integral_z(-(u_x + v_y))
 
 Время: Forward Euler, block_dt=300 s, 12 substep’ов/час, 72 часа.
@@ -35,16 +38,16 @@ if str(REPO_ROOT) not in sys.path:
 
 from tools.check_physics_common import (
     GeometryCPU,
+    adiabatic_temperature_tendency,
     coriolis_beta_plane,
     default_initial_conditions,
     run_72h_rollout,
 )
 from utils.old_physics import make_predformergft_ops
 
-# Физические константы (PredFormerGFT.py:234-238).
-L = 2.5e6
-R = 8.314
-c_p = 1005.0
+# Физические константы — R_d (per-mass) в гидростатике + адиабатика.
+R_D = 287.0  # сухой воздух, J/(kg·K)
+C_P = 1005.0  # теплоёмкость, J/(kg·K)
 
 
 def main() -> None:
@@ -60,8 +63,16 @@ def main() -> None:
     )
     p.add_argument("--H", type=int, default=32)
     p.add_argument("--W", type=int, default=64)
+    p.add_argument(
+        "--lat-range-deg",
+        nargs=2,
+        type=float,
+        default=[-90.0, 90.0],
+        metavar=("LOW", "HIGH"),
+        help="Диапазон широт. Дефолт global. USA-кроп: 24 56.",
+    )
     p.add_argument("--year", type=int, default=2005)
-    p.add_argument("--horizon-hours", type=int, default=72)
+    p.add_argument("--horizon-hours", type=int, default=48)
     p.add_argument("--block-dt-seconds", type=float, default=300.0)
     p.add_argument("--f0", type=float, default=7.29e-5)
     p.add_argument("--beta", type=float, default=1.6e-11)
@@ -78,7 +89,7 @@ def main() -> None:
     device = torch.device("cpu")
     print(f"[init] device={device}, threads={torch.get_num_threads()}")
 
-    geom = GeometryCPU(H=args.H, W=args.W)
+    geom = GeometryCPU(H=args.H, W=args.W, lat_range_deg=tuple(args.lat_range_deg))
     ops = make_predformergft_ops(latents_size=(args.H, args.W))
     d_x = ops.d_x_weno
     d_y = ops.d_y_weno
@@ -101,10 +112,10 @@ def main() -> None:
         v_y = d_y(v)
         w = integral_z(-(u_x + v_y))
 
-        # Spatial derivatives для z (используются в momentum-форсинге и t).
+        # Spatial derivatives для z (используются в momentum-форсинге).
         z_x = d_x(z)
         z_y = d_y(z)
-        z_z = d_z(z)
+        # z_z не нужен: правильная адиабатика использует ω (=100·w), не z_z·w.
 
         # Conservative-form advection (matches PredFormerGFT.py:277-283).
         if args.use_amr:
@@ -121,15 +132,16 @@ def main() -> None:
             u_t = u_t + args.eddy_viscosity * laplacian(u)
             v_t = v_t + args.eddy_viscosity * laplacian(v)
 
-        # Temperature
+        # Temperature: адиабатика R_d·T·ω/(c_p·p) + advection.
         t_x = d_x(t)
         t_y = d_y(t)
         t_z = d_z(t)
-        Q = -L * z_z * w
-        t_t = (Q - z_z * w) / c_p - u * t_x - v * t_y - w * t_z
+        t_t_adia = adiabatic_temperature_tendency(t, w, pressure_pa, r_d=R_D, c_p=C_P)
+        t_t = t_t_adia - u * t_x - v * t_y - w * t_z
 
-        # Hydrostatic z evolution
-        z_zt = -R / pressure_pa * t_t
+        # Hydrostatic z evolution (R_d). integral_z в hPa → делитель в hPa
+        # (pressure_pa/100), иначе z_t ×100 меньше корректного.
+        z_zt = -R_D / (pressure_pa / 100.0) * t_t
         z_t = integral_z(z_zt)
 
         # Humidity (advection-only, без condensation switch)

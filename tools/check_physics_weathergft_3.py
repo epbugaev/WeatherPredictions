@@ -7,8 +7,9 @@ turbulent mixing + radiative cooling + convective precipitation.
         u_t = -u·u_x - v·u_y - w·u_z + f_sph·v - z_x + apply_turbulent_mixing(u)
         v_t = -u·v_x - v·v_y - w·v_z - f_sph·u - z_y + apply_turbulent_mixing(v)
     Temperature:
-        t_t = (Q - z_z·w)/c_p - u·t_x - v·t_y - w·t_z + turb_mix(t) + radiative_cooling + latent_heating
-    Geopotent.:  z_t = integral_z(-R / p · t_t)
+        t_t = R_d·T·ω/(c_p·p) - u·t_x - v·t_y - w·t_z + turb_mix(t) + radiative_cooling + latent_heating,
+        где ω = 100·w (hPa/s → Pa/s).
+    Geopotent.:  z_t = integral_z(-R_d / p · t_t)
     Continuity:  w   = integral_z(-(u_x + v_y))
     Humidity:    q_t = advection + Kuo + turb_mix(q) - precip_rate
     Turbulent mixing: K_h·(∂²/∂x² + ∂²/∂y²) + K_v·∂²/∂z²
@@ -40,6 +41,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from tools.check_physics_common import (
     GeometryCPU,
+    adiabatic_temperature_tendency,
     coriolis_spherical,
     default_initial_conditions,
     magnus_qs,
@@ -48,9 +50,8 @@ from tools.check_physics_common import (
 from utils.old_physics import make_weathergft_ops
 
 # Константы из Models/dev/WeatherGFT_3.py:127-148.
-L = 2.5e6  # Дж/кг
-R = 8.314  # универсальная газовая
-R_d = 287.0  # сухой воздух
+L = 2.5e6  # Дж/кг (для latent_heating)
+R_d = 287.0  # сухой воздух (per-mass)
 c_p = 1005.0  # Дж/(кг·К)
 sigma_sb = 5.67e-8  # Stefan-Boltzmann
 emissivity = 0.7
@@ -72,8 +73,16 @@ def main() -> None:
     )
     p.add_argument("--H", type=int, default=32)
     p.add_argument("--W", type=int, default=64)
+    p.add_argument(
+        "--lat-range-deg",
+        nargs=2,
+        type=float,
+        default=[-90.0, 90.0],
+        metavar=("LOW", "HIGH"),
+        help="Диапазон широт. Дефолт global. USA-кроп: 24 56.",
+    )
     p.add_argument("--year", type=int, default=2005)
-    p.add_argument("--horizon-hours", type=int, default=72)
+    p.add_argument("--horizon-hours", type=int, default=48)
     p.add_argument("--block-dt-seconds", type=float, default=300.0)
     p.add_argument("--offline", action="store_true")
     p.add_argument("--project-name", default="WeatherPredictions")
@@ -82,7 +91,7 @@ def main() -> None:
     device = torch.device("cpu")
     print(f"[init] device={device}, threads={torch.get_num_threads()}")
 
-    geom = GeometryCPU(H=args.H, W=args.W)
+    geom = GeometryCPU(H=args.H, W=args.W, lat_range_deg=tuple(args.lat_range_deg))
     ops = make_weathergft_ops(latents_size=(args.H, args.W))
     d_x = ops.d_x
     d_y = ops.d_y
@@ -91,7 +100,6 @@ def main() -> None:
 
     f_field = coriolis_spherical(geom).to(device)
     pressure_pa = geom.pressure_pa_t.to(device)
-    pressure_hpa = geom.pressure_hpa_t.to(device)
 
     def apply_turbulent_mixing(field: torch.Tensor) -> torch.Tensor:
         """K_h·(∂²/∂x² + ∂²/∂y²) + K_v·∂²/∂z² (dev/WeatherGFT_3.py:190-199)."""
@@ -118,7 +126,7 @@ def main() -> None:
             precip_rate: кг/(м²·с) — отнимается от q.
             latent_heating: К/с — добавляется к t.
         """
-        q_s = torch.maximum(magnus_qs(t_kelvin, pressure_hpa), torch.full_like(q, 1e-6))
+        q_s = torch.maximum(magnus_qs(t_kelvin, pressure_pa), torch.full_like(q, 1e-6))
         rel_hum = q / q_s
         precip_mask = (rel_hum > PRECIP_THRESHOLD).float()
         precip_rate = precip_mask * (q - PRECIP_THRESHOLD * q_s) / args.block_dt_seconds
@@ -145,7 +153,7 @@ def main() -> None:
         q_z = d_z(q)
         z_x = d_x(z)
         z_y = d_y(z)
-        z_z = d_z(z)
+        # z_z не нужен: правильная адиабатика использует ω (=100·w), не z_z·w.
 
         u_mix = apply_turbulent_mixing(u)
         v_mix = apply_turbulent_mixing(v)
@@ -155,21 +163,16 @@ def main() -> None:
         u_t = -u * u_x - v * u_y - w * u_z + f_field * v - z_x + u_mix
         v_t = -u * v_x - v * v_y - w * v_z - f_field * u - z_y + v_mix
 
-        # Temperature: adiabatic + advection + radiation + latent + mixing
-        Q_adiabatic = -L * z_z * w
+        # Temperature: adiabatic R_d·T·ω/(c_p·p) + advection + radiation +
+        # latent heating + turb-mixing.
+        t_t_adia = adiabatic_temperature_tendency(t, w, pressure_pa, r_d=R_d, c_p=c_p)
         rad_cool = radiative_cooling(t)
         precip_rate, latent_heat = convective_precipitation(q, t)
-        t_t = (
-            (Q_adiabatic - z_z * w) / c_p
-            - u * t_x
-            - v * t_y
-            - w * t_z
-            + t_mix
-            + rad_cool
-            + latent_heat
-        )
+        t_t = t_t_adia - u * t_x - v * t_y - w * t_z + t_mix + rad_cool + latent_heat
 
-        z_zt = -R / pressure_pa * t_t
+        # Hydrostatic z evolution (R_d). integral_z в hPa → делитель в hPa
+        # (pressure_pa/100), иначе z_t ×100 меньше корректного.
+        z_zt = -R_d / (pressure_pa / 100.0) * t_t
         z_t = integral_z(z_zt)
 
         q_t = -(u * q_x + v * q_y + w * q_z) + q_mix - precip_rate

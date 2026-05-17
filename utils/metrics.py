@@ -300,28 +300,44 @@ class Metrics:
         clim_time_mean_daily = clim_time_mean_daily.to(gt.device)
         return (weighted_acc_torch(pred - clim_time_mean_daily, gt - clim_time_mean_daily)).tolist()
 
+    # Каналы для RQE в 69-канальном layout’е после variables_list-фильтра
+    # (см. ``tools.check_physics_common.CHANNEL_RANGES``).
+    # Соответствие имя → индекс канала:
+    #   t2m   = 0
+    #   u10   = 1
+    #   v10   = 2
+    #   z500  = 4 + PRESSURE_LEVELS_HPA.index(500) = 4 + 7 = 11
+    #   q700  = пропущено (q не входит в 69 каналов — это derived от r)
+    #   t850  = 17 + PRESSURE_LEVELS_HPA.index(850) = 17 + 10 = 27
+    # Старая версия использовала [37, 24, 0, 11, 2, 66] из неизвестного layout’а;
+    # ниже — пересчитанные индексы для текущего 69-канального layout.
+    _RQE_CHANNELS_69 = (0, 1, 2, 11, 27)  # t2m, u10, v10, z500, t850
+
     def RQE(self, pred: torch.Tensor, gt: torch.Tensor) -> list[list[float]]:
         """Relative Quantile Error на хвостах распределений по выбранным каналам.
 
-        Берёт `pred` и `gt` в z-score, обратно-нормализует через `data_mean/std`,
-        затем считает `top_quantiles_error_torch` на каналах `[37, 24, 0, 11, 2, 66]`
-        (захардкоженный набор: z500, u10, t2m, q700, v10, t850 в текущем layout’е).
+        Принимает z-score `pred`/`gt`, денормализует через `data_mean/std`,
+        затем считает `top_quantiles_error_torch` на каналах
+        :attr:`_RQE_CHANNELS_69` (= t2m, u10, v10, z500, t850 в layout’е после
+        variables_list-фильтра 110→69; см. :data:`tools.check_physics_common.CHANNEL_RANGES`).
 
         Args:
-            pred: z-score предсказание `(B, C, H, W)`.
+            pred: z-score предсказание ``(B, 69, H, W)``.
             gt: z-score эталон той же формы.
 
         Returns:
-            Список `quantile_levels × len(selected_channels)`.
+            Список ``quantile_levels × len(_RQE_CHANNELS_69)``.
         """
+        if pred.shape[1] != 69:
+            raise ValueError(
+                f"Metrics.RQE expects 69-channel input (variables_list-filtered ERA5), "
+                f"got C={pred.shape[1]}. Update _RQE_CHANNELS_69 if layout changed."
+            )
         data_mean = self.data_mean.to(gt.device)
         data_std = self.data_std.to(gt.device)
         pred_real = pred * data_std.view(1, gt.shape[1], 1, 1) + data_mean.view(
             1, gt.shape[1], 1, 1
         )
         gt_real = gt * data_std.view(1, gt.shape[1], 1, 1) + data_mean.view(1, gt.shape[1], 1, 1)
-        return (
-            top_quantiles_error_torch(
-                pred_real[:, [37, 24, 0, 11, 2, 66], :, :], gt_real[:, [37, 24, 0, 11, 2, 66], :, :]
-            )
-        ).tolist()
+        ch = list(self._RQE_CHANNELS_69)
+        return top_quantiles_error_torch(pred_real[:, ch, :, :], gt_real[:, ch, :, :]).tolist()

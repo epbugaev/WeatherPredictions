@@ -100,7 +100,9 @@ def build_optimizer_and_scheduler(
     """Build AdamW with optional LR warmup followed by CosineAnnealingLR.
 
     The original LitModels used ``betas=(0.9, 0.9)`` and ``weight_decay=0.0``;
-    those values are preserved here to maintain numerical parity. The
+    ``betas`` are preserved for numerical parity. ``weight_decay`` defaults to
+    ``0.0`` (parity) but is now read from ``training.weight_decay`` so it can
+    be enabled as an L2 regulariser against the observed overfit. The
     scheduler's ``T_max`` is ``(steps_per_epoch + 1) * max_epoch`` exactly as
     in ``LitModels/basemodel.py``.
 
@@ -115,10 +117,11 @@ def build_optimizer_and_scheduler(
     max_epoch = training_cfg.get("max_epoch", 20)
     warmup_ratio = float(training_cfg.get("warmup_ratio", 0.0))
     warmup_start_factor = float(training_cfg.get("warmup_start_factor", 1e-3))
+    weight_decay = float(training_cfg.get("weight_decay", 0.0))
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=lr,
-        weight_decay=0.0,
+        weight_decay=weight_decay,
         betas=(0.9, 0.9),
         fused=torch.cuda.is_available(),
     )

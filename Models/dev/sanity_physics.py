@@ -64,13 +64,16 @@ def _random_state(B: int, P: int, H: int, W: int, seed: int = 0) -> dict[str, to
 def check_fd4_equivalence(H: int = 32, W: int = 64) -> None:
     """FD-4 operators: utils.physics vs utils.old_physics — должны совпадать.
 
-    Old-версия использует `linear_minus90_90` (через `_build_grid_weathergft_style`
-    с подменой формулы). Чтобы совпало, в new ставим `lat_scheme='arange'`.
+    Old и new строят равномерную lat-сетку (-90..90 без полюсов) и совпадают
+    численно. Граничные условия в new специально выставляем под
+    cat-pad-поведение старой физики (`periodic` для lon, `replicate` для lat/p).
     """
     old = make_weathergft_ops(latents_size=(H, W))
-    grid = Grid(GridConfig(H=H, W=W, lat_scheme="arange")).to(DEVICE)
+    grid = Grid(GridConfig(H=H, W=W)).to(DEVICE)
+    # Используем replicate для y и z, чтобы соответствовать cat-pad-поведению
+    # старой физики (которая называла это 'periodic', но фактически делала replicate).
     new = FiniteDifference(
-        grid, boundary_x="periodic", boundary_y="periodic", boundary_z="periodic"
+        grid, boundary_x="periodic", boundary_y="replicate", boundary_z="replicate"
     )
 
     field = torch.randn(2, 13, H, W, generator=torch.Generator().manual_seed(42), dtype=DTYPE).to(
@@ -94,8 +97,8 @@ def check_fd4_equivalence(H: int = 32, W: int = 64) -> None:
 def check_weno5_equivalence(H: int = 32, W: int = 64) -> None:
     """WENO-5 operators: utils.physics vs utils.old_physics."""
     old = make_predformergft_ops(latents_size=(H, W))
-    grid = Grid(GridConfig(H=H, W=W, lat_scheme="linear_minus90_90")).to(DEVICE)
-    new = WENO5(grid, boundary="reflect", boundary_z="periodic")
+    grid = Grid(GridConfig(H=H, W=W)).to(DEVICE)
+    new = WENO5(grid, boundary_x="periodic", boundary_y="reflect", boundary_z="replicate")
 
     field = torch.randn(2, 13, H, W, generator=torch.Generator().manual_seed(7), dtype=DTYPE).to(
         DEVICE
@@ -118,7 +121,7 @@ def check_weno5_equivalence(H: int = 32, W: int = 64) -> None:
 def check_integral_z_equivalence(H: int = 32, W: int = 64) -> None:
     """integral_z (old vs new), на одной сетке."""
     old = make_weathergft_ops(latents_size=(H, W))
-    grid = Grid(GridConfig(H=H, W=W, lat_scheme="arange")).to(DEVICE)
+    grid = Grid(GridConfig(H=H, W=W)).to(DEVICE)
     from utils.physics import integral_z as new_integral_z
 
     field = torch.randn(2, 13, H, W, generator=torch.Generator().manual_seed(13), dtype=DTYPE).to(
@@ -135,15 +138,16 @@ def check_integral_z_equivalence(H: int = 32, W: int = 64) -> None:
 
 def check_pure_kernel_smoke(H: int, W: int, stencil: str, coriolis: str, time_scheme: str) -> None:
     """PurePDEKernel: один шаг без NaN/Inf, метрики корректной формы."""
-    grid = Grid(GridConfig(H=H, W=W, lat_scheme="linear_minus90_90")).to(DEVICE)
+    grid = Grid(GridConfig(H=H, W=W)).to(DEVICE)
     kernel = PurePDEKernel(
         grid,
         stencil=stencil,
         coriolis=coriolis,
         block_dt=300.0,
         time_scheme=time_scheme,
-        boundary_horiz="periodic" if stencil == "fd4" else "reflect",
-        boundary_z="periodic",
+        boundary_x="periodic",
+        boundary_y="replicate" if stencil == "fd4" else "reflect",
+        boundary_z="replicate",
     ).to(DEVICE)
 
     state = _random_state(B=1, P=13, H=H, W=W, seed=99)
