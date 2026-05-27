@@ -51,6 +51,8 @@ class WeatherBench128V4(WeatherBench128Memmap):
     redundant ``.float()`` cast (the memmap is already float32).
     """
 
+    returns_normalized = False
+
     def _read_x(self, time_idx: int) -> torch.Tensor:
         t = self.x_time_ilst[time_idx]
         with record_function("memmap_read_x"):

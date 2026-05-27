@@ -4,6 +4,7 @@ The native format is a flat ``torch.save`` dict::
 
     {
         "model": state_dict,            # weights only, no ``model.`` prefix
+        "normalize": state_dict,        # optional WeatherNormalize buffers
         "optimizer": optimizer_state,   # optional
         "scheduler": scheduler_state,   # optional
         "scaler": amp_scaler_state,     # optional
@@ -57,6 +58,8 @@ def save_checkpoint(
     global_step: int,
     metric: float,
     config: dict[str, Any],
+    *,
+    normalize: nn.Module | None = None,
 ) -> None:
     """Save a checkpoint in the native flat format.
 
@@ -74,6 +77,7 @@ def save_checkpoint(
         global_step: Total number of optimiser steps taken so far.
         metric: Value of the monitored metric (for filename templating).
         config: Top-level YAML config dict for traceability.
+        normalize: Optional pre-model normalization module to include.
     """
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
 
@@ -85,6 +89,8 @@ def save_checkpoint(
         "metric": metric,
         "config": config,
     }
+    if normalize is not None:
+        payload["normalize"] = normalize.state_dict()
     if optimizer is not None:
         payload["optimizer"] = optimizer.state_dict()
     if scheduler is not None:
@@ -103,6 +109,8 @@ def load_checkpoint(
     scaler: torch.amp.GradScaler | None = None,
     map_location: str | torch.device = "cpu",
     strict: bool = True,
+    *,
+    normalize: nn.Module | None = None,
 ) -> CheckpointMeta:
     """Load a native checkpoint into ``model`` (and optionally optimiser/scheduler).
 
@@ -114,6 +122,7 @@ def load_checkpoint(
         scaler: Optional AMP grad scaler to restore.
         map_location: ``torch.load`` map_location argument.
         strict: ``load_state_dict`` strictness for the model.
+        normalize: Optional normalization module to restore when present.
 
     Returns:
         ``CheckpointMeta`` populated from the checkpoint's metadata.
@@ -125,6 +134,8 @@ def load_checkpoint(
 
     raw_model = model.module if isinstance(model, nn.parallel.DistributedDataParallel) else model
     raw_model.load_state_dict(ckpt["model"], strict=strict)
+    if normalize is not None and "normalize" in ckpt:
+        normalize.load_state_dict(ckpt["normalize"], strict=strict)
 
     if optimizer is not None and "optimizer" in ckpt:
         optimizer.load_state_dict(ckpt["optimizer"])

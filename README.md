@@ -1,19 +1,146 @@
-# Предсказание погодных условий с помощью гибридных физических нейросетей
+# WeatherPredictions
 
-Данный репозиторий содержит код ВКР студента БПМИ 213 Бугаева Егора Петровича, стажера-исследователя научно-учебной лаборатории методов анализа больших данных LAMBDA. ВКР выполнена под руководством Бузаева Федора Александровича, Преподавателя ДБДИП ФКН ВШЭ и младшего научного сотрудника LAMBDA.
+Code for the HSE VKR weather-forecasting experiments on WeatherBench. The
+project trains neural weather models on regional and global WeatherBench
+windows, including physics-informed variants based on WeatherGFT.
 
-# Аннотация 
-В данной работе исследуются возможности физически информированных нейросетей для предсказания погодных условий. В качестве набора данных для оценки качества и обучения моделей используется датасет [WeatherBench](https://github.com/pangeo-data/WeatherBench). Первая часть работы сконцентрирована на анализе комбинации физически информированного модуля и нейросетевого механизма внимания в работе [WeatherGFT](https://github.com/black-yt/WeatherGFT). Во второй части работы предлагается две новые архитектуры, PredFormerGFT и PI-IAM4VP. Первая является комбинацией физического блока на основе WeatherGFT с нейросетью [PredFormer](https://github.com/yyyujintang/PredFormer), вторая является комбинацией аналогичного физического блока с моделью компьютерного зрения [IAM4VP](https://github.com/seominseok0429/Masked-Autoregressive-Model-for-Weather-Forecasting). Архитектуры демонстрируют улучшение качества в сравнении с оригинальными версиями и выбранными для бейзлайна моделями при предсказании различных погодных переменных на карте, приближенной до южной части Атлантического океана. Эти результаты говорят о высокой эффективности физически информированных модулей на предсказании и применимы в различных задачах, в том числе выборе безопасных путей мореходства.
+Main model families:
 
-# Состав репозитория
-0. Inference_and_plots.ipynb содержит построения всех графиков работы, а так же примеры инференса моделей.
-1. В папке train находятся скрипты обучения, где указаны все гиперпараметры опробованных моделей в конфигурациях, использованных для сравнения в тексте работы. PI-IAM4VP и IAM4VP модели переключаются параметров use_physics в аргументах модели. В папках dev находятся модели, которые еще находятся в разработке.
-2. В папке Data находятся загрузчики данных, созданные на основе схожих моделей из WeatherGFT. Добавлена возможность подгружать данные с x из нескольких часов, что необходимо для моделей, использующих для предсказания историю погодных состояний. Улучшена скорость подгрузки и настроена загрузка из формата .npz, в котором хранятся исходные данные WeatherBench.
-3. В папке Models хранятся версии моделей, настроенные на работу с погодными данными. Реализации SimVP/PredRNN и составляющих их блоков (HorNet, MogaNet, PoolFormer, UniFormer, VAN) лежат в [Models/](Models/) и [Models/blocks/](Models/blocks/); атрибуция к первоисточникам — в заголовках соответствующих файлов. Другие использованные источники: [WeatherGFT](https://github.com/black-yt/WeatherGFT), [PredFormer](https://github.com/yyyujintang/PredFormer), [IAM4VP](https://github.com/seominseok0429/Masked-Autoregressive-Model-for-Weather-Forecasting).
-4. Папка LitModels содержит train и val функции для различных моделей - из-за разного формата входных данных и особенностей inference части некоторые из моделей имеют свои train/val функции.
-5. Папка utils содержит второстепенные функции, необходимые для обучения (поддержка DDP-формата для обучения на нескольких карточках и другие).
+- `PredFormerGFT` and `PredFormerGFT_HybridBlock`
+- `PI-IAM4VP`
+- baselines: `WeatherGFT`, `WeatherGFTSingle`, `PredFormer`, `SimVP`,
+  `PredRNN`, `PredRNNv2`
 
-# Благодарности
-В данной работе использовались мощности суперкомпьютера [HPC НИУ ВШЭ](https://hpc.hse.ru/). Большой вклад в постановку научных вопросов и корректировку хода работы, помимо научного руководителя ВКР Бузаева Федора Александровича, внесли Ратников Федор Дмитриевич и другие сотрудники научно-учебной лаборатории методов анализа больших данных [LAMBDA](https://cs.hse.ru/iai/lambda/), ФКН НИУ ВШЭ.
+## Repository Layout
 
-Исходная структура репозитория вдохновлена репозиторием [WeatherGFT](https://github.com/black-yt/WeatherGFT).
+- `configs/` — YAML experiment configs. This is the primary place to define a
+  run.
+- `train.py` — unified pure-PyTorch training entry point.
+- `trainer.py` — training loop, DDP, checkpointing, validation and Comet logs.
+- `Data/` — WeatherBench datasets (`v1`, `v3`, `v3_memmap`, `v4`).
+- `Models/` — architectures and model registry.
+- `training_strategies/` — replacements for the old Lightning wrappers.
+- `utils/` — metrics, normalization, registries, distributed helpers,
+  checkpoint utilities.
+- `train/` — legacy per-model scripts kept for compatibility.
+- `sh_files/` — Slurm launchers and remote-submit helpers.
+- `docs/` — cluster workflow, smoke tests and migration notes.
+
+## Running Training
+
+Use a config stem from `configs/`:
+
+```bash
+bash sh_files/launch_train.sh simvp_usa_v4
+```
+
+On the cluster, submit one of the Slurm scripts:
+
+```bash
+sbatch sh_files/train_simvp_usa_v4_2gpu.sh
+sbatch sh_files/train_predformergft_usa_v4_2gpu.sh
+```
+
+The local-to-cluster workflow is documented in
+[`docs/cluster_workflow.md`](docs/cluster_workflow.md). In short: commit the
+branch locally, then run:
+
+```bash
+bash sh_files/remote_submit.sh sh_files/train_simvp_usa_v4_2gpu.sh
+```
+
+## Config Basics
+
+Each YAML config has these blocks:
+
+```yaml
+experiment:
+  name: SimVP-USA-v4-72h
+
+model:
+  type: SimVP
+  params:
+    in_shape: [12, 69, 32, 64]
+
+data:
+  dataset_version: v4
+  cut: [[75, 107], [164, 228]]
+  start_time_x: 0
+  end_time_x: 11
+  start_time_y: 12
+  end_time_y: 23
+  train:
+    start_time: "2000-01-01 00:00:00"
+    end_time: "2003-12-30 00:00:00"
+    batch_size: 8
+  val:
+    start_time: "2004-01-01 00:00:00"
+    end_time: "2004-12-30 00:00:00"
+    batch_size: 8
+  memmap_path: /home/fa.buzaev/era5_memmap/predformer_usa_2000_2004.dat
+
+training:
+  litmodel: mutiout_f
+  lr: 1e-4
+  max_epoch: 2000
+
+logging:
+  checkpoint_base: /home/fa.buzaev/WeatherPredictions/checkpoints/
+```
+
+Important details:
+
+- `data.cut` is the spatial crop. USA configs use `[[75, 107], [164, 228]]`;
+  the original South Atlantic crop is `[[36, 68], [125, 189]]`.
+- `PredFormerGFT` and `PredFormerGFT_HybridBlock` also need
+  `model.params.cut` to crop their static constants to the same window as the
+  data.
+- `v1`, `v3` and `v3_memmap` datasets return normalized tensors.
+- `v4` returns raw memmap tensors; `trainer.py` applies `WeatherNormalize` on
+  the batch, on GPU.
+- Storage paths can be overridden without editing configs:
+  `DATA_FOLDER_OVERRIDE`, `INPUT_FOLDER_OVERRIDE`, `MEMMAP_PATH_OVERRIDE`,
+  `MEMMAP_META_PATH_OVERRIDE`, `CHECKPOINT_BASE_OVERRIDE`.
+
+## Model and Strategy Keys
+
+| Model key | Typical strategy (`training.litmodel`) |
+| --- | --- |
+| `SimVP` | `mutiout_f` |
+| `WeatherGFT` | `multiout_double` |
+| `WeatherGFTSingle` | `mutiout` |
+| `PredFormer` | `mutiout_f` |
+| `PredFormerGFT` | `mutiout_f` |
+| `PredFormerGFT_HybridBlock` | `mutiout_f` |
+| `PI-IAM4VP` | `mutiout_imvp_small_world` |
+| `PredRNN` | `mutiout_predrnn` |
+| `PredRNNv2` | `mutiout_predrnn` |
+
+The `mutiout` spelling is legacy and intentional.
+
+## Checkpoints
+
+Native checkpoints are `.pt` files with a flat payload:
+
+- `model`
+- optional `normalize`
+- optional `optimizer`, `scheduler`, `scaler`
+- `epoch`, `global_step`, `metric`, `config`
+
+See [`docs/checkpoint_migration.md`](docs/checkpoint_migration.md) for
+loading native checkpoints and converting older Lightning `.ckpt` files.
+
+## Data
+
+WeatherBench data paths in committed configs point to the HSE cluster. The
+v4 production configs expect packed memmaps, usually staged to node-local
+`/tmp` by the matching Slurm scripts before training starts.
+
+The memmap loader validates channel count, variable order, crop metadata and
+time coverage on startup so a mismatched file fails early instead of training
+on the wrong window.
+
+## Acknowledgements
+
+This work used the HSE cHARISMa HPC cluster. The original research builds on
+WeatherBench, WeatherGFT, PredFormer, IAM4VP, SimVP and PredRNN.

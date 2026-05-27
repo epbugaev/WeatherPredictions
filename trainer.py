@@ -374,17 +374,27 @@ class Trainer:
                     ):
                         step_metrics = strategy.train_step(model, batch, ctx)
                     loss = step_metrics["loss"]
-                    # NaN/Inf guard: under bf16/fp16 a single bad sample or
-                    # exploding gradient can poison the optimiser state for
-                    # the rest of training. Detect, skip backward+step, but
-                    # still advance the scheduler so cosine stays aligned
-                    # across ranks. All ranks see the same `loss` (same data
-                    # rank-locally), so no cross-rank all_reduce needed here.
-                    if self.cfg.skip_non_finite_loss and not torch.isfinite(loss):
+                    # NaN/Inf guard: every rank must make the same decision
+                    # before DDP backward, otherwise one rank can enter the
+                    # gradient all-reduce while another skips it and hangs.
+                    loss_is_finite = torch.isfinite(loss)
+                    if self.cfg.skip_non_finite_loss:
+                        finite_flag = loss_is_finite.detach().to(
+                            device=self.dist.device,
+                            dtype=torch.int32,
+                        )
+                        if self.dist.is_distributed:
+                            torch.distributed.all_reduce(
+                                finite_flag,
+                                op=torch.distributed.ReduceOp.MIN,
+                            )
+                        loss_is_finite = finite_flag.bool()
+                    if self.cfg.skip_non_finite_loss and not bool(loss_is_finite.item()):
                         if self.dist.rank == 0:
                             print(
                                 f"[trainer] step {global_step}: non-finite loss "
-                                f"{loss.item()!r}, skipping backward/optimizer.step"
+                                f"on at least one rank (rank0={loss.item()!r}), "
+                                "skipping backward/optimizer.step"
                             )
                         with record_function("scheduler_step"):
                             scheduler.step()
@@ -541,6 +551,7 @@ class Trainer:
 
         payload = _take_checkpoint_snapshot(
             model=model,
+            normalize=self._normalize,
             optimizer=optimizer,
             scheduler=scheduler,
             scaler=scaler,
@@ -597,6 +608,7 @@ def _normalize_batch(batch: Any, normalize: nn.Module) -> Any:
 
 def _take_checkpoint_snapshot(
     model: nn.Module,
+    normalize: nn.Module | None,
     optimizer: torch.optim.Optimizer | None,
     scheduler: torch.optim.lr_scheduler.LRScheduler | None,
     scaler: GradScaler | None,
@@ -621,6 +633,10 @@ def _take_checkpoint_snapshot(
         "metric": metric,
         "config": config,
     }
+    if normalize is not None:
+        payload["normalize"] = {
+            k: v.detach().to("cpu", copy=True) for k, v in normalize.state_dict().items()
+        }
     if optimizer is not None:
         payload["optimizer"] = optimizer.state_dict()
     if scheduler is not None:

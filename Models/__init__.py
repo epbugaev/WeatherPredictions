@@ -34,7 +34,7 @@ def _build_predformer_gft(**params):
 
 
 def _build_predformer_gft_hybrid(**params):
-    """``PredFormerGFT_HybridBlock`` (USA-crop): params dict positionally."""
+    """``PredFormerGFT_HybridBlock`` takes the params dict positionally."""
     return PredFormer_Model_GFT_Hybrid(params)
 
 

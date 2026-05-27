@@ -7,8 +7,6 @@ from einops.layers.torch import Rearrange
 from timm.layers import DropPath, to_2tuple, trunc_normal_
 from torch import einsum, nn
 
-from utils.regions import USA_CROP
-
 # ===== Исходные расчёты параметров дискретизации =====
 # USA-crop: вход 32×64 → patch=4 → latents 8×16.
 latents_size = [8, 16]
@@ -703,8 +701,16 @@ class PredFormer_Model(nn.Module):
         self.downscaling_factor_all = 4  # Default downscaling factor for GFT
         self.gft_weight = 0.1  # Вес физических эмбеддингов при добавлении к основным данным
 
-        (lat0, lat1), (lon0, lon1) = USA_CROP
-        self.static_masks = self.static_masks[..., lat0:lat1, lon0:lon1]
+        cut = model_config.get("cut")
+        if cut is not None:
+            (lat0, lat1), (lon0, lon1) = cut
+            self.static_masks = self.static_masks[..., lat0:lat1, lon0:lon1]
+        if self.static_masks.shape[-2:] != (self.image_height, self.image_width):
+            raise ValueError(
+                f"Static mask shape {tuple(self.static_masks.shape[-2:])} does not match "
+                f"configured image shape {(self.image_height, self.image_width)}. "
+                "Set model.params.cut to the same spatial window as data.cut."
+            )
 
         assert self.image_height % self.patch_size == 0, (
             "Image height must be divisible by the patch size."

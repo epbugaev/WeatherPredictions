@@ -249,19 +249,22 @@ def train(config: dict[str, Any], config_path: str | None = None) -> None:
     )
 
     training_cfg = config["training"]
-    steps_per_epoch = len(train_loader) // max(dist_info.world_size, 1)
+    # With DistributedSampler, DataLoader length is already the per-rank number
+    # of optimizer steps. Dividing by world_size again would compress warmup and
+    # cosine schedules on DDP runs.
+    steps_per_epoch = len(train_loader)
 
     metrics_source = train_data.dataset if isinstance(train_data, Subset) else train_data
     metrics = Metrics(metrics_source.data_mean_tensor, metrics_source.data_std_tensor)
 
-    # WeatherNormalize is the single source of truth for per-channel mean/std
-    # in the model pipeline. The trainer applies it to every batch right after
-    # ``_to_device`` (so v4 ``__getitem__`` can return raw tensors), and the
-    # buffers round-trip through ``state_dict`` together with the model.
-    normalize = WeatherNormalize(
-        mean=torch.as_tensor(metrics_source.the_mean, dtype=torch.float32),
-        std=torch.as_tensor(metrics_source.the_std, dtype=torch.float32),
-    )
+    # v4 returns raw memmap rows; legacy v1/v3/v3_memmap datasets already
+    # normalize inside __getitem__. Keep normalization in exactly one place.
+    normalize = None
+    if not getattr(metrics_source, "returns_normalized", True):
+        normalize = WeatherNormalize(
+            mean=torch.as_tensor(metrics_source.the_mean, dtype=torch.float32),
+            std=torch.as_tensor(metrics_source.the_std, dtype=torch.float32),
+        )
 
     optimizer, scheduler = build_optimizer_and_scheduler(model, training_cfg, steps_per_epoch)
     strategy = build_strategy(training_cfg)
@@ -269,7 +272,9 @@ def train(config: dict[str, Any], config_path: str | None = None) -> None:
     exp_cfg = config.get("experiment", {})
     logging_cfg = config.get("logging", {})
     exp_name = exp_cfg.get("name", "experiment")
-    checkpoint_base = logging_cfg.get("checkpoint_base", "./checkpoints/")
+    checkpoint_base = os.environ.get(
+        "CHECKPOINT_BASE_OVERRIDE", logging_cfg.get("checkpoint_base", "./checkpoints/")
+    )
     checkpoint_dir = os.path.join(checkpoint_base, exp_name, _make_run_id())
 
     experiment = build_experiment(logging_cfg, experiment_name=exp_name, is_main=is_main)

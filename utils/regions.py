@@ -7,7 +7,9 @@ WeatherBench, и подаются в дата-сэты в формате ``[[i0,
 
 from typing import Final
 
-# США на 128×256 WeatherBench-гриде. Lat-окно соответствует ~24°N..56°N,
-# lon-окно — ~125°W..67°W, см. историю в `Models/PredFormerGFT.py` (USA-кроп
-# 32×64).
-USA_CROP: Final[list[list[int]]] = [[128 - 92, 128 - 60], [256 - 131, 256 - 67]]
+# Original VKR South Atlantic Ocean crop on the 128x256 WeatherBench grid.
+SOUTH_ATLANTIC_CROP: Final[list[list[int]]] = [[36, 68], [125, 189]]
+
+# USA crop used by the current reruns. Lat-window is roughly 24N..56N and
+# lon-window roughly 125W..67W on the 128x256 WeatherBench grid.
+USA_CROP: Final[list[list[int]]] = [[75, 107], [164, 228]]

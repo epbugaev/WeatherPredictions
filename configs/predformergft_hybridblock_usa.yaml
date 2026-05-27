@@ -20,6 +20,7 @@ model:
     depth: 2
     Ndepth: 18
     path_to_constants: /home/fratnikov/weather_bench/1.40625deg/constants/constants_1.40625deg.nc
+    cut: [[75, 107], [164, 228]]
 
 data:
   dataset_version: v3

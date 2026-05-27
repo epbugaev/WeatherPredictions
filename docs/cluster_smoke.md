@@ -40,7 +40,10 @@ print('IAM4VP params:', sum(p.numel() for p in m.parameters()))
 "
 ```
 
-Ожидаем 7 моделей, 3 датасета, 6 ключей стратегий.
+Ожидаем 9 моделей, 4 датасета, 6 ключей стратегий:
+`SimVP`, `WeatherGFT`, `WeatherGFTSingle`, `PredFormer`, `PredFormerGFT`,
+`PredFormerGFT_HybridBlock`, `PI-IAM4VP`, `PredRNN`, `PredRNNv2`;
+`v1`, `v3`, `v3_memmap`, `v4`.
 
 ## 2. Lint
 
@@ -57,15 +60,14 @@ ruff check trainer.py train.py utils/registry.py utils/distributed.py \
 
 ## 3. Single-GPU smoke (1 эпоха)
 
-Используй самый дешёвый конфиг. Я бы взял `pi_iam4vp.yaml` или
-`simvp_usa.yaml` с `training.max_epoch: 1` через временный override.
-Самый быстрый путь — поправь `max_epoch` напрямую в YAML на 1, потом
-верни обратно. Либо запусти через прямой Python, чтобы не трогать
-конфиг.
+Используй самый дешёвый v4-конфиг, если memmap доступен. Для настоящего
+smoke лучше временно скопировать YAML, поставить `training.max_epoch: 1`
+и, при необходимости, укоротить `data.train.end_time` / `data.val.end_time`.
+Не коммить временный конфиг.
 
 ```bash
 # Через launcher (torchrun под капотом):
-NGPUS=1 NNODES=1 bash sh_files/launch_train.sh simvp_usa
+NGPUS=1 NNODES=1 bash sh_files/launch_train.sh simvp_usa_v4
 ```
 
 Ожидаем: процесс не падает, в `${checkpoint_base}/${experiment.name}/...`
@@ -75,7 +77,7 @@ NGPUS=1 NNODES=1 bash sh_files/launch_train.sh simvp_usa
 ## 4. Multi-GPU smoke на одном узле (DDP, 2 GPU)
 
 ```bash
-NGPUS=2 NNODES=1 bash sh_files/launch_train.sh simvp_usa
+NGPUS=2 NNODES=1 bash sh_files/launch_train.sh simvp_usa_v4
 ```
 
 Что проверяем:
@@ -86,7 +88,7 @@ NGPUS=2 NNODES=1 bash sh_files/launch_train.sh simvp_usa
 
 ## 5. Multi-node smoke (если есть кластерное время)
 
-`sbatch sh_files/train_SimVp_USA.sh` (или твой эквивалент) с
+`sbatch sh_files/train_simvp_usa_v4_2gpu.sh` (или твой эквивалент) с
 `--nodes=N --gres=gpu:K`. `torchrun` подхватит `SLURM_*` через
 `launch_train.sh`. Обрати внимание на `MASTER_ADDR` — для multi-node
 нужно подставлять адрес head-ноды (например, из `SLURM_NODELIST`).
@@ -119,12 +121,12 @@ print('OK, meta:', meta)
 git status
 
 # 2) Запустить 1 эпоху новым кодом с фиксированным seed:
-PYTHONHASHSEED=42 NGPUS=1 NNODES=1 bash sh_files/launch_train.sh simvp_usa
-# (предварительно вставь `torch.manual_seed(42)` в train.py перед сбором model)
+#    добавь во временный YAML training.seed: 42
+PYTHONHASHSEED=42 NGPUS=1 NNODES=1 bash sh_files/launch_train.sh simvp_usa_v4
 
 # 3) Переключиться на main (Lightning), запустить ту же конфигурацию:
 git checkout main
-PYTHONHASHSEED=42 NGPUS=1 NNODES=1 bash sh_files/launch_train.sh simvp_usa
+PYTHONHASHSEED=42 NGPUS=1 NNODES=1 bash sh_files/launch_train.sh simvp_usa_v4
 
 # 4) Сравнить логи Comet (train_loss за каждый batch, val_loss за эпоху).
 #    Толерантность 1e-4 — нормально; больше — копаем.

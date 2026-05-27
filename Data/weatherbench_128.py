@@ -53,6 +53,8 @@ def custom_np_load(file_path):
 
 
 class WeatherBench128(Dataset):
+    returns_normalized = True
+
     def __init__(
         self,
         start_time: str = "2000-01-01 00:00:00",

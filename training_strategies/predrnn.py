@@ -16,9 +16,6 @@ from training_strategies._log_figures import log_prediction_maps
 from training_strategies.base import StepContext, StepStrategy
 from utils.registry import register_strategy
 
-_MASK_SHAPE: tuple[int, int, int, int, int] = (1, 12, 1, 1, 1)
-
-
 def _predrnn_forward(
     model: nn.Module, x: torch.Tensor, y: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -29,7 +26,7 @@ def _predrnn_forward(
     """
     inp = torch.cat([x, y], dim=1)
     inp = inp.permute(0, 1, 3, 4, 2).contiguous()
-    mask = torch.zeros(_MASK_SHAPE, device=x.device)
+    mask = torch.zeros((1, y.shape[1], 1, 1, 1), device=x.device, dtype=x.dtype)
     y_hat_perm, _ = model(inp, mask)
     y_hat = y_hat_perm.permute(0, 1, 4, 2, 3)
     inp = inp.permute(0, 1, 4, 2, 3)
@@ -65,7 +62,8 @@ class PredRNNStep(StepStrategy):
     ) -> dict[str, torch.Tensor]:
         x, y = batch
         _, y_hat_full = _predrnn_forward(model, x, y)
-        y_hat = y_hat_full[:, 11:, ...]
+        start = x.shape[1] - 1
+        y_hat = y_hat_full[:, start : start + y.shape[1], ...]
         val_loss = self.loss(y_hat, y)
 
         metrics = self._build_val_metrics(

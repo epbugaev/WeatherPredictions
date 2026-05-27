@@ -132,7 +132,8 @@ def run_legacy_training(
         **{k: v for k, v in val_loader_kwargs.items() if k != "shuffle"},
     )
 
-    steps_per_epoch = len(train_loader) // max(dist_info.world_size, 1)
+    # DistributedSampler already makes len(train_loader) per-rank.
+    steps_per_epoch = len(train_loader)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.0, betas=(0.9, 0.9))
     total_steps = (steps_per_epoch + 1) * max_epoch
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -145,6 +146,7 @@ def run_legacy_training(
     mds = metrics_source if metrics_source is not None else train_data
     metrics = Metrics(mds.data_mean_tensor, mds.data_std_tensor)
 
+    checkpoint_base = os.environ.get("CHECKPOINT_BASE_OVERRIDE", checkpoint_base)
     checkpoint_dir = os.path.join(checkpoint_base, exp_name, _make_run_id())
 
     experiment = build_experiment(

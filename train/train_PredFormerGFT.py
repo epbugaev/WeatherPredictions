@@ -18,6 +18,7 @@ _CONSTANTS_PATH = "/home/fratnikov/weather_bench/1.40625deg/constants/constants_
 
 def train_model() -> None:
     """Construct PredFormerGFT and run training over the regional cut."""
+    cut = USA_CROP
     model_config = {
         "height": 32,
         "width": 64,
@@ -35,10 +36,10 @@ def train_model() -> None:
         "depth": 2,
         "Ndepth": 18,
         "path_to_constants": _CONSTANTS_PATH,
+        "cut": cut,
     }
     torch_model = PredFormer_Model(model_config)
 
-    cut = USA_CROP
     common = dict(
         include_target=False,
         lead_time=1,

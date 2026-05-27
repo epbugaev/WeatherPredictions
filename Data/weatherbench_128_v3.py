@@ -10,6 +10,8 @@ from torch.utils.data import Dataset
 
 
 class WeatherBench128(Dataset):
+    returns_normalized = True
+
     def __init__(
         self,
         start_time: str = "2000-01-01 00:00:00",
@@ -363,6 +365,8 @@ class WeatherBench128Memmap(WeatherBench128):
         **kwargs: Forwarded to ``WeatherBench128.__init__``.
     """
 
+    returns_normalized = True
+
     def __init__(
         self,
         memmap_path: str,
@@ -380,6 +384,33 @@ class WeatherBench128Memmap(WeatherBench128):
             meta = json.load(f)
         self._memmap_shape: tuple[int, ...] = tuple(meta["shape"])
         self._memmap_dtype = np.dtype(meta["dtype"])
+        if len(self._memmap_shape) != 4:
+            raise ValueError(f"Memmap shape must be (T, C, H, W), got {self._memmap_shape}")
+        if self._memmap_shape[1] != len(self.the_mean):
+            raise ValueError(
+                f"Memmap channel count {self._memmap_shape[1]} does not match "
+                f"normalization stats ({len(self.the_mean)} channels)"
+            )
+        if "variables_list" in meta and list(meta["variables_list"]) != self.variables_list:
+            raise ValueError("Memmap variables_list does not match WeatherBench128.variables_list")
+        if self.cut is not None:
+            expected_cut = [
+                self.cut[0][0],
+                self.cut[0][1],
+                self.cut[1][0],
+                self.cut[1][1],
+            ]
+            if "cut" in meta and list(meta["cut"]) != expected_cut:
+                raise ValueError(f"Memmap cut {meta['cut']} does not match config cut {expected_cut}")
+            expected_hw = (
+                self.cut[0][1] - self.cut[0][0],
+                self.cut[1][1] - self.cut[1][0],
+            )
+            if self._memmap_shape[-2:] != expected_hw:
+                raise ValueError(
+                    f"Memmap spatial shape {self._memmap_shape[-2:]} does not match "
+                    f"config cut shape {expected_hw}"
+                )
         self._memmap_path = memmap_path
         self._memmap = np.memmap(
             memmap_path,
@@ -394,6 +425,13 @@ class WeatherBench128Memmap(WeatherBench128):
             row_starts[int(y)] = offset
             offset += int(n)
         self._memmap_row_starts = row_starts
+        max_target_time = self.x_time_ilst[self.length - 1 + self.end_time_y] + pd.Timedelta(
+            hours=self.muti_target_steps * self.lead_time
+        )
+        required_years = set(range(self.x_time_ilst[0].year, max_target_time.year + 1))
+        missing_years = sorted(required_years.difference(row_starts))
+        if missing_years:
+            raise ValueError(f"Memmap is missing required years: {missing_years}")
 
     def _memmap_row(self, timestamp: pd.Timestamp) -> int:
         """Return the memmap row corresponding to ``timestamp``."""

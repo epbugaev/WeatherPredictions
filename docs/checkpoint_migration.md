@@ -14,6 +14,7 @@ writes a flat dict instead:
 ```python
 {
     "model": state_dict,            # no "model." prefix
+    "normalize": state_dict,        # optional WeatherNormalize buffers
     "optimizer": optimizer_state,   # optional
     "scheduler": scheduler_state,   # optional
     "scaler": amp_scaler_state,     # optional
@@ -51,16 +52,36 @@ find /home/ebugaev/checkpoints -name '*.ckpt' -print0 |
 
 ## Inference notebook
 
-`Inference_and_plots.ipynb` already loads via `torch.load(path)` and
-strips the `model.` prefix from each key by hand. After conversion the
-prefix is no longer present, so the existing slicing code (`key[6:]`)
-becomes a no-op — the notebook keeps working without edits. If you want
-to simplify it, replace the manual loop with:
+`Inference_and_plots.ipynb` was written for Lightning checkpoints and some
+cells assume `ckpt["state_dict"]` with a `model.` prefix. Native `.pt`
+checkpoints instead store weights in `ckpt["model"]`, so use a small helper
+that supports both formats:
 
 ```python
-ckpt = torch.load(path, map_location="cpu")
-model.load_state_dict(ckpt["model"], strict=True)
+def load_weatherpred_weights(model, path, strict=True):
+    ckpt = torch.load(path, map_location="cpu")
+
+    if "model" in ckpt:
+        state = ckpt["model"]
+    elif "state_dict" in ckpt:
+        state = {
+            key[len("model."):] if key.startswith("model.") else key: value
+            for key, value in ckpt["state_dict"].items()
+        }
+    else:
+        state = ckpt
+
+    model.load_state_dict(state, strict=strict)
+    return ckpt
+
+
+ckpt = load_weatherpred_weights(model, path)
 ```
+
+For v4 runs, native checkpoints may also contain `ckpt["normalize"]`. Load
+those buffers into `utils.normalize.WeatherNormalize` if your inference path
+feeds raw memmap values directly to the model. If the notebook already uses
+dataset-normalized tensors, do not normalize a second time.
 
 ## Resuming training
 

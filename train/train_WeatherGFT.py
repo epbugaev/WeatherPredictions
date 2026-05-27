@@ -11,7 +11,6 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from Data.weatherbench_128 import WeatherBench128
 from Models.WeatherGFT import GFT
 from train._common import run_legacy_training
-from utils.regions import USA_CROP
 
 
 def train_model() -> None:
@@ -42,7 +41,6 @@ def train_model() -> None:
         use_checkpoint=True,
     )
 
-    cut = USA_CROP
     train_data = WeatherBench128(
         start_time="2000-01-01 00:00:00",
         end_time="2003-12-25 00:00:00",
@@ -50,7 +48,6 @@ def train_model() -> None:
         lead_time=1,
         interval=1,
         muti_target_steps=6,
-        cut=cut,
     )
     valid_data = WeatherBench128(
         start_time="2004-01-01 00:00:00",
@@ -59,7 +56,6 @@ def train_model() -> None:
         lead_time=1,
         interval=1,
         muti_target_steps=12,
-        cut=cut,
     )
 
     run_legacy_training(
