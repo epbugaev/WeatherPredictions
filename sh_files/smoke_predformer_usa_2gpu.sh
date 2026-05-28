@@ -20,18 +20,4 @@ export BENCH_MAX_STEPS="${BENCH_MAX_STEPS:-5}"
 weatherpred__repo_root="${REPO_ROOT:-${SLURM_SUBMIT_DIR:-/home/ebugaev/WeatherPredictions}}"
 weatherpred__launcher="${weatherpred__repo_root}/sh_files/launch_train.sh"
 
-# Memmap staging — same as production train_PredFormer_USA_2gpu.sh.
-ORIG_MEMMAP="${ORIG_MEMMAP:-/home/ebugaev/era5_memmap/predformer_usa_2000_2004.dat}"
-STAGE_DIR="${STAGE_DIR:-/tmp/${USER:-$(id -un)}/era5_stage_${SLURM_JOB_ID:-local}}"
-mkdir -p "${STAGE_DIR}"
-echo "[smoke-predformer] staging memmap ${ORIG_MEMMAP} -> ${STAGE_DIR}/"
-cp "${ORIG_MEMMAP}" "${STAGE_DIR}/"
-weatherpred__orig_meta="${ORIG_MEMMAP%.dat}.meta.json"
-if [[ -f "${weatherpred__orig_meta}" ]]; then
-  cp "${weatherpred__orig_meta}" "${STAGE_DIR}/"
-fi
-export MEMMAP_PATH_OVERRIDE="${STAGE_DIR}/$(basename "${ORIG_MEMMAP}")"
-export MEMMAP_META_PATH_OVERRIDE="${STAGE_DIR}/$(basename "${weatherpred__orig_meta}")"
-trap 'rm -rf "${STAGE_DIR}" 2>/dev/null || true' EXIT
-
-exec bash "${weatherpred__launcher}" predformer_usa_memmap "$@"
+exec bash "${weatherpred__launcher}" predformer_usa "$@"

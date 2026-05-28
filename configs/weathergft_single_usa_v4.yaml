@@ -134,7 +134,7 @@ data:
     end_time: '2004-12-30 00:00:00'
     batch_size: 2
     shuffle: false
-  memmap_path: /home/ebugaev/era5_memmap/predformer_usa_2000_2004.dat
+  memmap_path: null
 training:
   litmodel: mutiout
   lr: 0.0001

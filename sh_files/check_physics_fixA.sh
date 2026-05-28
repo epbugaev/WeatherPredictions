@@ -21,7 +21,7 @@ REPO_ROOT_FOR_CONTRACT="${REPO_ROOT:-${SLURM_SUBMIT_DIR:-/home/ebugaev/WeatherPr
 _sc_here="${REPO_ROOT_FOR_CONTRACT}/sh_files"
 source "${_sc_here}/_shell_contract.sh" "${_sc_here}"
 
-MEMMAP_PATH="${MEMMAP_PATH:-/home/ebugaev/era5_memmap/predformer_globe_2000_2018.dat}"
+: "${MEMMAP_PATH:?Set MEMMAP_PATH to a packed globe memmap .dat before running this checker.}"
 HORIZON="${HORIZON_HOURS:-48}"
 BLOCK_DT="${BLOCK_DT_SECONDS:-300}"
 YEAR="${YEAR:-2005}"

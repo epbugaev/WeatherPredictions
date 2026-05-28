@@ -5,6 +5,7 @@
 # Использование
 # -------------
 #   bash sh_files/remote_submit.sh sh_files/train_PredFormer_USA.sh
+#   bash sh_files/remote_submit.sh sh_files/train_usa_2gpu.sh simvp_usa
 #   bash sh_files/remote_submit.sh -f sh_files/train_SimVp_USA.sh   # +tail логов
 #   bash sh_files/remote_submit.sh --allow-dirty sh_files/train_PredFormer_USA.sh
 #
@@ -46,6 +47,7 @@ if [[ ${#POSITIONAL[@]} -lt 1 ]]; then
   exit 1
 fi
 SCRIPT="${POSITIONAL[0]}"
+SBATCH_ARGS=("${POSITIONAL[@]:1}")
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
 cd "${REPO_ROOT}"
@@ -72,6 +74,7 @@ fi
 echo "[remote_submit] push ${BRANCH} → origin"
 git push origin "HEAD:refs/heads/${BRANCH}"
 
+weatherpred__sbatch_cmd="$(printf "%q " sbatch "${SCRIPT}" "${SBATCH_ARGS[@]}")"
 echo "[remote_submit] sync & sbatch on ${REMOTE_HOST}:${REMOTE_REPO}"
 SUBMIT_OUT="$(ssh "${REMOTE_HOST}" bash -se <<EOF
 set -euo pipefail
@@ -83,7 +86,7 @@ else
   git checkout -b "${BRANCH}" "origin/${BRANCH}"
 fi
 git pull --ff-only origin "${BRANCH}"
-sbatch "${SCRIPT}"
+${weatherpred__sbatch_cmd}
 EOF
 )"
 echo "${SUBMIT_OUT}"

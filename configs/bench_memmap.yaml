@@ -33,7 +33,7 @@ model:
 
 data:
   dataset_version: v3_memmap
-  memmap_path: /home/ebugaev/era5_memmap/predformer_usa_2000_2004.dat
+  memmap_path: null
   cut: [[75, 107], [164, 228]]
   include_target: false
   lead_time: 1

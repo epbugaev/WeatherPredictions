@@ -25,7 +25,7 @@ if [[ ! -f "${weatherpred__launcher}" ]]; then
   weatherpred__launcher="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/launch_train.sh"
 fi
 
-ORIG_MEMMAP="${ORIG_MEMMAP:-/home/ebugaev/era5_memmap/predformer_usa_2000_2004.dat}"
+: "${ORIG_MEMMAP:?Set ORIG_MEMMAP to the packed USA memmap .dat for v4. Use weathergft_usa for the legacy WeatherBench files.}"
 STAGE_DIR="${STAGE_DIR:-/tmp/${USER:-$(id -un)}/era5_stage_${SLURM_JOB_ID:-local}}"
 mkdir -p "${STAGE_DIR}"
 echo "[train-v4] staging memmap ${ORIG_MEMMAP} -> ${STAGE_DIR}/"

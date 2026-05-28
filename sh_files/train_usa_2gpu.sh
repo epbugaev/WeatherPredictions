@@ -1,19 +1,17 @@
 #!/bin/bash
-#SBATCH --job-name=PredFormer-USA-2gpu
+#SBATCH --job-name=train-usa-2gpu
 #SBATCH --partition=rocky
 #SBATCH --qos=rocky
 #SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=16
 #SBATCH --ntasks=1
 #SBATCH --nodes=1
-#SBATCH --time=2-18:00:00
-#SBATCH --constraint="type_e|type_f"
+#SBATCH --time=6-00:00:00
+#SBATCH --constraint="type_e|type_f|type_h"
 #SBATCH --output=logs/slurm-%x-%j.out
 #SBATCH --error=logs/slurm-%x-%j.err
-# =============================================================================
-# Production training of PredFormer-USA on 2 GPUs (single-node DDP) using the
-# legacy WeatherBench files under /home/fratnikov/weather_bench.
-# =============================================================================
+# Generic USA production launcher for legacy WeatherBench files.
+# Usage: sbatch sh_files/train_usa_2gpu.sh simvp_usa
 set -euo pipefail
 
 export OMP_NUM_THREADS=4
@@ -27,5 +25,7 @@ if [[ ! -f "${weatherpred__launcher}" ]]; then
   weatherpred__launcher="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/launch_train.sh"
 fi
 
-# Two GPUs per node; launch_train.sh reads NGPUS from SLURM_GPUS_ON_NODE.
-exec bash "${weatherpred__launcher}" predformer_usa "$@"
+CONFIG_STEM="${1:?Usage: sbatch sh_files/train_usa_2gpu.sh <config_stem>}"
+shift
+
+exec bash "${weatherpred__launcher}" "${CONFIG_STEM}" "$@"

@@ -1,6 +1,6 @@
+---
 experiment:
   name: PredFormer-USA
-
 model:
   type: PredFormer
   params:
@@ -15,16 +15,23 @@ model:
     dim_head: 32
     dropout: 0.0
     attn_dropout: 0.0
-    drop_path: 0.0
+    drop_path: 0.15
     scale_dim: 4
     depth: 1
     Ndepth: 24
-    path_to_constants: /home/fratnikov/weather_bench/1.40625deg/constants/constants_1.40625deg.nc
-    cut: [[75, 107], [164, 228]]
-
+    path_to_constants: "/home/fratnikov/weather_bench/1.40625deg/constants/constants_1.40625deg.nc"
+    cut:
+    - - 75
+      - 107
+    - - 164
+      - 228
 data:
   dataset_version: v3
-  cut: [[75, 107], [164, 228]]
+  cut:
+  - - 75
+    - 107
+  - - 164
+    - 228
   include_target: false
   lead_time: 1
   interval: 1
@@ -35,37 +42,39 @@ data:
   end_time_y: 23
   num_workers: 8
   pin_memory: true
-  persistent_workers: true
-  prefetch_factor: 2
+  persistent_workers: false
+  prefetch_factor: 4
   train:
-    start_time: "2000-01-01 00:00:00"
-    end_time: "2003-12-30 00:00:00"
-    batch_size: 32
+    start_time: '2000-01-01 00:00:00'
+    end_time: '2003-12-30 00:00:00'
+    batch_size: 148
     shuffle: true
   val:
-    start_time: "2004-01-01 00:00:00"
-    end_time: "2004-12-30 00:00:00"
-    batch_size: 32
+    start_time: '2004-01-01 00:00:00'
+    end_time: '2004-12-30 00:00:00'
+    batch_size: 148
     shuffle: false
-
 training:
   litmodel: mutiout_f
   lr: 0.0005
   eta_min: 0.0
-  max_epoch: 20
+  max_epoch: 2000
   loss_type: MAE
-  early_stopping_patience: 5
+  warmup_ratio: 0.05
+  warmup_start_factor: 0.001
+  early_stopping_patience: 34
   extra_kwargs:
     muti_out_nums: 6
-
 trainer:
-  precision: 32
+  precision: bf16
   log_every_n_steps: 50
   static_graph: true
   num_sanity_val_steps: 0
   float32_matmul_precision: high
-
+  grad_clip_norm: 1.0
+  skip_non_finite_loss: true
+  val_every_n_epochs: 3
 logging:
-  checkpoint_base: /home/ebugaev/checkpoints/
+  checkpoint_base: "/home/ebugaev/checkpoints/"
   comet_project: WeatherPredictions
-  log_code_file: null
+  log_code_file:
