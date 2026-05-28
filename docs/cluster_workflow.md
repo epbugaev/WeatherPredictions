@@ -70,7 +70,7 @@ git add -A
 git commit -m "feat: tweak predformer lr schedule"
 
 # 3. Один submit-скрипт делает всё остальное:
-bash sh_files/remote_submit.sh sh_files/train_simvp_usa_v4_2gpu.sh
+bash sh_files/remote_submit.sh sh_files/train_usa_2gpu.sh simvp_usa
 ```
 
 Что произойдёт под капотом ([`sh_files/remote_submit.sh`](../sh_files/remote_submit.sh)):
@@ -82,13 +82,13 @@ bash sh_files/remote_submit.sh sh_files/train_simvp_usa_v4_2gpu.sh
    - `git fetch --prune origin`
    - `git checkout <branch>` (или `-b` если не существует локально на кластере)
    - `git pull --ff-only origin <branch>` — упадёт, если истории разошлись (вместо тихого `reset --hard`).
-   - `sbatch sh_files/train_simvp_usa_v4_2gpu.sh`
+   - `sbatch sh_files/train_usa_2gpu.sh simvp_usa`
 4. Парсит `JobID` из вывода `sbatch`, выводит пути к stdout/stderr.
 
 ### Tail-логи сразу после submit
 
 ```bash
-bash sh_files/remote_submit.sh -f sh_files/train_simvp_usa_v4_2gpu.sh
+bash sh_files/remote_submit.sh -f sh_files/train_usa_2gpu.sh simvp_usa
 ```
 
 Скрипт дождётся появления файлов в `logs/` и запустит `tail -F` обоих стримов. Ctrl-C **только** отрывает tail — job продолжает крутиться.
@@ -96,7 +96,7 @@ bash sh_files/remote_submit.sh -f sh_files/train_simvp_usa_v4_2gpu.sh
 ### Submit без коммита
 
 ```bash
-bash sh_files/remote_submit.sh --allow-dirty sh_files/train_simvp_usa_v4_2gpu.sh
+bash sh_files/remote_submit.sh --allow-dirty sh_files/train_usa_2gpu.sh simvp_usa
 ```
 
 Внимание: незакоммиченные изменения на кластер **не уезжают**. Запустится последний коммит ветки. Флаг нужен только чтобы не падать на проверке worktree.
@@ -105,24 +105,24 @@ bash sh_files/remote_submit.sh --allow-dirty sh_files/train_simvp_usa_v4_2gpu.sh
 
 ```bash
 REMOTE_HOST=alt-cluster REMOTE_REPO=/path/to/repo \
-  bash sh_files/remote_submit.sh sh_files/train_simvp_usa_v4_2gpu.sh
+  bash sh_files/remote_submit.sh sh_files/train_usa_2gpu.sh simvp_usa
 ```
 
 ## 3. Структура запуска на кластере
 
-Цепочка вызовов после `sbatch sh_files/train_simvp_usa_v4_2gpu.sh`:
+Цепочка вызовов после `sbatch sh_files/train_usa_2gpu.sh simvp_usa`:
 
 ```text
 sbatch
-  └── sh_files/train_simvp_usa_v4_2gpu.sh     # #SBATCH-директивы (gres, time, constraint)
-        └── sh_files/launch_train.sh simvp_usa_v4
+  └── sh_files/train_usa_2gpu.sh simvp_usa    # #SBATCH-директивы (gres, time, constraint)
+        └── sh_files/launch_train.sh simvp_usa
               └── sh_files/_shell_contract.sh   # REPO_ROOT, conda env, .env, PYTHONPATH
               └── exec python -m torch.distributed.run \
                     --nnodes ${NNODES} \
                     --nproc_per_node ${NGPUS} \
                     --rdzv_backend c10d \
                     --rdzv_endpoint ${MASTER_ADDR}:${MASTER_PORT} \
-                    train.py --config configs/simvp_usa_v4.yaml
+                    train.py --config configs/simvp_usa.yaml
 ```
 
 ### Параметры SLURM (используемые)
@@ -179,12 +179,13 @@ ssh cluster scancel <JOB_ID>
 
 ```bash
 conda activate weatherpred-gft-fix
-bash sh_files/launch_train.sh simvp_usa_v4
+bash sh_files/launch_train.sh simvp_usa
 ```
 
 `launch_train.sh` обнаружит отсутствие `SLURM_JOB_ID` и не будет звать `module load`. Использует уже активированное окружение. `NNODES`/`NGPUS` по умолчанию `1`/`1` — на маке без CUDA `torchrun` поднимется в CPU-режиме (или упадёт на `nccl`), поэтому на маке smoke имеет смысл прерывать на этапе `build_dataset`.
 
-Для v4-конфигов можно временно переопределить пути без изменения YAML:
+Для v4-конфигов нужен явно заданный packed memmap. Без него используйте
+обычные `*_usa` configs, которые читают старые WeatherBench файлы:
 
 ```bash
 MEMMAP_PATH_OVERRIDE=/path/to/predformer_usa_2000_2004.dat \

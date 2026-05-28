@@ -31,14 +31,14 @@ Main model families:
 Use a config stem from `configs/`:
 
 ```bash
-bash sh_files/launch_train.sh simvp_usa_v4
+bash sh_files/launch_train.sh simvp_usa
 ```
 
 On the cluster, submit one of the Slurm scripts:
 
 ```bash
-sbatch sh_files/train_simvp_usa_v4_2gpu.sh
-sbatch sh_files/train_predformergft_usa_v4_2gpu.sh
+sbatch sh_files/train_usa_2gpu.sh simvp_usa
+sbatch sh_files/train_usa_2gpu.sh predformergft_usa
 ```
 
 The local-to-cluster workflow is documented in
@@ -46,7 +46,7 @@ The local-to-cluster workflow is documented in
 branch locally, then run:
 
 ```bash
-bash sh_files/remote_submit.sh sh_files/train_simvp_usa_v4_2gpu.sh
+bash sh_files/remote_submit.sh sh_files/train_usa_2gpu.sh simvp_usa
 ```
 
 ## Config Basics
@@ -63,7 +63,7 @@ model:
     in_shape: [12, 69, 32, 64]
 
 data:
-  dataset_version: v4
+  dataset_version: v3
   cut: [[75, 107], [164, 228]]
   start_time_x: 0
   end_time_x: 11
@@ -77,7 +77,6 @@ data:
     start_time: "2004-01-01 00:00:00"
     end_time: "2004-12-30 00:00:00"
     batch_size: 8
-  memmap_path: /home/ebugaev/era5_memmap/predformer_usa_2000_2004.dat
 
 training:
   litmodel: mutiout_f
@@ -95,9 +94,13 @@ Important details:
 - `PredFormerGFT` and `PredFormerGFT_HybridBlock` also need
   `model.params.cut` to crop their static constants to the same window as the
   data.
-- `v1`, `v3` and `v3_memmap` datasets return normalized tensors.
-- `v4` returns raw memmap tensors; `trainer.py` applies `WeatherNormalize` on
-  the batch, on GPU.
+- `v1` and `v3` use the legacy WeatherBench files. By default those paths stay
+  at `/home/fratnikov/weather_bench/...`, matching the pre-refactor setup.
+- `v3_memmap` and `v4` require an explicit packed memmap path. The committed
+  v4 configs use `memmap_path: null`; pass `MEMMAP_PATH_OVERRIDE` or set
+  `ORIG_MEMMAP` in the v4 Slurm scripts if you have such a file.
+- `v1`, `v3` and `v3_memmap` datasets return normalized tensors. `v4` returns
+  raw memmap tensors; `trainer.py` applies `WeatherNormalize` on the batch.
 - Storage paths can be overridden without editing configs:
   `DATA_FOLDER_OVERRIDE`, `INPUT_FOLDER_OVERRIDE`, `MEMMAP_PATH_OVERRIDE`,
   `MEMMAP_META_PATH_OVERRIDE`, `CHECKPOINT_BASE_OVERRIDE`.

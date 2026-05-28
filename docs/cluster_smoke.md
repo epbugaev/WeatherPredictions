@@ -67,7 +67,7 @@ smoke лучше временно скопировать YAML, поставит�
 
 ```bash
 # Через launcher (torchrun под капотом):
-NGPUS=1 NNODES=1 bash sh_files/launch_train.sh simvp_usa_v4
+NGPUS=1 NNODES=1 bash sh_files/launch_train.sh simvp_usa
 ```
 
 Ожидаем: процесс не падает, в `${checkpoint_base}/${experiment.name}/...`
@@ -77,7 +77,7 @@ NGPUS=1 NNODES=1 bash sh_files/launch_train.sh simvp_usa_v4
 ## 4. Multi-GPU smoke на одном узле (DDP, 2 GPU)
 
 ```bash
-NGPUS=2 NNODES=1 bash sh_files/launch_train.sh simvp_usa_v4
+NGPUS=2 NNODES=1 bash sh_files/launch_train.sh simvp_usa
 ```
 
 Что проверяем:
@@ -88,7 +88,7 @@ NGPUS=2 NNODES=1 bash sh_files/launch_train.sh simvp_usa_v4
 
 ## 5. Multi-node smoke (если есть кластерное время)
 
-`sbatch sh_files/train_simvp_usa_v4_2gpu.sh` (или твой эквивалент) с
+`sbatch sh_files/train_usa_2gpu.sh simvp_usa` (или твой эквивалент) с
 `--nodes=N --gres=gpu:K`. `torchrun` подхватит `SLURM_*` через
 `launch_train.sh`. Обрати внимание на `MASTER_ADDR` — для multi-node
 нужно подставлять адрес head-ноды (например, из `SLURM_NODELIST`).
@@ -122,11 +122,11 @@ git status
 
 # 2) Запустить 1 эпоху новым кодом с фиксированным seed:
 #    добавь во временный YAML training.seed: 42
-PYTHONHASHSEED=42 NGPUS=1 NNODES=1 bash sh_files/launch_train.sh simvp_usa_v4
+PYTHONHASHSEED=42 NGPUS=1 NNODES=1 bash sh_files/launch_train.sh simvp_usa
 
 # 3) Переключиться на main (Lightning), запустить ту же конфигурацию:
 git checkout main
-PYTHONHASHSEED=42 NGPUS=1 NNODES=1 bash sh_files/launch_train.sh simvp_usa_v4
+PYTHONHASHSEED=42 NGPUS=1 NNODES=1 bash sh_files/launch_train.sh simvp_usa
 
 # 4) Сравнить логи Comet (train_loss за каждый batch, val_loss за эпоху).
 #    Толерантность 1e-4 — нормально; больше — копаем.
