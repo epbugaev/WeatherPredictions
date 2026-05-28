@@ -30,11 +30,17 @@ def _build_v3(**params):
 
 def _build_v3_memmap(**params):
     """v3_memmap reads from a pre-packed np.memmap; see ``tools/repack_era5.py``."""
+    if not params.get("memmap_path"):
+        raise ValueError(
+            "dataset_version=v3_memmap requires data.memmap_path or MEMMAP_PATH_OVERRIDE"
+        )
     return WeatherBench128V3Memmap(**params)
 
 
 def _build_v4(**params):
     """v4: raw memmap, normalisation lives in the trainer (WeatherNormalize)."""
+    if not params.get("memmap_path"):
+        raise ValueError("dataset_version=v4 requires data.memmap_path or MEMMAP_PATH_OVERRIDE")
     return WeatherBench128V4(**params)
 
 
