@@ -137,7 +137,7 @@ class WeatherBench128(Dataset):
             83,
         ]
         self.data_folder = (
-            "/home/fratnikov/weather_bench/npy/1.40625deg/"  # "/home/fa.buzaev/data_to_egor"
+            "/home/fratnikov/weather_bench/npy/1.40625deg/"
         )
         self.start_time = start_time
         self.end_time = end_time
@@ -182,7 +182,7 @@ class WeatherBench128(Dataset):
         ]
 
     def get_mean_std(self):
-        mean_std = np.load("/home/epbugaev/weather_bench/1.40625deg/mean_std.npy")
+        mean_std = np.load("/home/ebugaev/weather_bench/1.40625deg/mean_std.npy")
         # mean_std = np.ones([2, 110]) # Test
         self.the_mean = mean_std[0]
         self.the_std = mean_std[1]

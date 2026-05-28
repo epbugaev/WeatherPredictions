@@ -183,6 +183,7 @@ def train(config: dict[str, Any], config_path: str | None = None) -> None:
             torch.cuda.manual_seed_all(int(seed))
 
     model = get_model(config["model"]["type"])(**config["model"].get("params", {}))
+    model = model.to(dist_info.device)
 
     data_cfg = config["data"]
     train_data = build_dataset(data_cfg, "train")

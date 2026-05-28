@@ -64,6 +64,6 @@ trainer:
   static_graph: true
 
 logging:
-  checkpoint_base: /home/fa.buzaev/WeatherPredictions/checkpoints/
+  checkpoint_base: /home/ebugaev/checkpoints/
   comet_project: WeatherPredictions
   log_code_file: null

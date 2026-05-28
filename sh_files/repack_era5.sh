@@ -42,7 +42,7 @@ fi
 # shellcheck source=sh_files/_shell_contract.sh
 source "${_sc_here}/_shell_contract.sh" "${_sc_here}"
 
-DST="${REPACK_DST:-/home/fa.buzaev/era5_memmap}"
+DST="${REPACK_DST:-/home/ebugaev/era5_memmap}"
 PREFIX="${REPACK_PREFIX:-predformer_usa_2000_2004}"
 START_YEAR="${REPACK_START_YEAR:-2000}"
 END_YEAR="${REPACK_END_YEAR:-2004}"

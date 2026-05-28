@@ -122,7 +122,7 @@ PYEOF
 fi
 
 # Optional memmap staging: copy the v3_memmap .dat + .meta.json from wherever
-# the bench config points (typically Lustre /home/fa.buzaev/era5_memmap/) to
+# the bench config points (typically Lustre /home/ebugaev/era5_memmap/) to
 # local NVMe under /tmp, then patch ``data.memmap_path`` in the config
 # snapshot. Activate by setting ``STAGE_MEMMAP=1`` (default off). Used to
 # isolate Lustre random-access overhead in the §2.5 path from the rest of

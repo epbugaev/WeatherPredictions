@@ -48,6 +48,10 @@ export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
 mkdir -p "${REPO_ROOT}/logs"
 
+if [[ -z "${CONDA_ENV_BIN:-}" && -x /home/ebugaev/.conda/envs/weatherpred-gft-fix/bin/python ]]; then
+  CONDA_ENV_BIN="/home/ebugaev/.conda/envs/weatherpred-gft-fix/bin"
+fi
+
 if [[ -n "${CONDA_ENV_BIN:-}" ]]; then
   export PATH="${CONDA_ENV_BIN%/}:${PATH}"
 elif [[ -n "${SLURM_JOB_ID:-}" ]]; then

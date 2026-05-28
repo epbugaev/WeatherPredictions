@@ -10,7 +10,7 @@ normalisation bug.
 
 Usage:
     python tools/verify_v4_normalize.py \\
-        --memmap /home/fa.buzaev/era5_memmap/predformer_usa_2000_2004.dat
+        --memmap /home/ebugaev/era5_memmap/predformer_usa_2000_2004.dat
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--memmap",
-        default="/home/fa.buzaev/era5_memmap/predformer_usa_2000_2004.dat",
+        default="/home/ebugaev/era5_memmap/predformer_usa_2000_2004.dat",
     )
     parser.add_argument("--index", type=int, default=0)
     args = parser.parse_args()

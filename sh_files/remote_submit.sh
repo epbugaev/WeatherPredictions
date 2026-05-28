@@ -11,7 +11,7 @@
 # Переменные окружения
 # --------------------
 #   REMOTE_HOST   — SSH-алиас (default: cluster)
-#   REMOTE_REPO   — путь к клону на кластере (default: /home/fa.buzaev/WeatherPredictions)
+#   REMOTE_REPO   — путь к клону на кластере (default: /home/ebugaev/WeatherPredictions)
 #
 # Flow
 # ----
@@ -23,7 +23,7 @@
 set -euo pipefail
 
 REMOTE_HOST="${REMOTE_HOST:-cluster}"
-REMOTE_REPO="${REMOTE_REPO:-/home/fa.buzaev/WeatherPredictions}"
+REMOTE_REPO="${REMOTE_REPO:-/home/ebugaev/WeatherPredictions}"
 
 FOLLOW=0
 ALLOW_DIRTY=0

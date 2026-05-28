@@ -39,10 +39,10 @@ export OMP_NUM_THREADS=4
 export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
-REPO_ROOT="${REPO_ROOT:-${SLURM_SUBMIT_DIR:-/home/fa.buzaev/WeatherPredictions}}"
+REPO_ROOT="${REPO_ROOT:-${SLURM_SUBMIT_DIR:-/home/ebugaev/WeatherPredictions}}"
 cd "${REPO_ROOT}"
 
-MEMMAP_PATH="${MEMMAP_PATH:-/home/fa.buzaev/era5_memmap/predformer_globe_2000_2018.dat}"
+MEMMAP_PATH="${MEMMAP_PATH:-/home/ebugaev/era5_memmap/predformer_globe_2000_2018.dat}"
 MEAN_STD_PATH="${MEAN_STD_PATH:-/home/fratnikov/weather_bench/1.40625deg/mean_std.npy}"
 START_TIME="${START_TIME:-2000-01-01 00:00:00}"
 END_TIME="${END_TIME:-2010-12-31 23:00:00}"

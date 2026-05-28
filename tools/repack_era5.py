@@ -15,7 +15,7 @@ Output files:
 Usage:
     python tools/repack_era5.py \\
         --src /home/fratnikov/weather_bench/1.40625deg \\
-        --dst /home/fa.buzaev/era5_memmap \\
+        --dst /home/ebugaev/era5_memmap \\
         --prefix predformer_usa_2000_2004 \\
         --start-year 2000 --end-year 2004 \\
         --cut 75 107 164 228
@@ -222,7 +222,7 @@ def main() -> None:
     """CLI entry point — see module docstring for examples."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--src", default="/home/fratnikov/weather_bench/1.40625deg")
-    parser.add_argument("--dst", default="/home/fa.buzaev/era5_memmap")
+    parser.add_argument("--dst", default="/home/ebugaev/era5_memmap")
     parser.add_argument("--prefix", default="predformer_usa_2000_2004")
     parser.add_argument("--start-year", type=int, default=2000)
     parser.add_argument("--end-year", type=int, default=2004)

@@ -13,7 +13,7 @@
 # =============================================================================
 # Production training of PredFormer-USA on 2 GPUs (single-node DDP) with the
 # §2.5 memmap path:
-#   1. Stage /home/fa.buzaev/era5_memmap/predformer_usa_2000_2004.dat to
+#   1. Stage /home/ebugaev/era5_memmap/predformer_usa_2000_2004.dat to
 #      /tmp on the compute node (1-2 min; ~25 GB on InfiniBand).
 #   2. Export MEMMAP_PATH_OVERRIDE so train.build_dataset reads the staged
 #      copy without rewriting configs/predformer_usa_memmap.yaml.
@@ -26,7 +26,7 @@ export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 export MASTER_PORT="${MASTER_PORT:-$((29000 + ${SLURM_JOB_ID:-0} % 1000))}"
 
-weatherpred__repo_root="${REPO_ROOT:-${SLURM_SUBMIT_DIR:-/home/fa.buzaev/WeatherPredictions}}"
+weatherpred__repo_root="${REPO_ROOT:-${SLURM_SUBMIT_DIR:-/home/ebugaev/WeatherPredictions}}"
 weatherpred__launcher="${weatherpred__repo_root}/sh_files/launch_train.sh"
 if [[ ! -f "${weatherpred__launcher}" ]]; then
   weatherpred__launcher="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/launch_train.sh"
@@ -34,7 +34,7 @@ fi
 
 # Memmap staging — same trick as bench step4 (which reduced data_wait by
 # ~2400x vs Lustre random access).
-ORIG_MEMMAP="${ORIG_MEMMAP:-/home/fa.buzaev/era5_memmap/predformer_usa_2000_2004.dat}"
+ORIG_MEMMAP="${ORIG_MEMMAP:-/home/ebugaev/era5_memmap/predformer_usa_2000_2004.dat}"
 STAGE_DIR="${STAGE_DIR:-/tmp/${USER:-$(id -un)}/era5_stage_${SLURM_JOB_ID:-local}}"
 mkdir -p "${STAGE_DIR}"
 echo "[train-2gpu] staging memmap ${ORIG_MEMMAP} -> ${STAGE_DIR}/"

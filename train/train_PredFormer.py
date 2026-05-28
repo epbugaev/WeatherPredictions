@@ -64,7 +64,7 @@ def train_model() -> None:
         val_loader_kwargs={"batch_size": 8, "num_workers": 4},
         lr=5e-4,
         max_epoch=20,
-        checkpoint_base="/home/epbugaev/checkpoints/",
+        checkpoint_base="/home/ebugaev/checkpoints/",
     )
 
 

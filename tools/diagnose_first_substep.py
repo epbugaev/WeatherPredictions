@@ -71,7 +71,7 @@ def dump(name: str, t: torch.Tensor | float) -> None:
 
 
 def main() -> None:
-    memmap_path = "/home/fa.buzaev/era5_memmap/predformer_globe_2000_2018.dat"
+    memmap_path = "/home/ebugaev/era5_memmap/predformer_globe_2000_2018.dat"
     ts = pd.Timestamp("2005-01-01 00:00:00")
     print("=== Diagnostic first-substep dump ===")
     print(f"memmap: {memmap_path}")

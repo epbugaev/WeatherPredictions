@@ -14,7 +14,7 @@ Memmap convention:
 
 Запуск (cluster, v4 raw):
     python tools/physics_baseline.py \
-        --memmap-path /home/fa.buzaev/era5_memmap/predformer_globe_2000_2018.dat \
+        --memmap-path /home/ebugaev/era5_memmap/predformer_globe_2000_2018.dat \
         --start-time 2000-01-01 --end-time 2010-12-31 \
         --stride-hours 24 --lead-hours 1 \
         --stencil fd4 --coriolis spherical --time-scheme euler \
@@ -466,7 +466,7 @@ def run_baseline(cfg: BaselineConfig, smoke: bool = False) -> None:
 def parse_args(argv: list[str] | None = None) -> tuple[BaselineConfig, bool]:
     p = argparse.ArgumentParser()
     p.add_argument(
-        "--memmap-path", default="/home/fa.buzaev/era5_memmap/predformer_globe_2000_2018.dat"
+        "--memmap-path", default="/home/ebugaev/era5_memmap/predformer_globe_2000_2018.dat"
     )
     p.add_argument("--memmap-meta-path", default=None)
     p.add_argument(

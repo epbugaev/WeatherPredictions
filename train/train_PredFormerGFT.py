@@ -72,8 +72,8 @@ def train_model() -> None:
         val_loader_kwargs={"batch_size": 8, "num_workers": 4},
         lr=1e-4,
         max_epoch=20,
-        checkpoint_base="/home/epbugaev/checkpoints/",
-        log_code_file="/home/epbugaev/WeatherPredictions/Models/PredFormerTwoO.py",
+        checkpoint_base="/home/ebugaev/checkpoints/",
+        log_code_file="/home/ebugaev/WeatherPredictions/Models/PredFormerTwoO.py",
     )
 
 

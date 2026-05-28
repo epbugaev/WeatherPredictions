@@ -77,7 +77,7 @@ data:
     start_time: "2004-01-01 00:00:00"
     end_time: "2004-12-30 00:00:00"
     batch_size: 8
-  memmap_path: /home/fa.buzaev/era5_memmap/predformer_usa_2000_2004.dat
+  memmap_path: /home/ebugaev/era5_memmap/predformer_usa_2000_2004.dat
 
 training:
   litmodel: mutiout_f
@@ -85,7 +85,7 @@ training:
   max_epoch: 2000
 
 logging:
-  checkpoint_base: /home/fa.buzaev/WeatherPredictions/checkpoints/
+  checkpoint_base: /home/ebugaev/checkpoints/
 ```
 
 Important details:

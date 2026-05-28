@@ -36,7 +36,7 @@ model:
 data:
   dataset_version: v4
   # Built by sh_files/repack_era5_globe.sh (full-globe 32x64, 2000-2018).
-  memmap_path: /home/fa.buzaev/era5_memmap/predformer_globe_2000_2018.dat
+  memmap_path: /home/ebugaev/era5_memmap/predformer_globe_2000_2018.dat
   # No cut — full globe.
   include_target: false
   lead_time: 1
@@ -86,6 +86,6 @@ trainer:
   skip_non_finite_loss: true
 
 logging:
-  checkpoint_base: /home/fa.buzaev/WeatherPredictions/checkpoints/
+  checkpoint_base: /home/ebugaev/checkpoints/
   comet_project: WeatherPredictions
   log_code_file: null

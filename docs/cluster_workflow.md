@@ -46,7 +46,7 @@
 
   ```bash
   git remote -v
-  ssh cluster "cd /home/fa.buzaev/WeatherPredictions && git remote -v"
+  ssh cluster "cd /home/ebugaev/WeatherPredictions && git remote -v"
   ```
 
   Обе команды должны вернуть один и тот же URL.
@@ -55,10 +55,10 @@
 
 ### На кластере (одноразово)
 
-- Клон лежит в [`/home/fa.buzaev/WeatherPredictions`](../).
+- Клон лежит в [`/home/ebugaev/WeatherPredictions`](../).
 - Создано conda-окружение `weatherpred-gft-fix` (см. [`environment.yml`](../environment.yml) + [`requirements.txt`](../requirements.txt)).
 - Активируется одним из двух способов (автоматически в [`sh_files/_shell_contract.sh`](../sh_files/_shell_contract.sh)):
-  1. `CONDA_ENV_BIN=/home/fa.buzaev/.conda/envs/weatherpred-gft-fix/bin` — prepend в `PATH`. Самый быстрый путь; можно прописать в `~/.bashrc` на кластере или в `${REPO_ROOT}/.env`.
+  1. `CONDA_ENV_BIN=/home/ebugaev/.conda/envs/weatherpred-gft-fix/bin` — prepend в `PATH`. Самый быстрый путь; можно прописать в `~/.bashrc` на кластере или в `${REPO_ROOT}/.env`.
   2. Fallback: `module load Python/Miniconda_v25` → `conda activate weatherpred-gft-fix`. Работает только под Slurm.
 
 ## 2. Локальный dev-loop
@@ -78,7 +78,7 @@ bash sh_files/remote_submit.sh sh_files/train_simvp_usa_v4_2gpu.sh
 1. Проверка чистоты worktree (`git diff --quiet HEAD` + untracked files).
 2. `git push origin HEAD:<current-branch>`.
 3. По SSH к `cluster`:
-   - `cd /home/fa.buzaev/WeatherPredictions`
+   - `cd /home/ebugaev/WeatherPredictions`
    - `git fetch --prune origin`
    - `git checkout <branch>` (или `-b` если не существует локально на кластере)
    - `git pull --ff-only origin <branch>` — упадёт, если истории разошлись (вместо тихого `reset --hard`).
@@ -158,7 +158,7 @@ ssh cluster squeue -j <JOB_ID>
 ssh cluster sacct -u fa.buzaev --starttime=today --format=JobID,JobName,State,Elapsed,MaxRSS
 
 # Tail логов уже запущенного job-а:
-ssh cluster "cd /home/fa.buzaev/WeatherPredictions && tail -F logs/slurm-train-simvp-usa-v4-2gpu-<JOB_ID>.{out,err}"
+ssh cluster "cd /home/ebugaev/WeatherPredictions && tail -F logs/slurm-train-simvp-usa-v4-2gpu-<JOB_ID>.{out,err}"
 
 # Отмена:
 ssh cluster scancel <JOB_ID>

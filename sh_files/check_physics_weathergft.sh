@@ -23,12 +23,12 @@ export PYTHONUNBUFFERED=1
 
 # SLURM copies the job script into /var/spool/.../job<ID>/, so we cannot use
 # ${BASH_SOURCE[0]} to locate sh_files/. Anchor via SLURM_SUBMIT_DIR or a fallback.
-REPO_ROOT_FOR_CONTRACT="${REPO_ROOT:-${SLURM_SUBMIT_DIR:-/home/fa.buzaev/WeatherPredictions}}"
+REPO_ROOT_FOR_CONTRACT="${REPO_ROOT:-${SLURM_SUBMIT_DIR:-/home/ebugaev/WeatherPredictions}}"
 _sc_here="${REPO_ROOT_FOR_CONTRACT}/sh_files"
 # shellcheck source=sh_files/_shell_contract.sh
 source "${_sc_here}/_shell_contract.sh" "${_sc_here}"
 
-MEMMAP_PATH="${MEMMAP_PATH:-/home/fa.buzaev/era5_memmap/predformer_globe_2000_2018.dat}"
+MEMMAP_PATH="${MEMMAP_PATH:-/home/ebugaev/era5_memmap/predformer_globe_2000_2018.dat}"
 MEAN_STD_PATH="${MEAN_STD_PATH:-}"  # empty = memmap raw (no de-normalisation)
 HORIZON="${HORIZON_HOURS:-48}"
 BLOCK_DT="${BLOCK_DT_SECONDS:-300}"

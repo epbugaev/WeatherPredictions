@@ -82,7 +82,7 @@ def scale_diff(diff: torch.Tensor, x: torch.Tensor, diff_ratio: float = DIFF_RAT
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument(
-        "--memmap-path", default="/home/fa.buzaev/era5_memmap/predformer_globe_2000_2018.dat"
+        "--memmap-path", default="/home/ebugaev/era5_memmap/predformer_globe_2000_2018.dat"
     )
     p.add_argument("--memmap-meta-path", default=None)
     p.add_argument("--mean-std-path", default="")

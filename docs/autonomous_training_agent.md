@@ -84,7 +84,7 @@ bash sh_files/remote_submit.sh sh_files/train_<...>_usa_v4_2gpu.sh
 `logs/slurm-<job-name>-<JobID>.{out,err}`.
 
 **Статус job'а:** `ssh cluster squeue -j <JobID>` (пусто = завершён/упал).
-**Хвост логов:** `ssh cluster "cd /home/fa.buzaev/WeatherPredictions && tail -n 200 logs/slurm-<job-name>-<JobID>.err"`.
+**Хвост логов:** `ssh cluster "cd /home/ebugaev/WeatherPredictions && tail -n 200 logs/slurm-<job-name>-<JobID>.err"`.
 **Отмена:** `ssh cluster scancel <JobID>`.
 
 **Метрики (Comet):** `.venv/bin/python Models/dev/fetch_comet_metrics.py`
