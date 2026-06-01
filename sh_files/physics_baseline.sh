@@ -39,11 +39,20 @@ export OMP_NUM_THREADS=4
 export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
-REPO_ROOT="${REPO_ROOT:-${SLURM_SUBMIT_DIR:-/home/ebugaev/WeatherPredictions}}"
+REPO_ROOT="${REPO_ROOT:-${SLURM_SUBMIT_DIR:-${HOME}/WeatherPredictions}}"
+weatherpred__env_file="${REPO_ROOT}/.env"
+if [[ -f "${weatherpred__env_file}" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "${weatherpred__env_file}"
+  set +a
+  REPO_ROOT="${REPO_ROOT:-${SLURM_SUBMIT_DIR:-${HOME}/WeatherPredictions}}"
+fi
 cd "${REPO_ROOT}"
 
-: "${MEMMAP_PATH:?Set MEMMAP_PATH to a packed globe memmap .dat before running this checker.}"
-MEAN_STD_PATH="${MEAN_STD_PATH:-/home/fratnikov/weather_bench/1.40625deg/mean_std.npy}"
+MEMMAP_PATH="${MEMMAP_PATH:-${WEATHERPRED_GLOBE_MEMMAP:-}}"
+: "${MEMMAP_PATH:?Set MEMMAP_PATH or WEATHERPRED_GLOBE_MEMMAP to a packed globe memmap .dat before running this checker.}"
+MEAN_STD_PATH="${MEAN_STD_PATH:-${WEATHERBENCH_MEAN_STD_PATH:-${WEATHERBENCH_ROOT:-/home/fratnikov/weather_bench}/1.40625deg/mean_std.npy}}"
 START_TIME="${START_TIME:-2000-01-01 00:00:00}"
 END_TIME="${END_TIME:-2010-12-31 23:00:00}"
 STRIDE_HOURS="${STRIDE_HOURS:-24}"

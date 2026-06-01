@@ -23,8 +23,7 @@ Boundary: replicate-через-cat (как в оригинале старой ф
 
 CPU-only. Запуск:
     python tools/check_physics_weathergft.py \
-        --memmap-path /home/ebugaev/era5_memmap/predformer_globe_2000_2018.dat \
-        --mean-std-path /home/ebugaev/weather_bench/1.40625deg/mean_std.npy
+        --memmap-path "$WEATHERPRED_GLOBE_MEMMAP"
 """
 
 from __future__ import annotations
@@ -47,6 +46,7 @@ from tools.check_physics_common import (
     run_72h_rollout,
 )
 from utils.old_physics import make_weathergft_ops
+from utils.paths import globe_memmap_path
 
 # Физические константы — R_d (per-mass) в гидростатике + адиабатика.
 R_D = 287.0  # сухой воздух, J/(kg·K)
@@ -55,9 +55,7 @@ C_P = 1005.0  # теплоёмкость, J/(kg·K)
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument(
-        "--memmap-path", default="/home/ebugaev/era5_memmap/predformer_globe_2000_2018.dat"
-    )
+    p.add_argument("--memmap-path", default=globe_memmap_path())
     p.add_argument("--memmap-meta-path", default=None)
     p.add_argument(
         "--mean-std-path",

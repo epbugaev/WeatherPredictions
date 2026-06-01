@@ -6,7 +6,8 @@ import os
 import sys
 from argparse import ArgumentParser
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+PROJECT_ROOT = os.environ.get("REPO_ROOT", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(PROJECT_ROOT)
 
 from Data.weatherbench_128 import WeatherBench128
 from Models.WeatherGFTSingle import GFT
@@ -68,7 +69,7 @@ def train_model() -> None:
         val_loader_kwargs={"batch_size": 2, "num_workers": 4},
         lr=1e-4,
         max_epoch=20,
-        log_code_file="/home/ebugaev/WeatherPredictions/Models/WeatherGFTSingle.py",
+        log_code_file=os.path.join(PROJECT_ROOT, "Models", "WeatherGFTSingle.py"),
     )
 
 

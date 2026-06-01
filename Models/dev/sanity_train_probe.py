@@ -16,7 +16,7 @@ Run on the cluster (where the constants netCDF lives), single card::
 
     python -m Models.dev.sanity_train_probe \
         --path-to-constants \
-        /home/fratnikov/weather_bench/1.40625deg/constants/constants_1.40625deg.nc \
+        "${WEATHERBENCH_ROOT:-/home/fratnikov/weather_bench}/1.40625deg/constants/constants_1.40625deg.nc" \
         --steps 300 --loss-type MSE --weight-decay 0.02
 
 ``--ndepth`` shrinks the 24-block stack for a fast CPU smoke (default 24 mirrors

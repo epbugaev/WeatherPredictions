@@ -16,8 +16,9 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from Data.weatherbench_128 import WeatherBench128
 from Models.PredFormer import PredFormer_Model
 from train._common import run_legacy_training
+from utils.paths import weatherbench_constants_path
 
-_CONSTANTS_PATH = "/home/fratnikov/weather_bench/1.40625deg/constants/constants_1.40625deg.nc"
+_CONSTANTS_PATH = weatherbench_constants_path()
 
 
 def train_model() -> None:
@@ -64,7 +65,6 @@ def train_model() -> None:
         val_loader_kwargs={"batch_size": 8, "num_workers": 4},
         lr=5e-4,
         max_epoch=20,
-        checkpoint_base="/home/ebugaev/checkpoints/",
     )
 
 

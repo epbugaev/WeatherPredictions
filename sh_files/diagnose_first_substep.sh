@@ -10,7 +10,7 @@
 #SBATCH --error=logs/slurm-%x-%j.err
 set -euo pipefail
 export PYTHONUNBUFFERED=1
-REPO_ROOT_FOR_CONTRACT="${REPO_ROOT:-${SLURM_SUBMIT_DIR:-/home/ebugaev/WeatherPredictions}}"
+REPO_ROOT_FOR_CONTRACT="${REPO_ROOT:-${SLURM_SUBMIT_DIR:-${HOME}/WeatherPredictions}}"
 _sc_here="${REPO_ROOT_FOR_CONTRACT}/sh_files"
 source "${_sc_here}/_shell_contract.sh" "${_sc_here}"
 python tools/diagnose_first_substep.py

@@ -22,7 +22,7 @@ Run on the cluster (where the constants netCDF is available):
 
     python -m Models.dev.sanity_predformer_no \
         --path-to-constants \
-        /home/fratnikov/weather_bench/1.40625deg/constants/constants_1.40625deg.nc
+        "${WEATHERBENCH_ROOT:-/home/fratnikov/weather_bench}/1.40625deg/constants/constants_1.40625deg.nc"
 
 Optional: ``--full-grid`` runs the same configs on the global 128x256 grid
 with no cut, to verify large-N behavior of SpectralMixer2D.

@@ -30,7 +30,7 @@ model:
     scale_dim: 4
     depth: 1
     Ndepth: 24
-    path_to_constants: /home/fratnikov/weather_bench/5.625deg/constants/constants_5.625deg.nc
+    path_to_constants: "${WEATHERBENCH_ROOT:-/home/fratnikov/weather_bench}/5.625deg/constants/constants_5.625deg.nc"
     # No cut: the constants file is already on the 32x64 globe grid.
 
 data:
@@ -86,6 +86,6 @@ trainer:
   skip_non_finite_loss: true
 
 logging:
-  checkpoint_base: /home/ebugaev/checkpoints/
-  comet_project: WeatherPredictions
+  checkpoint_base: "${WEATHERPRED_CHECKPOINT_BASE:-./checkpoints}"
+  comet_project: "${COMET_PROJECT_NAME:-WeatherPredictions}"
   log_code_file: null

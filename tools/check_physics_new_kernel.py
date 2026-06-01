@@ -43,13 +43,12 @@ from tools.check_physics_common import (
     run_72h_rollout,
 )
 from utils.physics import Grid, GridConfig, PurePDEKernel
+from utils.paths import globe_memmap_path
 
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument(
-        "--memmap-path", default="/home/ebugaev/era5_memmap/predformer_globe_2000_2018.dat"
-    )
+    p.add_argument("--memmap-path", default=globe_memmap_path())
     p.add_argument("--memmap-meta-path", default=None)
     p.add_argument(
         "--mean-std-path", default="", help="Empty: assume memmap holds raw physical units."

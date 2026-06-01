@@ -84,11 +84,11 @@ bash sh_files/remote_submit.sh sh_files/train_<...>_usa_v4_2gpu.sh
 `logs/slurm-<job-name>-<JobID>.{out,err}`.
 
 **Статус job'а:** `ssh cluster squeue -j <JobID>` (пусто = завершён/упал).
-**Хвост логов:** `ssh cluster "cd /home/ebugaev/WeatherPredictions && tail -n 200 logs/slurm-<job-name>-<JobID>.err"`.
+**Хвост логов:** `ssh cluster "cd ${REMOTE_REPO:-/home/<cluster-user>/WeatherPredictions} && tail -n 200 logs/slurm-<job-name>-<JobID>.err"`.
 **Отмена:** `ssh cluster scancel <JobID>`.
 
 **Метрики (Comet):** `.venv/bin/python Models/dev/fetch_comet_metrics.py`
-(читает `.env`: `COMET_API_KEY`; workspace `buzaev-fedor`, project `weatherpredictions`).
+(читает `.env`: `COMET_API_KEY`, `COMET_WORKSPACE`, `COMET_PROJECT_NAME`).
 Ключевые метрики: `weighted_rmse/{z,t,u,v,q}/<level>` на h ∈ {6, 24, 48}; контроль
 здоровья: `frac_ic_blown_up`, NaN/inf в `val_loss`. Если набор/форма вывода
 `fetch_comet_metrics.py` не покрывает нужное — расширь **только этот dev-скрипт**

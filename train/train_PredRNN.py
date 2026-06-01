@@ -8,7 +8,8 @@ from argparse import ArgumentParser
 
 from torch.utils.data import Subset
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+PROJECT_ROOT = os.environ.get("REPO_ROOT", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(PROJECT_ROOT)
 
 from Models.PredRNN import PredRNN_Model
 
@@ -69,7 +70,7 @@ def train_model() -> None:
         lr=1e-4,
         max_epoch=4,
         metrics_source=valid_data,
-        log_code_file="/home/ebugaev/WeatherPredictions/Models/imvp_v2.py",
+        log_code_file=os.path.join(PROJECT_ROOT, "Models", "imvp_v2.py"),
     )
 
 

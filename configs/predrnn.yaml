@@ -57,6 +57,6 @@ trainer:
   static_graph: true
 
 logging:
-  checkpoint_base: /home/ebugaev/checkpoints/
-  comet_project: WeatherPredictions
+  checkpoint_base: "${WEATHERPRED_CHECKPOINT_BASE:-./checkpoints}"
+  comet_project: "${COMET_PROJECT_NAME:-WeatherPredictions}"
   log_code_file: null

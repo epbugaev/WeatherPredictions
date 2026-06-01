@@ -23,13 +23,22 @@ export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 export MASTER_PORT="${MASTER_PORT:-$((29000 + ${SLURM_JOB_ID:-0} % 1000))}"
 
-weatherpred__repo_root="${REPO_ROOT:-${SLURM_SUBMIT_DIR:-/home/ebugaev/WeatherPredictions}}"
+weatherpred__repo_root="${REPO_ROOT:-${SLURM_SUBMIT_DIR:-${HOME}/WeatherPredictions}}"
+weatherpred__env_file="${weatherpred__repo_root}/.env"
+if [[ -f "${weatherpred__env_file}" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "${weatherpred__env_file}"
+  set +a
+  weatherpred__repo_root="${REPO_ROOT:-${weatherpred__repo_root}}"
+fi
 weatherpred__launcher="${weatherpred__repo_root}/sh_files/launch_train.sh"
 if [[ ! -f "${weatherpred__launcher}" ]]; then
   weatherpred__launcher="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/launch_train.sh"
 fi
 
-: "${ORIG_MEMMAP:?Set ORIG_MEMMAP to the packed USA memmap .dat for v4. Use predformer_usa for the legacy WeatherBench files.}"
+ORIG_MEMMAP="${ORIG_MEMMAP:-${WEATHERPRED_USA_MEMMAP:-}}"
+: "${ORIG_MEMMAP:?Set ORIG_MEMMAP or WEATHERPRED_USA_MEMMAP to the packed USA memmap .dat for v4.}"
 STAGE_DIR="${STAGE_DIR:-/tmp/${USER:-$(id -un)}/era5_stage_${SLURM_JOB_ID:-local}}"
 mkdir -p "${STAGE_DIR}"
 echo "[train-2gpu-v4] staging memmap ${ORIG_MEMMAP} -> ${STAGE_DIR}/"

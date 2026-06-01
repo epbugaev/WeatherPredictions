@@ -65,15 +65,25 @@ class CometExperiment:
             appended so re-runs of one config stay distinguishable in Comet.
         api_key: Comet API key; if empty, an environment-variable lookup is
             performed inside ``comet_ml``.
+        workspace: Optional Comet workspace slug.
     """
 
-    def __init__(self, project_name: str, experiment_name: str, api_key: str = "") -> None:
+    def __init__(
+        self,
+        project_name: str,
+        experiment_name: str,
+        api_key: str = "",
+        workspace: str | None = None,
+    ) -> None:
         if api_key:
             os.environ["COMET_API_KEY"] = api_key
         run_key = "".join(random.choices(string.ascii_lowercase + string.digits, k=50))
         os.environ["COMET_EXPERIMENT_KEY"] = run_key
         comet_ml.login()
-        self._experiment = comet_ml.Experiment(project_name=project_name)
+        experiment_kwargs = {"project_name": project_name}
+        if workspace:
+            experiment_kwargs["workspace"] = workspace
+        self._experiment = comet_ml.Experiment(**experiment_kwargs)
         # Comet does not enforce unique display names: re-running the same
         # YAML config (e.g. round-1 vs round-2, or after a fix) would create
         # several experiments all literally named ``experiment_name`` and they
@@ -114,11 +124,11 @@ def build_experiment(
     """Build the right experiment for this rank.
 
     Args:
-        logging_cfg: ``logging`` section from the YAML config; reads
-            ``comet_project``. The Comet API key is taken from
-            ``$COMET_API_KEY`` (see ``.env`` and ``sh_files/_shell_contract.sh``);
-            ``logging.comet_api_key`` is read only as a legacy override
-            and should be left unset in committed configs.
+        logging_cfg: ``logging`` section from the YAML config. ``COMET_PROJECT_NAME``
+            and ``COMET_WORKSPACE`` override the YAML values when set. The Comet API
+            key is taken from ``$COMET_API_KEY`` (see ``.env`` and
+            ``sh_files/_shell_contract.sh``); ``logging.comet_api_key`` is read only
+            as a legacy override and should be left unset in committed configs.
         experiment_name: Display name (taken from ``experiment.name`` in YAML).
         is_main: Only main-rank processes create a real Comet experiment.
 
@@ -128,10 +138,14 @@ def build_experiment(
     if not is_main:
         return NullExperiment()
 
-    project_name = logging_cfg.get("comet_project", "WeatherPredictions")
+    project_name = os.environ.get("COMET_PROJECT_NAME") or logging_cfg.get(
+        "comet_project", "WeatherPredictions"
+    )
+    workspace = logging_cfg.get("comet_workspace") or os.environ.get("COMET_WORKSPACE")
     api_key = logging_cfg.get("comet_api_key", "")
     return CometExperiment(
         project_name=project_name,
         experiment_name=experiment_name,
         api_key=api_key,
+        workspace=workspace,
     )

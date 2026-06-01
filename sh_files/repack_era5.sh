@@ -42,12 +42,12 @@ fi
 # shellcheck source=sh_files/_shell_contract.sh
 source "${_sc_here}/_shell_contract.sh" "${_sc_here}"
 
-DST="${REPACK_DST:-/home/ebugaev/era5_memmap}"
+DST="${REPACK_DST:-${WEATHERPRED_MEMMAP_DIR:-${HOME}/era5_memmap}}"
 PREFIX="${REPACK_PREFIX:-predformer_usa_2000_2004}"
 START_YEAR="${REPACK_START_YEAR:-2000}"
 END_YEAR="${REPACK_END_YEAR:-2004}"
 CUT="${REPACK_CUT:-75 107 164 228}"
-SRC="${REPACK_SRC:-/home/fratnikov/weather_bench/1.40625deg}"
+SRC="${REPACK_SRC:-${WEATHERBENCH_INPUT_ROOT:-${WEATHERBENCH_ROOT:-/home/fratnikov/weather_bench}/1.40625deg}}"
 RES_SUFFIX="${REPACK_RES_SUFFIX:-1.40625deg}"
 
 mkdir -p "${DST}"

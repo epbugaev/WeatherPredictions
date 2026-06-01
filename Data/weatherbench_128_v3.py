@@ -8,6 +8,8 @@ import torch
 from torch.profiler import record_function
 from torch.utils.data import Dataset
 
+from utils.paths import weatherbench_input_root, weatherbench_npy_root
+
 
 class WeatherBench128(Dataset):
     returns_normalized = True
@@ -27,8 +29,9 @@ class WeatherBench128(Dataset):
         end_time_y: int = 1,
         cut=None,
         num_preload=12,
-        data_folder: str = "/home/fratnikov/weather_bench/npy/1.40625deg/",
-        input_folder: str = "/home/fratnikov/weather_bench/1.40625deg/",
+        data_folder: str | None = None,
+        input_folder: str | None = None,
+        mean_std_path: str | None = None,
     ):
 
         self.variables_list = [
@@ -105,8 +108,9 @@ class WeatherBench128(Dataset):
         # ``data_folder`` is the dir whose basename pattern (YYYY-HHHH.npy) the
         # loader parses to extract year/hour; ``input_folder`` is the parent dir
         # of per-variable netCDF subfolders actually opened by ``custom_np_load``.
-        self.data_folder = data_folder
-        self.input_folder = input_folder
+        self.data_folder = data_folder or weatherbench_npy_root()
+        self.input_folder = input_folder or weatherbench_input_root()
+        self.mean_std_path = mean_std_path
         self.start_time = start_time
         self.end_time = end_time
         self.include_target = include_target
@@ -260,19 +264,23 @@ class WeatherBench128(Dataset):
         ]
 
     def get_mean_std(self):
-        mean_std_path = os.path.join(
+        mean_std_path = self.mean_std_path or os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "example_data",
             "mean_std.json",
         )
 
-        with open(mean_std_path) as f:
-            mean_std = json.load(f)
-
-        # mean_std.json already contains only the 69 selected variables,
-        # in the same order as self.variables_list.
-        self.the_mean = np.array(mean_std["mean"], dtype=np.float32)
-        self.the_std = np.array(mean_std["std"], dtype=np.float32)
+        if mean_std_path.endswith(".npy"):
+            mean_std = np.load(mean_std_path)
+            self.the_mean = mean_std[0, self.variables_list].astype(np.float32)
+            self.the_std = mean_std[1, self.variables_list].astype(np.float32)
+        else:
+            with open(mean_std_path) as f:
+                mean_std = json.load(f)
+            # mean_std.json already contains only the 69 selected variables,
+            # in the same order as self.variables_list.
+            self.the_mean = np.array(mean_std["mean"], dtype=np.float32)
+            self.the_std = np.array(mean_std["std"], dtype=np.float32)
 
         self.data_mean_tensor = torch.from_numpy(self.the_mean).float()
         self.data_std_tensor = torch.from_numpy(self.the_std).float()

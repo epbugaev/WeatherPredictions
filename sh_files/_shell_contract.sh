@@ -8,8 +8,10 @@
 #
 # Переменные окружения (все опциональны):
 #   REPO_ROOT      — корень клона; иначе SLURM_SUBMIT_DIR либо авто от расположения скрипта.
-#   CONDA_ENV_BIN  — абсолютный путь к .../envs/weatherpred-gft-fix/bin; если задан, prepend в PATH.
-#                    Иначе на Slurm: ``module load Python/Miniconda_v25`` + ``conda activate weatherpred-gft-fix``.
+#   CONDA_ENV_BIN  — абсолютный путь к .../envs/<env>/bin; если задан, prepend в PATH.
+#   WEATHERPRED_CONDA_ENV_NAME — имя conda env для fallback-активации
+#                    (default: weatherpred-gft-fix).
+#                    Иначе на Slurm: ``module load Python/Miniconda_v25`` + ``conda activate <env>``.
 #   .env           — если ${REPO_ROOT}/.env существует, экспортируется перед активацией окружения.
 #
 # Якорь репозитория — наличие train.py в корне (канонический entrypoint).
@@ -48,8 +50,10 @@ export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
 mkdir -p "${REPO_ROOT}/logs"
 
-if [[ -z "${CONDA_ENV_BIN:-}" && -x /home/ebugaev/.conda/envs/weatherpred-gft-fix/bin/python ]]; then
-  CONDA_ENV_BIN="/home/ebugaev/.conda/envs/weatherpred-gft-fix/bin"
+WEATHERPRED_CONDA_ENV_NAME="${WEATHERPRED_CONDA_ENV_NAME:-weatherpred-gft-fix}"
+
+if [[ -z "${CONDA_ENV_BIN:-}" && -x "${HOME}/.conda/envs/${WEATHERPRED_CONDA_ENV_NAME}/bin/python" ]]; then
+  CONDA_ENV_BIN="${HOME}/.conda/envs/${WEATHERPRED_CONDA_ENV_NAME}/bin"
 fi
 
 if [[ -n "${CONDA_ENV_BIN:-}" ]]; then
@@ -75,11 +79,11 @@ elif [[ -n "${SLURM_JOB_ID:-}" ]]; then
     # ``<anchor>`` как имя окружения и при этом не испортила ``$1`` launcher'а.
     # shellcheck disable=SC1091
     source "$(conda info --base)/bin/activate"
-    conda activate weatherpred-gft-fix
+    conda activate "${WEATHERPRED_CONDA_ENV_NAME}"
   }
   weatherpred__activate_conda_fallback
   unset -f weatherpred__activate_conda_fallback
-  echo "[_shell_contract] CONDA_ENV_BIN не задан; активировано conda-окружение weatherpred-gft-fix через Python/Miniconda_v25." >&2
+  echo "[_shell_contract] CONDA_ENV_BIN не задан; активировано conda-окружение ${WEATHERPRED_CONDA_ENV_NAME} через Python/Miniconda_v25." >&2
 fi
 
 unset weatherpred__shell_contract_anchor

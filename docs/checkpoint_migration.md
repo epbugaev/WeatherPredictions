@@ -43,7 +43,7 @@ python -m utils.checkpointing convert old.ckpt new.pt --keep-optimizer
 Batch convert an entire directory tree:
 
 ```bash
-find /home/ebugaev/checkpoints -name '*.ckpt' -print0 |
+find "${WEATHERPRED_CHECKPOINT_BASE:-./checkpoints}" -name '*.ckpt' -print0 |
   xargs -0 -I {} bash -c '
     src="{}"; dst="${src%.ckpt}.pt";
     python -m utils.checkpointing convert "$src" "$dst"

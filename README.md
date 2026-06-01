@@ -84,26 +84,33 @@ training:
   max_epoch: 2000
 
 logging:
-  checkpoint_base: /home/ebugaev/checkpoints/
+  checkpoint_base: "${WEATHERPRED_CHECKPOINT_BASE:-./checkpoints}"
+  comet_project: "${COMET_PROJECT_NAME:-WeatherPredictions}"
 ```
 
 Important details:
 
+- Before running on a cluster account, copy `.env.example` to `.env` and set
+  `COMET_API_KEY`, `COMET_WORKSPACE`, `REPO_ROOT`, `CONDA_ENV_BIN`,
+  `WEATHERPRED_CHECKPOINT_BASE`, and memmap paths for v4 runs.
 - `data.cut` is the spatial crop. USA configs use `[[75, 107], [164, 228]]`;
   the original South Atlantic crop is `[[36, 68], [125, 189]]`.
 - `PredFormerGFT` and `PredFormerGFT_HybridBlock` also need
   `model.params.cut` to crop their static constants to the same window as the
   data.
-- `v1` and `v3` use the legacy WeatherBench files. By default those paths stay
-  at `/home/fratnikov/weather_bench/...`, matching the pre-refactor setup.
+- `v1` and `v3` use legacy WeatherBench files. Set `WEATHERBENCH_ROOT` or the
+  fine-grained `WEATHERBENCH_INPUT_ROOT` / `WEATHERBENCH_NPY_ROOT` overrides
+  if your files are not under the shared HSE path.
 - `v3_memmap` and `v4` require an explicit packed memmap path. The committed
-  v4 configs use `memmap_path: null`; pass `MEMMAP_PATH_OVERRIDE` or set
-  `ORIG_MEMMAP` in the v4 Slurm scripts if you have such a file.
+  v4 configs use `memmap_path: null`; pass `MEMMAP_PATH_OVERRIDE`, or set
+  `WEATHERPRED_USA_MEMMAP` / `WEATHERPRED_GLOBE_MEMMAP` in `.env`. The v4
+  Slurm scripts still accept `ORIG_MEMMAP` for one-off overrides.
 - `v1`, `v3` and `v3_memmap` datasets return normalized tensors. `v4` returns
   raw memmap tensors; `trainer.py` applies `WeatherNormalize` on the batch.
 - Storage paths can be overridden without editing configs:
-  `DATA_FOLDER_OVERRIDE`, `INPUT_FOLDER_OVERRIDE`, `MEMMAP_PATH_OVERRIDE`,
-  `MEMMAP_META_PATH_OVERRIDE`, `CHECKPOINT_BASE_OVERRIDE`.
+  `DATA_FOLDER_OVERRIDE`, `INPUT_FOLDER_OVERRIDE`, `WEATHERBENCH_MEAN_STD_PATH`,
+  `MEMMAP_PATH_OVERRIDE`, `MEMMAP_META_PATH_OVERRIDE`,
+  `CHECKPOINT_BASE_OVERRIDE`, `WEATHERPRED_CHECKPOINT_BASE`.
 
 ## Model and Strategy Keys
 
@@ -135,8 +142,9 @@ loading native checkpoints and converting older Lightning `.ckpt` files.
 
 ## Data
 
-WeatherBench data paths in committed configs point to the HSE cluster. The
-v4 production configs expect packed memmaps, usually staged to node-local
+WeatherBench data paths in committed configs default to the shared HSE cluster
+root via `WEATHERBENCH_ROOT`. Override that in `.env` for another account or
+storage layout. The v4 production configs expect packed memmaps, usually staged to node-local
 `/tmp` by the matching Slurm scripts before training starts.
 
 The memmap loader validates channel count, variable order, crop metadata and

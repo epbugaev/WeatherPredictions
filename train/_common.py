@@ -27,6 +27,7 @@ from trainer import Trainer, TrainerConfig
 from utils.distributed import cleanup_distributed, setup_distributed
 from utils.experiment import build_experiment
 from utils.metrics import Metrics
+from utils.paths import checkpoint_base as default_checkpoint_base
 from utils.registry import get_strategy
 
 
@@ -55,7 +56,7 @@ def run_legacy_training(
     precision: int | str = 32,
     log_every_n_steps: int = 5,
     static_graph: bool = True,
-    checkpoint_base: str = "/home/ebugaev/checkpoints/",
+    checkpoint_base: str | None = None,
     comet_api_key: str = "",
     comet_project: str = "WeatherPredictions",
     log_code_file: str | None = None,
@@ -146,7 +147,10 @@ def run_legacy_training(
     mds = metrics_source if metrics_source is not None else train_data
     metrics = Metrics(mds.data_mean_tensor, mds.data_std_tensor)
 
-    checkpoint_base = os.environ.get("CHECKPOINT_BASE_OVERRIDE", checkpoint_base)
+    checkpoint_base = os.environ.get(
+        "CHECKPOINT_BASE_OVERRIDE",
+        checkpoint_base or default_checkpoint_base(),
+    )
     checkpoint_dir = os.path.join(checkpoint_base, exp_name, _make_run_id())
 
     experiment = build_experiment(

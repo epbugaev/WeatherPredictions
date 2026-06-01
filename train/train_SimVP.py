@@ -10,7 +10,8 @@ import os
 import sys
 from argparse import ArgumentParser
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+PROJECT_ROOT = os.environ.get("REPO_ROOT", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(PROJECT_ROOT)
 
 from Data.weatherbench_128_v3 import WeatherBench128
 from Models.SimVP import SimVP_Model
@@ -56,7 +57,7 @@ def train_model() -> None:
         val_loader_kwargs={"batch_size": 32, "num_workers": 8},
         lr=5e-4,
         max_epoch=20,
-        log_code_file="/home/ebugaev/WeatherPredictions/Models/SimVP.py",
+        log_code_file=os.path.join(PROJECT_ROOT, "Models", "SimVP.py"),
     )
 
 

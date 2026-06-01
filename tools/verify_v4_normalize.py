@@ -10,7 +10,7 @@ normalisation bug.
 
 Usage:
     python tools/verify_v4_normalize.py \\
-        --memmap /home/ebugaev/era5_memmap/predformer_usa_2000_2004.dat
+        --memmap "$WEATHERPRED_USA_MEMMAP"
 """
 
 from __future__ import annotations
@@ -22,13 +22,14 @@ import torch
 from Data.weatherbench_128_v3 import WeatherBench128Memmap
 from Data.weatherbench_128_v4 import WeatherBench128V4
 from utils.normalize import WeatherNormalize
+from utils.paths import usa_memmap_path
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--memmap",
-        default="/home/ebugaev/era5_memmap/predformer_usa_2000_2004.dat",
+        default=usa_memmap_path(),
     )
     parser.add_argument("--index", type=int, default=0)
     args = parser.parse_args()

@@ -6,6 +6,8 @@ from timm.layers import DropPath, to_2tuple, trunc_normal_
 from torch import einsum, nn
 from torch.distributions.normal import Normal
 
+from utils.paths import weatherbench_constants_path
+
 
 class PreNorm(nn.Module):
     def __init__(self, dim, fn):
@@ -609,7 +611,7 @@ model_config = {
     "use_moe": True,
     "num_experts": 4,  # Using more experts with ContentAwareMoE
     "use_improved_model": True,  # Flag to use the improved model
-    "path_to_constants": "/home/user/mamba_x_predformer/PredFormer/constants_1.40625deg.nc",
+    "path_to_constants": weatherbench_constants_path(),
 }
 
 # Smaller config for CPU fallback
@@ -638,7 +640,7 @@ model_config_small = {
     "use_moe": True,
     "num_experts": 20,
     "use_improved_model": True,  # Flag to use the improved model
-    "path_to_constants": "/home/user/mamba_x_predformer/PredFormer/constants_1.40625deg.nc",
+    "path_to_constants": weatherbench_constants_path(),
 }
 
 if __name__ == "__main__":

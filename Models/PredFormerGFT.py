@@ -953,7 +953,7 @@ model_config = {
     # depth
     'depth': 1,
     'Ndepth': 24,
-    'path_to_constants': '/home/fratnikov/weather_bench/1.40625deg/constants/constants_1.40625deg.nc',
+    'path_to_constants': '${WEATHERBENCH_ROOT:-/home/fratnikov/weather_bench}/1.40625deg/constants/constants_1.40625deg.nc',
 }
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

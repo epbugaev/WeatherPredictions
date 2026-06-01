@@ -40,6 +40,7 @@ from tools.check_physics_common import (
     split_channels_69,
 )
 from utils.old_physics import make_weathergft_ops
+from utils.paths import globe_memmap_path
 
 L = 2.5e6
 R = 8.314
@@ -71,7 +72,7 @@ def dump(name: str, t: torch.Tensor | float) -> None:
 
 
 def main() -> None:
-    memmap_path = "/home/ebugaev/era5_memmap/predformer_globe_2000_2018.dat"
+    memmap_path = globe_memmap_path()
     ts = pd.Timestamp("2005-01-01 00:00:00")
     print("=== Diagnostic first-substep dump ===")
     print(f"memmap: {memmap_path}")

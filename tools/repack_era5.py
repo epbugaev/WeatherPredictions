@@ -14,8 +14,8 @@ Output files:
 
 Usage:
     python tools/repack_era5.py \\
-        --src /home/fratnikov/weather_bench/1.40625deg \\
-        --dst /home/ebugaev/era5_memmap \\
+        --src "$WEATHERBENCH_INPUT_ROOT" \\
+        --dst "$WEATHERPRED_MEMMAP_DIR" \\
         --prefix predformer_usa_2000_2004 \\
         --start-year 2000 --end-year 2004 \\
         --cut 75 107 164 228
@@ -32,6 +32,8 @@ from collections.abc import Sequence
 
 import h5netcdf
 import numpy as np
+
+from utils.paths import memmap_dir, weatherbench_input_root
 
 # Channel indices kept in the packed memmap. Mirrors
 # ``Data.weatherbench_128_v3.WeatherBench128.variables_list`` so the on-disk
@@ -221,8 +223,8 @@ def repack(
 def main() -> None:
     """CLI entry point — see module docstring for examples."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--src", default="/home/fratnikov/weather_bench/1.40625deg")
-    parser.add_argument("--dst", default="/home/ebugaev/era5_memmap")
+    parser.add_argument("--src", default=weatherbench_input_root())
+    parser.add_argument("--dst", default=memmap_dir())
     parser.add_argument("--prefix", default="predformer_usa_2000_2004")
     parser.add_argument("--start-year", type=int, default=2000)
     parser.add_argument("--end-year", type=int, default=2004)

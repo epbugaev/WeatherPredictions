@@ -17,6 +17,7 @@ import argparse
 import datetime
 import os
 import random
+import re
 import string
 from typing import Any
 
@@ -32,13 +33,28 @@ from utils.distributed import cleanup_distributed, setup_distributed
 from utils.experiment import build_experiment
 from utils.metrics import Metrics
 from utils.normalize import WeatherNormalize
+from utils.paths import checkpoint_base as default_checkpoint_base
 from utils.registry import get_dataset, get_model, get_strategy
+
+
+_ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-(.*?))?\}")
+
+
+def _expand_env_value(value: Any) -> Any:
+    """Recursively expand ``${VAR}`` and ``${VAR:-default}`` in YAML values."""
+    if isinstance(value, str):
+        return _ENV_PATTERN.sub(lambda m: os.environ.get(m.group(1), m.group(2) or ""), value)
+    if isinstance(value, list):
+        return [_expand_env_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _expand_env_value(item) for key, item in value.items()}
+    return value
 
 
 def load_config(path: str) -> dict[str, Any]:
     """Read a YAML config file into a plain dict."""
     with open(path) as f:
-        return yaml.safe_load(f)
+        return _expand_env_value(yaml.safe_load(f))
 
 
 def build_dataset(data_cfg: dict[str, Any], split: str):
@@ -79,9 +95,24 @@ def build_dataset(data_cfg: dict[str, Any], split: str):
     # over the YAML value — used by submit scripts that stage data to local
     # NVMe and need to redirect Dataset reads to the staged copy without
     # rewriting the committed YAML.
-    for key in ("data_folder", "input_folder", "memmap_path", "memmap_meta_path"):
+    for key in (
+        "data_folder",
+        "input_folder",
+        "mean_std_path",
+        "memmap_path",
+        "memmap_meta_path",
+    ):
         env_key = key.upper() + "_OVERRIDE"
         env_value = os.environ.get(env_key)
+        if env_value:
+            params[key] = env_value
+            continue
+        if key == "data_folder":
+            env_value = os.environ.get("WEATHERBENCH_NPY_ROOT")
+        elif key == "input_folder":
+            env_value = os.environ.get("WEATHERBENCH_INPUT_ROOT")
+        elif key == "mean_std_path":
+            env_value = os.environ.get("WEATHERBENCH_MEAN_STD_PATH")
         if env_value:
             params[key] = env_value
             continue
@@ -273,10 +304,11 @@ def train(config: dict[str, Any], config_path: str | None = None) -> None:
     exp_cfg = config.get("experiment", {})
     logging_cfg = config.get("logging", {})
     exp_name = exp_cfg.get("name", "experiment")
-    checkpoint_base = os.environ.get(
-        "CHECKPOINT_BASE_OVERRIDE", logging_cfg.get("checkpoint_base", "./checkpoints/")
+    checkpoint_root = os.environ.get(
+        "CHECKPOINT_BASE_OVERRIDE",
+        logging_cfg.get("checkpoint_base") or default_checkpoint_base(),
     )
-    checkpoint_dir = os.path.join(checkpoint_base, exp_name, _make_run_id())
+    checkpoint_dir = os.path.join(checkpoint_root, exp_name, _make_run_id())
 
     experiment = build_experiment(logging_cfg, experiment_name=exp_name, is_main=is_main)
     log_code_file = logging_cfg.get("log_code_file")

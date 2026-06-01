@@ -17,7 +17,7 @@ set -euo pipefail
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-${SLURM_CPUS_PER_TASK:-16}}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-${SLURM_CPUS_PER_TASK:-16}}"
 export PYTHONUNBUFFERED=1
-REPO_ROOT_FOR_CONTRACT="${REPO_ROOT:-${SLURM_SUBMIT_DIR:-/home/ebugaev/WeatherPredictions}}"
+REPO_ROOT_FOR_CONTRACT="${REPO_ROOT:-${SLURM_SUBMIT_DIR:-${HOME}/WeatherPredictions}}"
 _sc_here="${REPO_ROOT_FOR_CONTRACT}/sh_files"
 source "${_sc_here}/_shell_contract.sh" "${_sc_here}"
 

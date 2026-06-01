@@ -137,9 +137,9 @@ bash sh_files/check_physics_ablation.sh        # или remote_submit.sh
 
 ## Comet-эксперименты
 
-| method | url |
+| method | Comet experiment id |
 | --- | --- |
-| fd4_euler_spherical_E0 | comet.com/buzaev-fedor/weatherpredictions/3908eb3886c94d618338de7826125429 |
+| fd4_euler_spherical_E0 | 3908eb3886c94d618338de7826125429 |
 | fd4_ssp_rk3_spherical_E1 | …/23ca9c9807ee473e86687329a00449b4 |
 | fd4_ssp_rk3_spherical_E2+hyperdiff | …/9f9f4eb7bc4740ea9a4961976c62480d |
 | fd4_ssp_rk3_spherical_E3+hyperdiff+polar | …/780e1ec3282744bca5a5d7b26465b1c8 |

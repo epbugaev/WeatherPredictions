@@ -6,9 +6,15 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
+from utils.paths import (
+    weatherbench_input_root,
+    weatherbench_mean_std_path,
+    weatherbench_npy_root,
+)
 
-def custom_np_load(file_path):
-    input_folder = "/home/fratnikov/weather_bench/1.40625deg/"
+
+def custom_np_load(file_path, input_folder: str | None = None):
+    input_folder = input_folder or weatherbench_input_root()
     match_set = {
         "2m_temperature": "t2m",
         "10m_u_component_of_wind": "u10",
@@ -63,6 +69,9 @@ class WeatherBench128(Dataset):
         lead_time: int = 6,
         interval: int = 6,
         muti_target_steps: int = 1,
+        data_folder: str | None = None,
+        input_folder: str | None = None,
+        mean_std_path: str | None = None,
     ):
 
         self.variables_list = [
@@ -136,9 +145,9 @@ class WeatherBench128(Dataset):
             82,
             83,
         ]
-        self.data_folder = (
-            "/home/fratnikov/weather_bench/npy/1.40625deg/"
-        )
+        self.data_folder = data_folder or weatherbench_npy_root()
+        self.input_folder = input_folder or weatherbench_input_root()
+        self.mean_std_path = mean_std_path or weatherbench_mean_std_path()
         self.start_time = start_time
         self.end_time = end_time
         self.include_target = include_target
@@ -182,7 +191,7 @@ class WeatherBench128(Dataset):
         ]
 
     def get_mean_std(self):
-        mean_std = np.load("/home/ebugaev/weather_bench/1.40625deg/mean_std.npy")
+        mean_std = np.load(self.mean_std_path)
         # mean_std = np.ones([2, 110]) # Test
         self.the_mean = mean_std[0]
         self.the_std = mean_std[1]
@@ -199,7 +208,7 @@ class WeatherBench128(Dataset):
 
     def __getitem__(self, index):
         file_path = self.x_file_list[index]
-        sample_x = custom_np_load(file_path)  # np.load(file_path)
+        sample_x = custom_np_load(file_path, self.input_folder)  # np.load(file_path)
         # sample_x = np.zeros([110, 128, 256]) # Test
         sample_x = self.normalization(sample_x)
         sample_x = torch.from_numpy(sample_x).float()
@@ -212,7 +221,7 @@ class WeatherBench128(Dataset):
                 self.data_folder,  # str(y_time.year),
                 str(y_time.year) + f"-{self.idx_in_year(y_time):04d}" + ".npy",
             )
-            sample_y = custom_np_load(y_file_path)  # np.load(y_file_path)
+            sample_y = custom_np_load(y_file_path, self.input_folder)  # np.load(y_file_path)
             # sample_y = np.zeros([110, 128, 256]) # Test
             sample_y = self.normalization(sample_y)
             sample_y = torch.from_numpy(sample_y).float()

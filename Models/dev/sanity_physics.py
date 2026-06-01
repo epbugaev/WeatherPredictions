@@ -1,7 +1,7 @@
 """Single-card sanity-check для `utils.physics` vs `utils.old_physics`.
 
 Запуск:
-    cd /Users/buzaev-fa/WeatherPredictions
+    cd /path/to/WeatherPredictions
     python -m Models.dev.sanity_physics
 
 Что проверяет:

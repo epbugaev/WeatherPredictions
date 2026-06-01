@@ -14,7 +14,7 @@ Memmap convention:
 
 Запуск (cluster, v4 raw):
     python tools/physics_baseline.py \
-        --memmap-path /home/ebugaev/era5_memmap/predformer_globe_2000_2018.dat \
+        --memmap-path "$WEATHERPRED_GLOBE_MEMMAP" \
         --start-time 2000-01-01 --end-time 2010-12-31 \
         --stride-hours 24 --lead-hours 1 \
         --stencil fd4 --coriolis spherical --time-scheme euler \
@@ -73,6 +73,7 @@ from utils.physics import (
     pde_residual,
     potential_vorticity_proxy,
 )
+from utils.paths import globe_memmap_path
 
 # =============================================================================
 # Channel layout (after variables_list filter, 69 channels)
@@ -465,9 +466,7 @@ def run_baseline(cfg: BaselineConfig, smoke: bool = False) -> None:
 
 def parse_args(argv: list[str] | None = None) -> tuple[BaselineConfig, bool]:
     p = argparse.ArgumentParser()
-    p.add_argument(
-        "--memmap-path", default="/home/ebugaev/era5_memmap/predformer_globe_2000_2018.dat"
-    )
+    p.add_argument("--memmap-path", default=globe_memmap_path())
     p.add_argument("--memmap-meta-path", default=None)
     p.add_argument(
         "--mean-std-path",

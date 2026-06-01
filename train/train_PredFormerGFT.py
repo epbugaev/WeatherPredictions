@@ -11,9 +11,10 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from Data.weatherbench_128_v3 import WeatherBench128
 from Models.PredFormerGFT import PredFormer_Model
 from train._common import run_legacy_training
+from utils.paths import weatherbench_constants_path
 from utils.regions import USA_CROP
 
-_CONSTANTS_PATH = "/home/fratnikov/weather_bench/1.40625deg/constants/constants_1.40625deg.nc"
+_CONSTANTS_PATH = weatherbench_constants_path()
 
 
 def train_model() -> None:
@@ -72,8 +73,11 @@ def train_model() -> None:
         val_loader_kwargs={"batch_size": 8, "num_workers": 4},
         lr=1e-4,
         max_epoch=20,
-        checkpoint_base="/home/ebugaev/checkpoints/",
-        log_code_file="/home/ebugaev/WeatherPredictions/Models/PredFormerTwoO.py",
+        log_code_file=os.path.join(
+            os.environ.get("REPO_ROOT", os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            "Models",
+            "PredFormerTwoO.py",
+        ),
     )
 
 

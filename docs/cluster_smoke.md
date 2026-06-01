@@ -97,7 +97,7 @@ NGPUS=2 NNODES=1 bash sh_files/launch_train.sh simvp_usa
 
 ```bash
 python -m utils.checkpointing convert \
-  /home/<user>/checkpoints/SimVP-USA/<run-id>/epoch=NN-val_loss=YYYY.ckpt \
+  "${WEATHERPRED_CHECKPOINT_BASE:-./checkpoints}/SimVP-USA/<run-id>/epoch=NN-val_loss=YYYY.ckpt" \
   /tmp/converted.pt
 
 # Загрузить в чистую модель и убедиться что веса совпадают:

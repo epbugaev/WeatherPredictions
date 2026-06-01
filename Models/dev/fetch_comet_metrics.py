@@ -23,7 +23,9 @@ if ENV_FILE.exists():
 from comet_ml.api import API  # noqa: E402
 
 API_KEY = os.environ["COMET_API_KEY"]
-WORKSPACE = os.environ.get("COMET_WORKSPACE", "buzaev-fedor")
+WORKSPACE = os.environ.get("COMET_WORKSPACE")
+if not WORKSPACE:
+    raise SystemExit("Set COMET_WORKSPACE in .env before fetching Comet metrics.")
 PROJECT = os.environ.get("COMET_PROJECT_NAME", "weatherpredictions")
 
 KEY_METRICS = (

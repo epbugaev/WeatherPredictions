@@ -23,8 +23,7 @@ Boundary: periodic (как в FD).
 
 CPU-only. Запуск:
     python tools/check_physics_weathergft_3.py \
-        --memmap-path /home/ebugaev/era5_memmap/predformer_globe_2000_2018.dat \
-        --mean-std-path /home/ebugaev/weather_bench/1.40625deg/mean_std.npy
+        --memmap-path "$WEATHERPRED_GLOBE_MEMMAP"
 """
 
 from __future__ import annotations
@@ -48,6 +47,7 @@ from tools.check_physics_common import (
     run_72h_rollout,
 )
 from utils.old_physics import make_weathergft_ops
+from utils.paths import globe_memmap_path
 
 # Константы из Models/dev/WeatherGFT_3.py:127-148.
 L = 2.5e6  # Дж/кг (для latent_heating)
@@ -62,9 +62,7 @@ PRECIP_THRESHOLD = 0.8  # порог rel humidity для convective precip
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument(
-        "--memmap-path", default="/home/ebugaev/era5_memmap/predformer_globe_2000_2018.dat"
-    )
+    p.add_argument("--memmap-path", default=globe_memmap_path())
     p.add_argument("--memmap-meta-path", default=None)
     p.add_argument(
         "--mean-std-path",

@@ -11,7 +11,7 @@
   1. Сгенерировать ключ (если нет):
 
      ```bash
-     ssh-keygen -t ed25519 -f ~/.ssh/charisma_hse_key -C "fa.buzaev@hse.ru"
+     ssh-keygen -t ed25519 -f ~/.ssh/charisma_hse_key -C "<cluster-user>@hse-hpc"
      ```
 
   2. Положить публичную часть на cHARISMa (через web-портал HSE HPC, либо через админа кластера):
@@ -25,7 +25,7 @@
      ```sshconfig
      Host cluster cluster.hpc.hse.ru
          HostName cluster.hpc.hse.ru
-         User fa.buzaev
+         User <cluster-user>
          Port 2222
          IdentityFile ~/.ssh/charisma_hse_key
          ServerAliveInterval 60
@@ -46,7 +46,7 @@
 
   ```bash
   git remote -v
-  ssh cluster "cd /home/ebugaev/WeatherPredictions && git remote -v"
+  ssh cluster "cd /home/<cluster-user>/WeatherPredictions && git remote -v"
   ```
 
   Обе команды должны вернуть один и тот же URL.
@@ -55,11 +55,39 @@
 
 ### На кластере (одноразово)
 
-- Клон лежит в [`/home/ebugaev/WeatherPredictions`](../).
-- Создано conda-окружение `weatherpred-gft-fix` (см. [`environment.yml`](../environment.yml) + [`requirements.txt`](../requirements.txt)).
+- Клон лежит в `/home/<cluster-user>/WeatherPredictions` или другом пути,
+  который указан в `REPO_ROOT`/`REMOTE_REPO`.
+- Создано conda-окружение `weatherpred-gft-fix` или `weatherpred-refactor`
+  (см. [`environment.yml`](../environment.yml) + [`requirements.txt`](../requirements.txt)).
 - Активируется одним из двух способов (автоматически в [`sh_files/_shell_contract.sh`](../sh_files/_shell_contract.sh)):
-  1. `CONDA_ENV_BIN=/home/ebugaev/.conda/envs/weatherpred-gft-fix/bin` — prepend в `PATH`. Самый быстрый путь; можно прописать в `~/.bashrc` на кластере или в `${REPO_ROOT}/.env`.
-  2. Fallback: `module load Python/Miniconda_v25` → `conda activate weatherpred-gft-fix`. Работает только под Slurm.
+  1. `CONDA_ENV_BIN=/home/<cluster-user>/.conda/envs/<env-name>/bin` — prepend в `PATH`. Самый быстрый путь; прописывайте в `${REPO_ROOT}/.env`.
+  2. Fallback: `module load Python/Miniconda_v25` → `conda activate ${WEATHERPRED_CONDA_ENV_NAME:-weatherpred-gft-fix}`. Работает только под Slurm.
+
+### Обязательные локальные параметры
+
+Перед экспериментами каждый пользователь копирует [`../.env.example`](../.env.example)
+в `.env` в корне своего кластерного клона и заполняет минимум:
+
+```bash
+COMET_API_KEY=your_comet_api_key
+COMET_WORKSPACE=your_comet_workspace
+COMET_PROJECT_NAME=weatherpredictions
+
+REPO_ROOT=/home/your_cluster_user/WeatherPredictions
+REMOTE_USER=your_cluster_user
+REMOTE_REPO=/home/your_cluster_user/WeatherPredictions
+CONDA_ENV_BIN=/home/your_cluster_user/.conda/envs/your_env_name/bin
+
+WEATHERPRED_CHECKPOINT_BASE=/home/your_cluster_user/checkpoints
+WEATHERPRED_MEMMAP_DIR=/home/your_cluster_user/era5_memmap
+WEATHERPRED_USA_MEMMAP=/home/your_cluster_user/era5_memmap/predformer_usa_2000_2004.dat
+
+WEATHERBENCH_ROOT=/home/fratnikov/weather_bench
+```
+
+Если raw WeatherBench лежит не в общем `/home/fratnikov/weather_bench`, задайте
+`WEATHERBENCH_INPUT_ROOT`, `WEATHERBENCH_NPY_ROOT`,
+`WEATHERBENCH_MEAN_STD_PATH` и `WEATHERBENCH_CONSTANTS_PATH`.
 
 ## 2. Локальный dev-loop
 
@@ -78,7 +106,7 @@ bash sh_files/remote_submit.sh sh_files/train_usa_2gpu.sh simvp_usa
 1. Проверка чистоты worktree (`git diff --quiet HEAD` + untracked files).
 2. `git push origin HEAD:<current-branch>`.
 3. По SSH к `cluster`:
-   - `cd /home/ebugaev/WeatherPredictions`
+   - `cd ${REMOTE_REPO}`
    - `git fetch --prune origin`
    - `git checkout <branch>` (или `-b` если не существует локально на кластере)
    - `git pull --ff-only origin <branch>` — упадёт, если истории разошлись (вместо тихого `reset --hard`).
@@ -149,16 +177,16 @@ GPU-типы (через `--constraint`):
 
 ```bash
 # Очередь — только свои job-ы:
-ssh cluster squeue -u fa.buzaev
+ssh cluster squeue -u <cluster-user>
 
 # Конкретный job:
 ssh cluster squeue -j <JOB_ID>
 
 # История завершённых:
-ssh cluster sacct -u fa.buzaev --starttime=today --format=JobID,JobName,State,Elapsed,MaxRSS
+ssh cluster sacct -u <cluster-user> --starttime=today --format=JobID,JobName,State,Elapsed,MaxRSS
 
 # Tail логов уже запущенного job-а:
-ssh cluster "cd /home/ebugaev/WeatherPredictions && tail -F logs/slurm-train-simvp-usa-v4-2gpu-<JOB_ID>.{out,err}"
+ssh cluster "cd ${REMOTE_REPO:-/home/<cluster-user>/WeatherPredictions} && tail -F logs/slurm-train-simvp-usa-v4-2gpu-<JOB_ID>.{out,err}"
 
 # Отмена:
 ssh cluster scancel <JOB_ID>

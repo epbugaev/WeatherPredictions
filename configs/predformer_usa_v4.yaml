@@ -28,7 +28,7 @@ model:
     scale_dim: 4
     depth: 1
     Ndepth: 24
-    path_to_constants: /home/fratnikov/weather_bench/1.40625deg/constants/constants_1.40625deg.nc
+    path_to_constants: "${WEATHERBENCH_ROOT:-/home/fratnikov/weather_bench}/1.40625deg/constants/constants_1.40625deg.nc"
     cut: [[75, 107], [164, 228]]
 
 data:
@@ -115,6 +115,6 @@ trainer:
   val_every_n_epochs: 3
 
 logging:
-  checkpoint_base: /home/ebugaev/checkpoints/
-  comet_project: WeatherPredictions
+  checkpoint_base: "${WEATHERPRED_CHECKPOINT_BASE:-./checkpoints}"
+  comet_project: "${COMET_PROJECT_NAME:-WeatherPredictions}"
   log_code_file: null

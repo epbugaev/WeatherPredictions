@@ -73,7 +73,7 @@ cp "${CFG_PATH}" "${TRACE_DIR}/config_snapshot.yaml"
 git rev-parse HEAD > "${TRACE_DIR}/git_sha.txt" 2>/dev/null || echo unknown > "${TRACE_DIR}/git_sha.txt"
 
 # Optional staging step: copy the netCDF tree for the configured year range
-# from Lustre (/home/fratnikov/...) to local NVMe under /tmp, then patch the
+# from the WeatherBench input root to local NVMe under /tmp, then patch the
 # config snapshot to point ``data.input_folder`` at the staged path. Activate
 # by setting ``STAGE_DATA=1`` (default off). ``STAGE_YEARS`` overrides the
 # default 2000-2004 window. Used to test the §2.4 hypothesis: that 24
@@ -88,7 +88,7 @@ if [[ "${STAGE_DATA:-0}" = "1" ]]; then
 total_cloud_cover total_precipitation toa_incident_solar_radiation \
 geopotential temperature specific_humidity relative_humidity \
 u_component_of_wind v_component_of_wind vorticity potential_vorticity"
-  STAGE_SRC="${STAGE_SRC:-/home/fratnikov/weather_bench/1.40625deg}"
+  STAGE_SRC="${STAGE_SRC:-${WEATHERBENCH_INPUT_ROOT:-${WEATHERBENCH_ROOT:-/home/fratnikov/weather_bench}/1.40625deg}}"
 
   STAGE_START=$(date +%s)
   echo "[bench-stage] years=${STAGE_YEARS} src=${STAGE_SRC} dst=${STAGE_DIR}"
@@ -122,7 +122,7 @@ PYEOF
 fi
 
 # Optional memmap staging: copy the v3_memmap .dat + .meta.json from wherever
-# the bench config points (typically Lustre /home/ebugaev/era5_memmap/) to
+# the bench config points (typically Lustre under WEATHERPRED_MEMMAP_DIR) to
 # local NVMe under /tmp, then patch ``data.memmap_path`` in the config
 # snapshot. Activate by setting ``STAGE_MEMMAP=1`` (default off). Used to
 # isolate Lustre random-access overhead in the §2.5 path from the rest of

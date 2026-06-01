@@ -58,6 +58,6 @@ trainer:
   float32_matmul_precision: high
   val_every_n_epochs: 3
 logging:
-  checkpoint_base: "/home/ebugaev/checkpoints/"
-  comet_project: WeatherPredictions
+  checkpoint_base: "${WEATHERPRED_CHECKPOINT_BASE:-./checkpoints}"
+  comet_project: "${COMET_PROJECT_NAME:-WeatherPredictions}"
   log_code_file:

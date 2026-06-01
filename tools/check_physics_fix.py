@@ -50,6 +50,7 @@ from tools.check_physics_common import (
     run_72h_rollout,
 )
 from utils.old_physics import make_weathergft_ops
+from utils.paths import globe_memmap_path
 
 # Physical constants
 L = 2.5e6  # Latent heat of vaporisation, J/kg
@@ -81,9 +82,7 @@ def scale_diff(diff: torch.Tensor, x: torch.Tensor, diff_ratio: float = DIFF_RAT
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument(
-        "--memmap-path", default="/home/ebugaev/era5_memmap/predformer_globe_2000_2018.dat"
-    )
+    p.add_argument("--memmap-path", default=globe_memmap_path())
     p.add_argument("--memmap-meta-path", default=None)
     p.add_argument("--mean-std-path", default="")
     p.add_argument("--H", type=int, default=32)
