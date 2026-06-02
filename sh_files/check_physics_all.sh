@@ -1,7 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=phys-all
 #SBATCH --partition=rocky
-#SBATCH --qos=rocky
 #SBATCH --cpus-per-task=16
 #SBATCH --ntasks=1
 #SBATCH --nodes=1

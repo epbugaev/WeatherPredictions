@@ -1,7 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=train-weathergft-usa-v4-2gpu
 #SBATCH --partition=rocky
-#SBATCH --qos=rocky
 #SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=16
 #SBATCH --ntasks=1

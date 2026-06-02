@@ -24,7 +24,6 @@
 #   bench.log (stdout/stderr), config_snapshot.yaml, git_sha.txt.
 # =============================================================================
 #SBATCH --partition=rocky
-#SBATCH --qos=rocky
 #SBATCH --constraint="type_e|type_f"
 #SBATCH --nodes=1
 #SBATCH --ntasks=1

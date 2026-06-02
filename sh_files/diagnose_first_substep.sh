@@ -1,7 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=phys-diag-substep
 #SBATCH --partition=rocky
-#SBATCH --qos=rocky
 #SBATCH --cpus-per-task=4
 #SBATCH --ntasks=1
 #SBATCH --nodes=1

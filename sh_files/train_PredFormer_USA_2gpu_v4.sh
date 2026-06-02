@@ -1,7 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=PredFormer-USA-2gpu-v4
 #SBATCH --partition=rocky
-#SBATCH --qos=rocky
 #SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=16
 #SBATCH --ntasks=1

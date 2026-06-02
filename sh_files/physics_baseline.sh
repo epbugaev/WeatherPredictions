@@ -1,7 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=physics-baseline
 #SBATCH --partition=rocky
-#SBATCH --qos=rocky
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --ntasks=1

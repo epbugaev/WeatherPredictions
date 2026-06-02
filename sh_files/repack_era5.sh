@@ -21,7 +21,6 @@
 #   sbatch sh_files/repack_era5.sh
 # =============================================================================
 #SBATCH --partition=rocky
-#SBATCH --qos=rocky
 #SBATCH --constraint="type_e|type_f"
 #SBATCH --nodes=1
 #SBATCH --ntasks=1

@@ -1,7 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=smoke-pi-iam4vp-usa-2gpu
 #SBATCH --partition=rocky
-#SBATCH --qos=rocky
 #SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=16
 #SBATCH --ntasks=1
