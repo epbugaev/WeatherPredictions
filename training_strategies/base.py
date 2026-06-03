@@ -19,12 +19,14 @@ manual backward.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
 import torch
 from torch import nn
 
+from training_strategies._index_maps import DEFAULT_VALIDATION_CHANNELS
 from utils.experiment import Experiment
 from utils.metrics import Metrics
 
@@ -68,7 +70,12 @@ class StepStrategy(ABC):
 
     manual_optimization: bool = False
 
-    def __init__(self, loss_type: str = "MAE", **_: Any) -> None:
+    def __init__(
+        self,
+        loss_type: str = "MAE",
+        validation_channels: Sequence[str] | str | None = None,
+        **_: Any,
+    ) -> None:
         if loss_type == "MAE":
             self.loss = self._mae_loss
         elif loss_type == "MSE":
@@ -76,6 +83,23 @@ class StepStrategy(ABC):
         else:
             raise ValueError(f"Unknown loss_type {loss_type!r}; expected MAE or MSE")
         self.loss_type = loss_type
+        self.validation_channels = self._coerce_validation_channels(validation_channels)
+
+    @staticmethod
+    def _coerce_validation_channels(
+        validation_channels: Sequence[str] | str | None,
+    ) -> tuple[str, ...]:
+        """Normalize optional config-driven validation channel names.
+
+        ``None`` keeps the default exact 69-channel WeatherBench layout. A
+        comma-separated string is accepted so users can override from YAML/env
+        plumbing without changing code.
+        """
+        if validation_channels is None:
+            return DEFAULT_VALIDATION_CHANNELS
+        if isinstance(validation_channels, str):
+            return tuple(part.strip() for part in validation_channels.split(",") if part.strip())
+        return tuple(validation_channels)
 
     @staticmethod
     def _mae_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -116,6 +140,47 @@ class StepStrategy(ABC):
             )
         return metrics
 
+    def _horizon_mean_rmse_metrics(
+        self,
+        ctx: StepContext,
+        pred: torch.Tensor,
+        target: torch.Tensor,
+        index_map: dict[str, int],
+        prefix: str = "",
+    ) -> dict[str, torch.Tensor]:
+        """Build `{prefix}RMSE_<var>_mean` from all validation target timesteps.
+
+        The channel labels must be exact entries in ``index_map``. For example,
+        ``t500`` is valid but ``t450`` is not present in the 69-channel
+        WeatherBench layout unless a separate interpolation metric is added.
+        """
+        if not self.validation_channels:
+            return {}
+
+        missing = [name for name in self.validation_channels if name not in index_map]
+        if missing:
+            available = ", ".join(index_map)
+            raise ValueError(
+                "Unknown validation channel(s): "
+                f"{', '.join(missing)}. Available exact channels: {available}"
+            )
+
+        rmse = ctx.metrics.WRMSE(pred, target)
+        if rmse.dim() == 1:
+            rmse_by_channel = rmse
+        elif rmse.dim() == 2:
+            rmse_by_channel = rmse.mean(dim=0)
+        else:
+            raise ValueError(
+                "WRMSE must return shape (C,) for 4D inputs or (T, C) for 5D inputs, "
+                f"got {tuple(rmse.shape)}"
+            )
+
+        return {
+            f"{prefix}RMSE_{var_name}_mean": rmse_by_channel[index_map[var_name]]
+            for var_name in self.validation_channels
+        }
+
     def _build_val_metrics(
         self,
         ctx: StepContext,
@@ -126,8 +191,10 @@ class StepStrategy(ABC):
         target_last: torch.Tensor,
         index_map: dict[str, int],
         prefix: str = "",
+        pred_full: torch.Tensor | None = None,
+        target_full: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        """Собрать val-словарь: ``val_loss`` + per-variable RMSE на 1-м/последнем шаге.
+        """Собрать val-словарь: ``val_loss`` + per-variable RMSE.
 
         Args:
             ctx: StepContext (используется ``ctx.metrics.WRMSE``).
@@ -139,9 +206,11 @@ class StepStrategy(ABC):
             index_map: имя переменной → индекс канала в WRMSE-векторе.
             prefix: опциональный префикс ключей; по умолчанию пустой — единый
                 namespace метрик для всех моделей (нужно для сравнения в Comet).
+            pred_full: весь прогноз ``(B, T, C, H, W)`` для horizon-mean RMSE.
+            target_full: весь target той же формы.
 
         Returns:
-            ``{"val_loss": ..., "{prefix}RMSE_<var>_first/last": ...}``.
+            ``{"val_loss": ..., "{prefix}RMSE_<var>_first/last/mean": ...}``.
         """
         rmse_first = ctx.metrics.WRMSE(pred_first, target_first)
         rmse_last = ctx.metrics.WRMSE(pred_last, target_last)
@@ -151,6 +220,12 @@ class StepStrategy(ABC):
                 rmse_first, rmse_last, index_map, val_loss.device, prefix=prefix
             )
         )
+        if pred_full is not None and target_full is not None:
+            metrics.update(
+                self._horizon_mean_rmse_metrics(
+                    ctx, pred_full, target_full, index_map, prefix=prefix
+                )
+            )
         return metrics
 
     @abstractmethod

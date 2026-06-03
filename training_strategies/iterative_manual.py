@@ -110,6 +110,7 @@ class IterativeManualStep(StepStrategy):
 
         pred_list, total_loss = self._iterate_timesteps(model, x, y, ctx, backward_each_step=False)
 
+        y_hat = torch.stack(pred_list, dim=1)
         val_loss = total_loss / self.time_prediction
         metrics = self._build_val_metrics(
             ctx,
@@ -119,6 +120,8 @@ class IterativeManualStep(StepStrategy):
             pred_last=pred_list[-1],
             target_last=y[:, -1],
             index_map=MULTIOUT_INDEX_MAP,
+            pred_full=y_hat,
+            target_full=y[:, : self.time_prediction],
         )
 
         if ctx.is_main_process and (not self.log_figures_once or not self._figures_logged):

@@ -69,4 +69,6 @@ class SimpleStep(StepStrategy):
             pred_last=y_hat[:, -1],
             target_last=y[:, -1],
             index_map=BASEMODEL_INDEX_MAP,
+            pred_full=y_hat,
+            target_full=y,
         )

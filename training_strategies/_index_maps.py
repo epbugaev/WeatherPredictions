@@ -80,3 +80,9 @@ MULTIOUT_INDEX_MAP: dict[str, int] = _build_channel_index_map()
 
 
 VIS_VARS: tuple[str, ...] = ("u50", "v50", "z500", "u500", "v500")
+
+# Default validation-channel curves. These are exact channels present in the
+# 69-channel dataloader layout; intermediate levels such as ``t450`` are not
+# represented by WeatherBench 1.40625deg and should not be logged as direct
+# channel metrics without interpolation.
+DEFAULT_VALIDATION_CHANNELS: tuple[str, ...] = tuple(BASEMODEL_INDEX_MAP)

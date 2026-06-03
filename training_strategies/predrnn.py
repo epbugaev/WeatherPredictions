@@ -74,6 +74,8 @@ class PredRNNStep(StepStrategy):
             pred_last=y_hat[:, -1],
             target_last=y[:, -1],
             index_map=MULTIOUT_INDEX_MAP,
+            pred_full=y_hat,
+            target_full=y,
         )
 
         if ctx.is_main_process and (not self.log_figures_once or not self._figures_logged):

@@ -80,6 +80,8 @@ class TimestepSelectStep(StepStrategy):
             pred_last=y_hat[:, -1],
             target_last=y_sel[:, -1],
             index_map=MULTIOUT_INDEX_MAP,
+            pred_full=y_hat,
+            target_full=y_sel,
         )
 
         if ctx.is_main_process and (not self.log_figures_once or not self._figures_logged):
