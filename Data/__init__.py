@@ -18,7 +18,14 @@ from utils.registry import register_dataset
 
 def _build_v1(**params):
     """v1 ignores the explicit start/end_time_x/y parameters (legacy)."""
-    for legacy_key in ("start_time_x", "end_time_x", "start_time_y", "end_time_y"):
+    for legacy_key in (
+        "start_time_x",
+        "end_time_x",
+        "start_time_y",
+        "end_time_y",
+        "sample_stride",
+        "frame_interval",
+    ):
         params.pop(legacy_key, None)
     return WeatherBench128V1(**params)
 

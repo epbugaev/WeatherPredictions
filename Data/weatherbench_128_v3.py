@@ -21,6 +21,8 @@ class WeatherBench128(Dataset):
         include_target: bool = False,
         lead_time: int = 6,
         interval: int = 6,
+        sample_stride: int | None = None,
+        frame_interval: int = 1,
         muti_target_steps: int = 1,
         # New parameters for time sequences
         start_time_x: int = 0,
@@ -114,9 +116,18 @@ class WeatherBench128(Dataset):
         self.start_time = start_time
         self.end_time = end_time
         self.include_target = include_target
-        self.lead_time = lead_time
-        self.interval = interval
-        self.muti_target_steps = muti_target_steps
+        self.lead_time = int(lead_time)
+        # Legacy configs used `interval`. In the refactored loader it is the
+        # stride between sample starts; frame spacing is controlled separately.
+        self.sample_stride = int(sample_stride if sample_stride is not None else interval)
+        self.interval = self.sample_stride
+        self.frame_interval = int(frame_interval)
+        self.muti_target_steps = int(muti_target_steps)
+
+        if self.sample_stride <= 0:
+            raise ValueError("sample_stride/interval must be a positive number of hours")
+        if self.frame_interval <= 0:
+            raise ValueError("frame_interval must be a positive number of hours")
 
         # Store the new sequence parameters
         self.start_time_x = start_time_x
@@ -136,14 +147,24 @@ class WeatherBench128(Dataset):
         self.init_time_list()
         self.init_file_list()
         self.get_mean_std()
-        # Update the length calculation to account for inclusive ranges
-        self.length = len(self.x_time_ilst) - max(
-            self.end_time_x,
-            self.end_time_y + self.muti_target_steps * self.lead_time // self.interval,
+        # `x_time_ilst` is an hourly calendar. `sample_start_indices` selects
+        # which hours may start a training sample; frames inside each sample are
+        # still hour-by-hour unless `frame_interval` is explicitly changed.
+        self.max_sequence_offset = max(
+            self.end_time_x * self.frame_interval,
+            self.end_time_y * self.frame_interval + self.muti_target_steps * self.lead_time,
         )
+        max_start_idx = len(self.x_time_ilst) - 1 - self.max_sequence_offset
+        self.length = max_start_idx // self.sample_stride + 1 if max_start_idx >= 0 else 0
+        self.sample_start_indices = [
+            i * self.sample_stride for i in range(self.length)
+        ]
 
         if self.length <= 0:
             raise ValueError("Not enough time steps available for the requested sequence lengths")
+        self.max_required_time = self.x_time_ilst[self.sample_start_indices[-1]] + pd.Timedelta(
+            hours=self.max_sequence_offset
+        )
 
         self.cut = cut
         if self.cut is None:
@@ -233,19 +254,7 @@ class WeatherBench128(Dataset):
         return self.preload[year + "-" + str(hour)]
 
     def init_time_list(self):
-        if self.include_target:
-            target_end_time = pd.to_datetime(self.end_time)
-            input_end_time = target_end_time - pd.Timedelta(
-                hours=self.muti_target_steps * self.lead_time
-            )
-            input_end_time_str = input_end_time.strftime("%Y-%m-%d %H:%M:%S")
-            self.x_time_ilst = pd.date_range(
-                self.start_time, input_end_time_str, freq=str(self.interval) + "h"
-            )
-        else:
-            self.x_time_ilst = pd.date_range(
-                self.start_time, self.end_time, freq=str(self.interval) + "h"
-            )
+        self.x_time_ilst = pd.date_range(self.start_time, self.end_time, freq="1h")
 
     def idx_in_year(self, time_stamp):
         year = time_stamp.year
@@ -324,8 +333,10 @@ class WeatherBench128(Dataset):
 
     def _build_sample_pair(self, index):
         """Общий цикл по таймстепам x/y, сборка и опциональный stack по muti_target_steps."""
+        sample_start_idx = self.sample_start_indices[index]
         x_sequence = [
-            self._read_x(index + i) for i in range(self.start_time_x, self.end_time_x + 1)
+            self._read_x(sample_start_idx + i * self.frame_interval)
+            for i in range(self.start_time_x, self.end_time_x + 1)
         ]
         with record_function("stack_x"):
             sample_x_sequence = torch.stack(x_sequence, dim=0)  # [T, C, H, W]
@@ -334,7 +345,7 @@ class WeatherBench128(Dataset):
         for steps in range(self.muti_target_steps):
             offset = pd.Timedelta(hours=(steps + 1) * self.lead_time)
             y_sequence = [
-                self._read_y(self.x_time_ilst[index + i] + offset)
+                self._read_y(self.x_time_ilst[sample_start_idx + i * self.frame_interval] + offset)
                 for i in range(self.start_time_y, self.end_time_y + 1)
             ]
             with record_function("stack_y"):
@@ -433,9 +444,7 @@ class WeatherBench128Memmap(WeatherBench128):
             row_starts[int(y)] = offset
             offset += int(n)
         self._memmap_row_starts = row_starts
-        max_target_time = self.x_time_ilst[self.length - 1 + self.end_time_y] + pd.Timedelta(
-            hours=self.muti_target_steps * self.lead_time
-        )
+        max_target_time = self.max_required_time
         required_years = set(range(self.x_time_ilst[0].year, max_target_time.year + 1))
         missing_years = sorted(required_years.difference(row_starts))
         if missing_years:

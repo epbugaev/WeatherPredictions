@@ -1,7 +1,9 @@
-# IAM4VP-USA-v4-72h: v4 raw-memmap (WeatherNormalize in trainer) + 72h horizon.
+# IAM4VP-USA-v4: v4 raw-memmap (WeatherNormalize in trainer).
 # Same training/data setup as PI-IAM4VP, but with the physics HybridBlock disabled.
+# Frames inside each sample are hourly; sample_stride controls the distance
+# between training sample starts.
 experiment:
-  name: IAM4VP-USA-v4-72h
+  name: IAM4VP-USA-v4
 model:
   type: PI-IAM4VP
   params:
@@ -15,7 +17,8 @@ data:
     - 228
   include_target: false
   lead_time: 0
-  interval: 12
+  sample_stride: 12
+  frame_interval: 1
   muti_target_steps: 1
   start_time_x: 0
   end_time_x: 5

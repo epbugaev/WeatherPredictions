@@ -1,6 +1,6 @@
 ---
 experiment:
-  name: WeatherGFT-USA-72h
+  name: WeatherGFT-USA
 model:
   type: WeatherGFT
   params:
@@ -88,7 +88,8 @@ data:
     - 228
   include_target: false
   lead_time: 0
-  interval: 6
+  sample_stride: 6
+  frame_interval: 1
   muti_target_steps: 1
   start_time_x: 0
   end_time_x: 0

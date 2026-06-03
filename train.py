@@ -84,6 +84,10 @@ def build_dataset(data_cfg: dict[str, Any], split: str):
         "start_time_y": data_cfg.get("start_time_y", 0),
         "end_time_y": data_cfg.get("end_time_y", 1),
     }
+    for key in ("sample_stride", "frame_interval"):
+        value = split_cfg.get(key, data_cfg.get(key))
+        if value is not None:
+            params[key] = value
 
     cut = split_cfg.get("cut", data_cfg.get("cut"))
     if cut is not None:

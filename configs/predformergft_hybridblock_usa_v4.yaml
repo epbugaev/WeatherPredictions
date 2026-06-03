@@ -1,8 +1,8 @@
-# PredFormerGFT-HybridBlock-USA-v4-72h: v4 raw-memmap (WeatherNormalize in trainer) + 72h horizon.
-# farthest target = (end_time_y-end_time_x)*interval + lead_time = 72h.
-# Models/strategies unchanged; only the data block differs vs *_usa_train.yaml.
+# PredFormerGFT-HybridBlock-USA-v4: v4 raw-memmap (WeatherNormalize in trainer).
+# Frames inside each sample are hourly; sample_stride controls the distance
+# between training sample starts.
 experiment:
-  name: PredFormerGFT-HybridBlock-USA-v4-72h
+  name: PredFormerGFT-HybridBlock-USA-v4
 model:
   type: PredFormerGFT_HybridBlock
   params:
@@ -32,7 +32,8 @@ data:
     - 228
   include_target: false
   lead_time: 0
-  interval: 6
+  sample_stride: 6
+  frame_interval: 1
   muti_target_steps: 1
   start_time_x: 0
   end_time_x: 11

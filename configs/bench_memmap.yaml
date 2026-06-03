@@ -36,7 +36,7 @@ data:
   memmap_path: null
   cut: [[75, 107], [164, 228]]
   include_target: false
-  lead_time: 1
+  lead_time: 0
   interval: 1
   muti_target_steps: 1
   start_time_x: 0
