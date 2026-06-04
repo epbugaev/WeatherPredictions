@@ -55,7 +55,7 @@ Each YAML config has these blocks:
 
 ```yaml
 experiment:
-  name: SimVP-USA-v4-72h
+  name: SimVP-USA-v4
 
 model:
   type: SimVP
@@ -65,6 +65,8 @@ model:
 data:
   dataset_version: v3
   cut: [[75, 107], [164, 228]]
+  sample_stride: 6      # hours between training sample starts
+  frame_interval: 1     # hours between neighboring frames inside one sample
   start_time_x: 0
   end_time_x: 11
   start_time_y: 12
@@ -95,6 +97,12 @@ Important details:
   `WEATHERPRED_CHECKPOINT_BASE`, and memmap paths for v4 runs.
 - `data.cut` is the spatial crop. USA configs use `[[75, 107], [164, 228]]`;
   the original South Atlantic crop is `[[36, 68], [125, 189]]`.
+- For `v3`, `v3_memmap`, and `v4`, the temporal window indices are frame
+  offsets. With `frame_interval: 1`, `start_time_x: 0`, `end_time_x: 11`
+  means hourly frames `t..t+11h`, and `start_time_y: 12`, `end_time_y: 23`
+  means hourly targets `t+12h..t+23h` before any `lead_time` offset.
+  `sample_stride` controls how far apart neighboring training sample starts
+  are. The legacy key `interval` is still accepted as a sample-start stride.
 - `PredFormerGFT` and `PredFormerGFT_HybridBlock` also need
   `model.params.cut` to crop their static constants to the same window as the
   data.
@@ -107,6 +115,13 @@ Important details:
   Slurm scripts still accept `ORIG_MEMMAP` for one-off overrides.
 - `v1`, `v3` and `v3_memmap` datasets return normalized tensors. `v4` returns
   raw memmap tensors; `trainer.py` applies `WeatherNormalize` on the batch.
+- Validation logs `RMSE_<channel>_first`, `RMSE_<channel>_last`, and
+  `RMSE_<channel>_mean` to Comet. Channel names follow the exact 69-channel
+  WeatherBench layout after filtering: `t2`, `u10`, `v10`, `tp`, then
+  `{z,t,r,u,v}{50,100,150,200,250,300,400,500,600,700,850,925,1000}`.
+  Intermediate pressure levels such as `t450` are not direct channels. To
+  restrict mean-channel logging, set `training.extra_kwargs.validation_channels`
+  to a list such as `[z500, t500, t850, u500, v500]`.
 - Storage paths can be overridden without editing configs:
   `DATA_FOLDER_OVERRIDE`, `INPUT_FOLDER_OVERRIDE`, `WEATHERBENCH_MEAN_STD_PATH`,
   `MEMMAP_PATH_OVERRIDE`, `MEMMAP_META_PATH_OVERRIDE`,

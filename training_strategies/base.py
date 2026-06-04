@@ -165,7 +165,7 @@ class StepStrategy(ABC):
                 f"{', '.join(missing)}. Available exact channels: {available}"
             )
 
-        rmse = ctx.metrics.WRMSE(pred, target)
+        rmse = torch.as_tensor(ctx.metrics.WRMSE(pred, target), device=target.device)
         if rmse.dim() == 1:
             rmse_by_channel = rmse
         elif rmse.dim() == 2:
