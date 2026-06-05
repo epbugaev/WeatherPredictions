@@ -147,9 +147,9 @@ def build_optimizer_and_scheduler(
     batch sizes where a cold ``lr`` is too aggressive in the first few epochs
     and the loss "jumps off" the basin found in epoch 1.
     """
-    lr = training_cfg.get("lr", 1e-4)
-    eta_min = training_cfg.get("eta_min", 0.0)
-    max_epoch = training_cfg.get("max_epoch", 20)
+    lr = float(training_cfg.get("lr", 1e-4))
+    eta_min = float(training_cfg.get("eta_min", 0.0))
+    max_epoch = int(training_cfg.get("max_epoch", 20))
     warmup_ratio = float(training_cfg.get("warmup_ratio", 0.0))
     warmup_start_factor = float(training_cfg.get("warmup_start_factor", 1e-3))
     weight_decay = float(training_cfg.get("weight_decay", 0.0))
