@@ -41,6 +41,42 @@ class IterativeManualStep(StepStrategy):
         self.log_figures_once = log_figures_once
         self._figures_logged = False
 
+    @staticmethod
+    def _inner_model(model: nn.Module) -> nn.Module:
+        return model.module if isinstance(model, nn.parallel.DistributedDataParallel) else model
+
+    def _physics_residual_aux_loss(
+        self,
+        model: nn.Module,
+        device: torch.device,
+    ) -> torch.Tensor:
+        inner = self._inner_model(model)
+        aux_fn = getattr(inner, "physics_residual_aux_loss", None)
+        if aux_fn is None:
+            return torch.zeros((), device=device)
+        aux_loss = aux_fn()
+        if aux_loss is None:
+            return torch.zeros((), device=device)
+        return aux_loss
+
+    def _physics_residual_diagnostics(
+        self,
+        model: nn.Module,
+    ) -> dict[str, torch.Tensor]:
+        inner = self._inner_model(model)
+        diagnostics_fn = getattr(inner, "physics_residual_diagnostics", None)
+        if diagnostics_fn is None:
+            return {}
+        return diagnostics_fn()
+
+    def _set_residual_warmup(self, model: nn.Module, epoch: int) -> None:
+        inner = self._inner_model(model)
+        warmup_epochs = int(getattr(inner, "residual_warmup_epochs", 0))
+        freeze = bool(getattr(inner, "freeze_iam4vp_for_residual_warmup", False))
+        setter = getattr(inner, "set_residual_warmup", None)
+        if setter is not None:
+            setter(freeze and epoch < warmup_epochs)
+
     def _iterate_timesteps(
         self,
         model: nn.Module,
@@ -49,7 +85,13 @@ class IterativeManualStep(StepStrategy):
         ctx: StepContext,
         *,
         backward_each_step: bool,
-    ) -> tuple[list[torch.Tensor], torch.Tensor]:
+    ) -> tuple[
+        list[torch.Tensor],
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        dict[str, torch.Tensor],
+    ]:
         """Run the per-timestep prediction loop, optionally backwarding each step.
 
         Args:
@@ -61,19 +103,35 @@ class IterativeManualStep(StepStrategy):
                 each per-timestep loss (manual_optimization train_step contract).
 
         Returns:
-            ``(pred_list, total_loss)`` — predictions appended detached, summed loss.
+            Predictions appended detached, regularized loss, forecast-only loss,
+            auxiliary residual loss, and averaged residual diagnostics.
         """
         total_loss = torch.zeros((), device=ctx.device)
+        forecast_total_loss = torch.zeros((), device=ctx.device)
+        aux_total_loss = torch.zeros((), device=ctx.device)
+        diagnostics: dict[str, torch.Tensor] = {}
         pred_list: list[torch.Tensor] = []
         for idx_time in range(self.time_prediction):
             t = torch.tensor((idx_time + 1) * 100, device=ctx.device).repeat(x.shape[0])
             prediction = model(x, pred_list, t)
             pred_list.append(prediction.detach())
-            step_loss = self.loss(prediction, y[:, idx_time])
+            forecast_loss = self.loss(prediction, y[:, idx_time])
+            aux_loss = (
+                self._physics_residual_aux_loss(model, ctx.device)
+                if backward_each_step
+                else torch.zeros((), device=ctx.device)
+            )
+            step_loss = forecast_loss + aux_loss
+            forecast_total_loss = forecast_total_loss + forecast_loss.detach()
+            aux_total_loss = aux_total_loss + aux_loss.detach()
             total_loss = total_loss + step_loss
+            for key, value in self._physics_residual_diagnostics(model).items():
+                diagnostics[key] = diagnostics.get(key, torch.zeros((), device=ctx.device)) + value
             if backward_each_step:
                 step_loss.backward()
-        return pred_list, total_loss
+        if diagnostics:
+            diagnostics = {key: value / self.time_prediction for key, value in diagnostics.items()}
+        return pred_list, total_loss, forecast_total_loss, aux_total_loss, diagnostics
 
     def train_step(
         self,
@@ -90,15 +148,27 @@ class IterativeManualStep(StepStrategy):
         we'd wrap ``model(...)`` in ``autocast`` and use ``ctx.scaler``.
         """
         x, y = batch
+        self._set_residual_warmup(model, ctx.epoch)
         ctx.optimizer.zero_grad(set_to_none=True)
 
-        _, total_loss = self._iterate_timesteps(model, x, y, ctx, backward_each_step=True)
+        _, total_loss, forecast_total_loss, aux_total_loss, diagnostics = self._iterate_timesteps(
+            model, x, y, ctx, backward_each_step=True
+        )
 
         ctx.optimizer.step()
 
         avg_loss = total_loss / self.time_prediction
+        avg_forecast_loss = forecast_total_loss / self.time_prediction
+        avg_aux_loss = aux_total_loss / self.time_prediction
         lr = torch.tensor(ctx.optimizer.param_groups[0]["lr"], device=avg_loss.device)
-        return {"loss": avg_loss, "lr": lr}
+        metrics = {
+            "loss": avg_loss.detach(),
+            "forecast_loss": avg_forecast_loss,
+            "physics_residual_aux_loss": avg_aux_loss,
+            "lr": lr,
+        }
+        metrics.update(diagnostics)
+        return metrics
 
     def val_step(
         self,
@@ -108,7 +178,9 @@ class IterativeManualStep(StepStrategy):
     ) -> dict[str, torch.Tensor]:
         x, y = batch
 
-        pred_list, total_loss = self._iterate_timesteps(model, x, y, ctx, backward_each_step=False)
+        pred_list, total_loss, _, _, diagnostics = self._iterate_timesteps(
+            model, x, y, ctx, backward_each_step=False
+        )
 
         y_hat = torch.stack(pred_list, dim=1)
         val_loss = total_loss / self.time_prediction
@@ -123,6 +195,7 @@ class IterativeManualStep(StepStrategy):
             pred_full=y_hat,
             target_full=y[:, : self.time_prediction],
         )
+        metrics.update({f"val_{key}": value for key, value in diagnostics.items()})
 
         if ctx.is_main_process and (not self.log_figures_once or not self._figures_logged):
             log_prediction_maps(

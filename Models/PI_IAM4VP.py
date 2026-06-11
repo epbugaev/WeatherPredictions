@@ -1,6 +1,8 @@
 import math
+import warnings
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from .imvp_modules import Attention, CircularConvSC, ConvNeXt_block, ConvNeXt_bottle
@@ -130,6 +132,41 @@ class Predictor(nn.Module):
         return y
 
 
+class PhysicsTendencyResidualCorrector(nn.Module):
+    """Small zero-start residual head for physics-derived tendency features.
+
+    This module treats the WeatherGFT/HybridBlock branch as a feature generator,
+    not as a trusted forecast. With zero initialisation the final convolution
+    emits exactly zero at step 0, so enabling the experiment starts from the
+    plain IAM4VP prediction and learns only if the features help.
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        hidden_channels: int = 128,
+        zero_init: bool = True,
+    ) -> None:
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(in_channels, hidden_channels, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(hidden_channels, out_channels, kernel_size=1),
+        )
+        if zero_init:
+            final = self.net[-1]
+            nn.init.zeros_(final.weight)
+            nn.init.zeros_(final.bias)
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        return self.net(features)
+
+
 class IAM4VP(nn.Module):
     """Iterative Auto-regressive Model for Video Prediction + опциональный physics-prior.
 
@@ -157,6 +194,16 @@ class IAM4VP(nn.Module):
         N_S=4,
         N_T=6,
         use_physics=True,
+        use_physics_residual_corrector=False,
+        physics_residual_hidden_channels=128,
+        physics_residual_apply_to="upper_air_only",
+        physics_residual_zero_init=True,
+        physics_residual_lambda_l1=0.0,
+        physics_feature_mode="tendency",
+        physics_residual_shuffle="none",
+        physics_residual_hybrid_steps=3,
+        freeze_iam4vp_for_residual_warmup=False,
+        residual_warmup_epochs=0,
     ):
         super().__init__()
         self.time_mlp = Time_MLP(dim=hid_S)
@@ -185,6 +232,71 @@ class IAM4VP(nn.Module):
         self.downscaling_factor_all = 4
 
         self.use_physics = use_physics
+        self.use_physics_residual_corrector = use_physics_residual_corrector
+        self.physics_residual_apply_to = physics_residual_apply_to
+        self.physics_residual_lambda_l1 = float(physics_residual_lambda_l1)
+        self.physics_feature_mode = physics_feature_mode
+        self.physics_residual_shuffle = physics_residual_shuffle
+        self.physics_residual_hybrid_steps = int(physics_residual_hybrid_steps)
+        self.freeze_iam4vp_for_residual_warmup = freeze_iam4vp_for_residual_warmup
+        self.residual_warmup_epochs = int(residual_warmup_epochs)
+        self._last_residual_aux_loss: torch.Tensor | None = None
+        self._last_residual_diagnostics: dict[str, torch.Tensor] = {}
+
+        valid_apply_to = {"upper_air_only", "all_channels"}
+        if self.physics_residual_apply_to not in valid_apply_to:
+            raise ValueError(
+                "physics_residual_apply_to must be one of "
+                f"{sorted(valid_apply_to)}, got {self.physics_residual_apply_to!r}"
+            )
+        valid_feature_modes = {"tendency", "prior_and_tendency", "no_physics"}
+        if self.physics_feature_mode not in valid_feature_modes:
+            raise ValueError(
+                "physics_feature_mode must be one of "
+                f"{sorted(valid_feature_modes)}, got {self.physics_feature_mode!r}"
+            )
+        valid_shuffle_modes = {"none", "batch"}
+        if self.physics_residual_shuffle not in valid_shuffle_modes:
+            raise ValueError(
+                "physics_residual_shuffle must be one of "
+                f"{sorted(valid_shuffle_modes)}, got {self.physics_residual_shuffle!r}"
+            )
+
+        self.surface_channels = 4
+        self.upper_air_channels = C_data - self.surface_channels
+        if self.use_physics_residual_corrector:
+            corrected_channels = (
+                self.upper_air_channels
+                if self.physics_residual_apply_to == "upper_air_only"
+                else C_data
+            )
+            feature_blocks = 3
+            if self.physics_feature_mode == "tendency":
+                feature_blocks += 1
+            elif self.physics_feature_mode == "prior_and_tendency":
+                feature_blocks += 2
+            self.physics_residual_corrector = PhysicsTendencyResidualCorrector(
+                in_channels=corrected_channels * feature_blocks,
+                out_channels=corrected_channels,
+                hidden_channels=physics_residual_hidden_channels,
+                zero_init=physics_residual_zero_init,
+            )
+            warnings.warn(
+                "PI-IAM4VP residual-corrector mode treats the WeatherGFT "
+                "HybridBlock as a tendency feature generator, not as a trusted "
+                "forecast. WeatherBench channel group 30:43 is relative "
+                "humidity (r); the inherited HybridBlock equations name this "
+                "block q. Interpret humidity tendencies as learned features "
+                "unless a relative->specific humidity conversion is added.",
+                UserWarning,
+                stacklevel=2,
+            )
+            print(
+                "[PI-IAM4VP residual] channel layout: "
+                "surface=0:4, z=4:17, t=17:30, r=30:43, u=43:56, v=56:69"
+            )
+        else:
+            self.physics_residual_corrector = None
 
     def x_to_zquvtw(self, x):
         """
@@ -211,6 +323,130 @@ class IAM4VP(nn.Module):
 
         return zquvtw
 
+    @staticmethod
+    def _rms(x: torch.Tensor) -> torch.Tensor:
+        return torch.sqrt(torch.mean(x.float() * x.float()))
+
+    def _physics_prior_from_state(self, prev_state: torch.Tensor) -> torch.Tensor:
+        """Run the inherited HybridBlock on the previous state.
+
+        The current implementation intentionally stays in normalized model
+        space, matching the legacy PI-IAM4VP setup. The result is used only for
+        tendency-like features in residual-corrector mode.
+        """
+        _, _, H, W = prev_state.shape
+        latent_h = H // self.downscaling_factor_all
+        latent_w = W // self.downscaling_factor_all
+        if (latent_h, latent_w) != (8, 16):
+            raise ValueError(
+                "PI-IAM4VP HybridBlock currently has hardcoded derivative "
+                f"geometry for an 8x16 latent grid, got {latent_h}x{latent_w}. "
+                "Pass 32x64 crops or update PredFormerGFT_HybridBlock geometry."
+            )
+
+        pred_phys = self.x_to_zquvtw(prev_state[:, self.surface_channels :, :, :])
+        zquvtw = pred_phys
+        for _ in range(self.physics_residual_hybrid_steps):
+            pred_phys, zquvtw = self.hybrid_block(pred_phys, zquvtw)
+
+        pred_phys = pred_phys.permute(0, 3, 1, 2)
+        pred_phys = F.interpolate(pred_phys, size=(H, W), mode="bilinear")
+        return torch.cat([prev_state[:, : self.surface_channels, :, :], pred_phys], dim=1)
+
+    def _residual_slice(self, x: torch.Tensor) -> torch.Tensor:
+        if self.physics_residual_apply_to == "upper_air_only":
+            return x[:, self.surface_channels :, :, :]
+        return x
+
+    def _apply_physics_residual(
+        self,
+        y_nn: torch.Tensor,
+        prev_state: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.physics_residual_corrector is None:
+            self._last_residual_aux_loss = None
+            self._last_residual_diagnostics = {}
+            return y_nn
+
+        if self.physics_feature_mode == "no_physics":
+            y_phys = prev_state
+        else:
+            y_phys = self._physics_prior_from_state(prev_state)
+            if self.physics_residual_shuffle == "batch" and y_phys.shape[0] > 1:
+                y_phys = torch.roll(y_phys, shifts=1, dims=0)
+
+        delta_phys = y_phys - prev_state
+        y_nn_part = self._residual_slice(y_nn)
+        prev_part = self._residual_slice(prev_state)
+        parts = [y_nn_part, prev_part, y_nn_part - prev_part]
+
+        if self.physics_feature_mode == "tendency":
+            parts.append(self._residual_slice(delta_phys))
+        elif self.physics_feature_mode == "prior_and_tendency":
+            parts.extend([self._residual_slice(y_phys), self._residual_slice(delta_phys)])
+
+        features = torch.cat(parts, dim=1)
+        correction = self.physics_residual_corrector(features)
+
+        if self.physics_residual_apply_to == "upper_air_only":
+            y_hat = torch.cat(
+                [
+                    y_nn[:, : self.surface_channels, :, :],
+                    y_nn[:, self.surface_channels :, :, :] + correction,
+                ],
+                dim=1,
+            )
+            full_correction = torch.cat(
+                [torch.zeros_like(y_nn[:, : self.surface_channels, :, :]), correction],
+                dim=1,
+            )
+            correction_for_cosine = correction
+            tendency_for_cosine = delta_phys[:, self.surface_channels :, :, :]
+        else:
+            y_hat = y_nn + correction
+            full_correction = correction
+            correction_for_cosine = correction
+            tendency_for_cosine = delta_phys
+
+        self._last_residual_aux_loss = (
+            self.physics_residual_lambda_l1 * full_correction.abs().mean()
+        )
+
+        correction_flat = correction_for_cosine.detach().flatten(1).float()
+        tendency_flat = tendency_for_cosine.detach().flatten(1).float()
+        cosine = F.cosine_similarity(correction_flat, tendency_flat, dim=1, eps=1e-8).mean()
+        correction_rms = self._rms(full_correction.detach())
+        y_nn_rms = self._rms(y_nn.detach())
+        tendency_rms = self._rms(delta_phys.detach())
+        self._last_residual_diagnostics = {
+            "physics_residual_correction_rms": correction_rms,
+            "physics_residual_correction_to_prediction_ratio": correction_rms
+            / (y_nn_rms + 1e-8),
+            "physics_residual_tendency_rms": tendency_rms,
+            "physics_residual_correction_to_tendency_cosine": cosine,
+            "physics_residual_pi_minus_iam4vp_rms": self._rms((y_hat - y_nn).detach()),
+        }
+        return y_hat
+
+    def physics_residual_aux_loss(self) -> torch.Tensor | None:
+        return self._last_residual_aux_loss
+
+    def physics_residual_diagnostics(self) -> dict[str, torch.Tensor]:
+        return dict(self._last_residual_diagnostics)
+
+    def set_residual_warmup(self, active: bool) -> None:
+        """Optionally freeze IAM4VP while training residual/physics modules.
+
+        The HybridBlock is kept trainable together with the residual head because
+        it contains learned convolutions; freezing it at random initialisation
+        would turn the physics features into mostly arbitrary tensors.
+        """
+        if not self.use_physics_residual_corrector:
+            return
+        trainable_prefixes = ("physics_residual_corrector", "hybrid_block")
+        for name, param in self.named_parameters():
+            param.requires_grad = (not active) or name.startswith(trainable_prefixes)
+
     def forward(self, x_raw, y_raw=None, t=None):
         """Один шаг авторегрессивного прогноза + опциональный physics-correction.
 
@@ -226,6 +462,8 @@ class IAM4VP(nn.Module):
         Returns:
             Прогноз на текущий timestep, форма `(B, C, H, W)`.
         """
+        if y_raw is None:
+            y_raw = []
         B, T, C, H, W = x_raw.shape
         x = x_raw.view(B * T, C, H, W)
         time_emb = self.time_mlp(t)
@@ -237,10 +475,11 @@ class IAM4VP(nn.Module):
         embed_1_mask_token = self.embed_1_mask_token.repeat(B, 1, 1, 1, 1)
         embed_2_mask_token = self.embed_2_mask_token.repeat(B, 1, 1, 1, 1)
 
+        use_legacy_latent_physics = self.use_physics and not self.use_physics_residual_corrector
         for idx, pred in enumerate(y_raw):
             embed2, skip_lp, embed_1_lp, embed_2_lp = self.lp(pred)
 
-            if self.use_physics:
+            if use_legacy_latent_physics:
                 if idx == 0:
                     prev_pred = x_raw[:, -1]
 
@@ -295,5 +534,10 @@ class IAM4VP(nn.Module):
         Y = self.dec(hid, skip, embed_1, embed_2, embed, T=T, H=H, W=W)
 
         Y = self.attn(Y)
-        Y = self.readout(Y)
-        return Y
+        y_nn = self.readout(Y)
+        if self.use_physics_residual_corrector:
+            prev_state = x_raw[:, -1] if len(y_raw) == 0 else y_raw[-1]
+            return self._apply_physics_residual(y_nn, prev_state)
+        self._last_residual_aux_loss = None
+        self._last_residual_diagnostics = {}
+        return y_nn
