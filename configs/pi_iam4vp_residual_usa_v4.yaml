@@ -17,6 +17,8 @@ model:
     physics_feature_mode: tendency
     physics_residual_shuffle: none
     physics_residual_hybrid_steps: 3
+    physics_residual_input_space: physical
+    physics_residual_humidity_mode: relative_to_specific
     # Keep off for from-scratch runs. Turn on only for fine-tuning from a
     # pretrained IAM4VP checkpoint.
     freeze_iam4vp_for_residual_warmup: false

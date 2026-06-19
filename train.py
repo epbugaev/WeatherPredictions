@@ -301,6 +301,9 @@ def train(config: dict[str, Any], config_path: str | None = None) -> None:
             mean=torch.as_tensor(metrics_source.the_mean, dtype=torch.float32),
             std=torch.as_tensor(metrics_source.the_std, dtype=torch.float32),
         )
+    set_physics_normalization = getattr(model, "set_physics_normalization", None)
+    if set_physics_normalization is not None:
+        set_physics_normalization(metrics_source.data_mean_tensor, metrics_source.data_std_tensor)
 
     optimizer, scheduler = build_optimizer_and_scheduler(model, training_cfg, steps_per_epoch)
     strategy = build_strategy(training_cfg)

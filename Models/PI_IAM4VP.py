@@ -9,6 +9,23 @@ from .imvp_modules import Attention, CircularConvSC, ConvNeXt_block, ConvNeXt_bo
 from .PredFormerGFT_HybridBlock import HybridBlock
 
 
+PRESSURE_LEVELS_HPA: tuple[int, ...] = (
+    50,
+    100,
+    150,
+    200,
+    250,
+    300,
+    400,
+    500,
+    600,
+    700,
+    850,
+    925,
+    1000,
+)
+
+
 class SinusoidalPosEmb(nn.Module):
     def __init__(self, dim):
         super().__init__()
@@ -202,10 +219,13 @@ class IAM4VP(nn.Module):
         physics_feature_mode="tendency",
         physics_residual_shuffle="none",
         physics_residual_hybrid_steps=3,
+        physics_residual_input_space="normalized",
+        physics_residual_humidity_mode="as_is",
         freeze_iam4vp_for_residual_warmup=False,
         residual_warmup_epochs=0,
     ):
         super().__init__()
+        self.C_data = C_data
         self.time_mlp = Time_MLP(dim=hid_S)
         self.enc = Encoder(C_data, hid_S, N_S)
         self.hid = Predictor(T_data * hid_S, hid_T, N_T)
@@ -238,10 +258,28 @@ class IAM4VP(nn.Module):
         self.physics_feature_mode = physics_feature_mode
         self.physics_residual_shuffle = physics_residual_shuffle
         self.physics_residual_hybrid_steps = int(physics_residual_hybrid_steps)
+        self.physics_residual_input_space = physics_residual_input_space
+        self.physics_residual_humidity_mode = physics_residual_humidity_mode
         self.freeze_iam4vp_for_residual_warmup = freeze_iam4vp_for_residual_warmup
         self.residual_warmup_epochs = int(residual_warmup_epochs)
         self._last_residual_aux_loss: torch.Tensor | None = None
         self._last_residual_diagnostics: dict[str, torch.Tensor] = {}
+        self.register_buffer(
+            "physics_data_mean",
+            torch.zeros(1, C_data, 1, 1, dtype=torch.float32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "physics_data_std",
+            torch.ones(1, C_data, 1, 1, dtype=torch.float32),
+            persistent=False,
+        )
+        self._physics_normalization_ready = False
+        self.register_buffer(
+            "physics_pressure_pa",
+            torch.tensor(PRESSURE_LEVELS_HPA, dtype=torch.float32).view(1, 13, 1, 1) * 100.0,
+            persistent=False,
+        )
 
         valid_apply_to = {"upper_air_only", "all_channels"}
         if self.physics_residual_apply_to not in valid_apply_to:
@@ -260,6 +298,26 @@ class IAM4VP(nn.Module):
             raise ValueError(
                 "physics_residual_shuffle must be one of "
                 f"{sorted(valid_shuffle_modes)}, got {self.physics_residual_shuffle!r}"
+            )
+        valid_input_spaces = {"normalized", "physical"}
+        if self.physics_residual_input_space not in valid_input_spaces:
+            raise ValueError(
+                "physics_residual_input_space must be one of "
+                f"{sorted(valid_input_spaces)}, got {self.physics_residual_input_space!r}"
+            )
+        valid_humidity_modes = {"as_is", "relative_to_specific"}
+        if self.physics_residual_humidity_mode not in valid_humidity_modes:
+            raise ValueError(
+                "physics_residual_humidity_mode must be one of "
+                f"{sorted(valid_humidity_modes)}, got {self.physics_residual_humidity_mode!r}"
+            )
+        if (
+            self.physics_residual_humidity_mode == "relative_to_specific"
+            and self.physics_residual_input_space != "physical"
+        ):
+            raise ValueError(
+                "physics_residual_humidity_mode='relative_to_specific' requires "
+                "physics_residual_input_space='physical'"
             )
 
         self.surface_channels = 4
@@ -281,22 +339,117 @@ class IAM4VP(nn.Module):
                 hidden_channels=physics_residual_hidden_channels,
                 zero_init=physics_residual_zero_init,
             )
-            warnings.warn(
-                "PI-IAM4VP residual-corrector mode treats the WeatherGFT "
-                "HybridBlock as a tendency feature generator, not as a trusted "
-                "forecast. WeatherBench channel group 30:43 is relative "
-                "humidity (r); the inherited HybridBlock equations name this "
-                "block q. Interpret humidity tendencies as learned features "
-                "unless a relative->specific humidity conversion is added.",
-                UserWarning,
-                stacklevel=2,
-            )
+            if self.physics_residual_humidity_mode == "relative_to_specific":
+                warnings.warn(
+                    "PI-IAM4VP residual-corrector mode treats the inherited "
+                    "HybridBlock as a tendency feature generator. The physics "
+                    "branch denormalizes to physical units, converts relative "
+                    "humidity r -> specific humidity q before HybridBlock, and "
+                    "converts q -> r before returning to model-normalized space.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            else:
+                warnings.warn(
+                    "PI-IAM4VP residual-corrector mode treats the WeatherGFT "
+                    "HybridBlock as a tendency feature generator, not as a trusted "
+                    "forecast. WeatherBench channel group 30:43 is relative "
+                    "humidity (r); the inherited HybridBlock equations name this "
+                    "block q. Interpret humidity tendencies as learned features "
+                    "unless a relative->specific humidity conversion is enabled.",
+                    UserWarning,
+                    stacklevel=2,
+                )
             print(
                 "[PI-IAM4VP residual] channel layout: "
                 "surface=0:4, z=4:17, t=17:30, r=30:43, u=43:56, v=56:69"
             )
+            print(
+                "[PI-IAM4VP residual] physics input_space="
+                f"{self.physics_residual_input_space}, humidity_mode="
+                f"{self.physics_residual_humidity_mode}"
+            )
         else:
             self.physics_residual_corrector = None
+
+    def set_physics_normalization(self, mean: torch.Tensor, std: torch.Tensor) -> None:
+        """Store per-channel stats for physical-unit residual physics.
+
+        The trainer still normalizes batches before IAM4VP sees them. These
+        buffers are used only inside the residual physics branch to temporarily
+        denormalize the previous state before running HybridBlock features.
+        """
+        mean = torch.as_tensor(mean, dtype=torch.float32)
+        std = torch.as_tensor(std, dtype=torch.float32)
+        if mean.ndim != 1 or std.ndim != 1 or mean.shape != std.shape:
+            raise ValueError(
+                "set_physics_normalization expects matching 1-D mean/std; "
+                f"got {tuple(mean.shape)} and {tuple(std.shape)}"
+            )
+        if mean.numel() != self.C_data:
+            raise ValueError(
+                f"Expected {self.C_data} normalization channels, got {mean.numel()}"
+            )
+        device = next(self.parameters()).device
+        self.physics_data_mean = mean.view(1, -1, 1, 1).to(device=device)
+        self.physics_data_std = std.view(1, -1, 1, 1).to(device=device)
+        self._physics_normalization_ready = True
+
+    def _require_physics_normalization(self) -> None:
+        if (
+            not self._physics_normalization_ready
+            or self.physics_data_mean.numel() != self.C_data
+            or self.physics_data_std.numel() != self.C_data
+        ):
+            raise RuntimeError(
+                "physics_residual_input_space='physical' requires dataset mean/std. "
+                "Call IAM4VP.set_physics_normalization(...) before training."
+            )
+
+    def _denormalize_state(self, x: torch.Tensor) -> torch.Tensor:
+        self._require_physics_normalization()
+        mean = self.physics_data_mean.to(device=x.device, dtype=x.dtype)
+        std = self.physics_data_std.to(device=x.device, dtype=x.dtype)
+        return x * std + mean
+
+    def _normalize_state(self, x: torch.Tensor) -> torch.Tensor:
+        self._require_physics_normalization()
+        mean = self.physics_data_mean.to(device=x.device, dtype=x.dtype)
+        std = self.physics_data_std.to(device=x.device, dtype=x.dtype)
+        return (x - mean) / std
+
+    @staticmethod
+    def _avoid_small_abs(x: torch.Tensor, threshold: float = 1.0) -> torch.Tensor:
+        sign = torch.sign(x)
+        sign = torch.where(sign == 0.0, torch.ones_like(sign), sign)
+        return torch.where(torch.abs(x) < threshold, sign * threshold, x)
+
+    def _saturation_specific_humidity(self, t_kelvin: torch.Tensor) -> torch.Tensor:
+        """Magnus saturation specific humidity q_s(T, p) in kg/kg."""
+        pressure = self.physics_pressure_pa.to(device=t_kelvin.device, dtype=t_kelvin.dtype)
+        pressure = pressure.expand_as(t_kelvin)
+        t_c = t_kelvin - 273.15
+        exponent = 17.67 * t_c / self._avoid_small_abs(t_c + 243.5)
+        # Keeps pathological early predictions from producing inf before the
+        # residual head has learned; ERA5 temperatures sit comfortably inside.
+        exponent = torch.clamp(exponent, min=-20.0, max=20.0)
+        e_s = 611.2 * torch.exp(exponent)
+        denom = self._avoid_small_abs(pressure - 0.378 * e_s)
+        return torch.clamp(0.622 * e_s / denom, min=1e-8)
+
+    def _relative_to_specific_humidity(
+        self,
+        r_percent: torch.Tensor,
+        t_kelvin: torch.Tensor,
+    ) -> torch.Tensor:
+        return (r_percent / 100.0) * self._saturation_specific_humidity(t_kelvin)
+
+    def _specific_to_relative_humidity(
+        self,
+        q: torch.Tensor,
+        t_kelvin: torch.Tensor,
+    ) -> torch.Tensor:
+        return 100.0 * q / self._saturation_specific_humidity(t_kelvin)
 
     def x_to_zquvtw(self, x):
         """
@@ -330,9 +483,11 @@ class IAM4VP(nn.Module):
     def _physics_prior_from_state(self, prev_state: torch.Tensor) -> torch.Tensor:
         """Run the inherited HybridBlock on the previous state.
 
-        The current implementation intentionally stays in normalized model
-        space, matching the legacy PI-IAM4VP setup. The result is used only for
-        tendency-like features in residual-corrector mode.
+        By default this keeps the legacy normalized-space behavior used by the
+        old PI-IAM4VP/WeatherGFT-style code. When
+        ``physics_residual_input_space='physical'`` it temporarily
+        denormalizes, converts r<->q around the HybridBlock, then returns to
+        the model's normalized 69-channel layout before building the tendency.
         """
         _, _, H, W = prev_state.shape
         latent_h = H // self.downscaling_factor_all
@@ -344,13 +499,43 @@ class IAM4VP(nn.Module):
                 "Pass 32x64 crops or update PredFormerGFT_HybridBlock geometry."
             )
 
-        pred_phys = self.x_to_zquvtw(prev_state[:, self.surface_channels :, :, :])
+        if self.physics_residual_input_space == "physical":
+            prev_physical = self._denormalize_state(prev_state)
+            z = prev_physical[:, 4:17]
+            t = prev_physical[:, 17:30]
+            humidity = prev_physical[:, 30:43]
+            u = prev_physical[:, 43:56]
+            v = prev_physical[:, 56:69]
+            if self.physics_residual_humidity_mode == "relative_to_specific":
+                humidity = self._relative_to_specific_humidity(humidity, t)
+            hybrid_input = torch.cat([z, t, humidity, u, v], dim=1)
+        else:
+            prev_physical = None
+            hybrid_input = prev_state[:, self.surface_channels :, :, :]
+
+        pred_phys = self.x_to_zquvtw(hybrid_input)
         zquvtw = pred_phys
         for _ in range(self.physics_residual_hybrid_steps):
             pred_phys, zquvtw = self.hybrid_block(pred_phys, zquvtw)
 
         pred_phys = pred_phys.permute(0, 3, 1, 2)
         pred_phys = F.interpolate(pred_phys, size=(H, W), mode="bilinear")
+        if self.physics_residual_input_space == "physical":
+            z_new, t_new, humidity_new, u_new, v_new = pred_phys.chunk(5, dim=1)
+            if self.physics_residual_humidity_mode == "relative_to_specific":
+                humidity_new = self._specific_to_relative_humidity(humidity_new, t_new)
+            prior_physical = torch.cat(
+                [
+                    prev_physical[:, : self.surface_channels],
+                    z_new,
+                    t_new,
+                    humidity_new,
+                    u_new,
+                    v_new,
+                ],
+                dim=1,
+            )
+            return self._normalize_state(prior_physical)
         return torch.cat([prev_state[:, : self.surface_channels, :, :], pred_phys], dim=1)
 
     def _residual_slice(self, x: torch.Tensor) -> torch.Tensor:
