@@ -2,7 +2,7 @@
 # batch-shuffle them before the residual head. If this matches the unshuffled
 # run, the physics tendency signal is probably not meaningful.
 experiment:
-  name: PI-IAM4VP-ResidualShuffledPhysics-USA-v4
+  name: PI-IAM4VP-ResidualShuffledStablePhysics-USA-v4
 model:
   type: PI-IAM4VP
   params:
@@ -15,8 +15,10 @@ model:
     physics_feature_mode: tendency
     physics_residual_shuffle: batch
     physics_residual_hybrid_steps: 3
+    physics_residual_hybrid_mode: stable_physical
     physics_residual_input_space: physical
     physics_residual_humidity_mode: relative_to_specific
+    physics_residual_tendency_clip: 8.0
     freeze_iam4vp_for_residual_warmup: false
     residual_warmup_epochs: 0
 data:

@@ -143,6 +143,57 @@ Important details:
 
 The `mutiout` spelling is legacy and intentional.
 
+## PI-IAM4VP Residual Corrector
+
+`PI-IAM4VP` supports three related modes through `model.params`:
+
+- Plain IAM4VP: `use_physics: false`, `use_physics_residual_corrector: false`.
+- Legacy PI-IAM4VP: `use_physics: true`, `use_physics_residual_corrector: false`.
+- Physics-tendency residual corrector:
+  `use_physics: false`, `use_physics_residual_corrector: true`.
+
+The residual-corrector experiment treats the inherited WeatherGFT HybridBlock as
+a tendency feature generator rather than a trusted forecast. The normal IAM4VP
+decoder first predicts `y_nn`; then a small zero-initialized convolutional head
+receives `[y_nn, prev_state, y_nn - prev_state, delta_phys]` and predicts an
+output-space correction. By default only upper-air channels are corrected, while
+surface channels remain equal to `y_nn`.
+
+The residual physics branch has two HybridBlock modes:
+
+- `physics_residual_hybrid_mode: legacy_normalized` sends normalized upper-air
+  channels directly into HybridBlock. This preserves the old PI-IAM4VP residual
+  behavior: no physical-unit denormalization and no `r -> q` conversion.
+- `physics_residual_hybrid_mode: stable_physical` temporarily denormalizes the
+  previous state, converts relative humidity `r` to specific humidity `q`, clamps
+  nonphysical values around the inherited HybridBlock, converts `q -> r`, then
+  z-scores the prior before `delta_phys` is formed. `physics_residual_tendency_clip`
+  bounds the normalized tendency so a bad physics step cannot poison the residual
+  head with NaNs/Infs. The no-physics control leaves HybridBlock unused.
+
+Useful configs:
+
+- `configs/pi_iam4vp_residual_usa_v4.yaml`: stabilized physical tendency-residual
+  run.
+- `configs/pi_iam4vp_residual_legacy_hybrid_usa_v4.yaml`: old normalized
+  HybridBlock tendency run.
+- `configs/pi_iam4vp_residual_no_physics_usa_v4.yaml`: residual head without
+  HybridBlock features.
+- `configs/pi_iam4vp_residual_shuffled_usa_v4.yaml`: batch-shuffled physics
+  tendency control.
+
+Comet logs `physics_residual_*` train diagnostics and `val_physics_residual_*`
+validation diagnostics: correction RMS, tendency RMS, correction/prediction
+ratio, correction/tendency cosine, `y_hat - y_nn` RMS, non-finite physics ratio,
+and tendency clipping ratio. The HybridBlock still uses the legacy 8x16 latent-grid
+constants, so these configs are intended for 32x64 crops unless that physics
+geometry is generalized.
+
+After the runs finish, use
+`python Models/dev/fetch_iam4vp_residual_summary.py` to fetch the latest Comet
+runs for IAM4VP, legacy PI-IAM4VP, residual-no-physics, residual-with-physics,
+and shuffled-physics into one markdown table.
+
 ## Checkpoints
 
 Native checkpoints are `.pt` files with a flat payload:

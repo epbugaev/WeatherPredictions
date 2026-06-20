@@ -219,8 +219,10 @@ class IAM4VP(nn.Module):
         physics_feature_mode="tendency",
         physics_residual_shuffle="none",
         physics_residual_hybrid_steps=3,
+        physics_residual_hybrid_mode=None,
         physics_residual_input_space="normalized",
         physics_residual_humidity_mode="as_is",
+        physics_residual_tendency_clip=0.0,
         freeze_iam4vp_for_residual_warmup=False,
         residual_warmup_epochs=0,
     ):
@@ -258,12 +260,22 @@ class IAM4VP(nn.Module):
         self.physics_feature_mode = physics_feature_mode
         self.physics_residual_shuffle = physics_residual_shuffle
         self.physics_residual_hybrid_steps = int(physics_residual_hybrid_steps)
+        if physics_residual_hybrid_mode is None:
+            physics_residual_hybrid_mode = (
+                "stable_physical"
+                if physics_residual_input_space == "physical"
+                else "legacy_normalized"
+            )
+        self.physics_residual_hybrid_mode = physics_residual_hybrid_mode
         self.physics_residual_input_space = physics_residual_input_space
         self.physics_residual_humidity_mode = physics_residual_humidity_mode
+        self.physics_residual_tendency_clip = float(physics_residual_tendency_clip or 0.0)
         self.freeze_iam4vp_for_residual_warmup = freeze_iam4vp_for_residual_warmup
         self.residual_warmup_epochs = int(residual_warmup_epochs)
         self._last_residual_aux_loss: torch.Tensor | None = None
         self._last_residual_diagnostics: dict[str, torch.Tensor] = {}
+        self._last_physics_nonfinite_ratio: torch.Tensor | None = None
+        self._last_physics_tendency_clip_ratio: torch.Tensor | None = None
         self.register_buffer(
             "physics_data_mean",
             torch.zeros(1, C_data, 1, 1, dtype=torch.float32),
@@ -299,6 +311,17 @@ class IAM4VP(nn.Module):
                 "physics_residual_shuffle must be one of "
                 f"{sorted(valid_shuffle_modes)}, got {self.physics_residual_shuffle!r}"
             )
+        valid_hybrid_modes = {"legacy_normalized", "stable_physical"}
+        if self.physics_residual_hybrid_mode not in valid_hybrid_modes:
+            raise ValueError(
+                "physics_residual_hybrid_mode must be one of "
+                f"{sorted(valid_hybrid_modes)}, got {self.physics_residual_hybrid_mode!r}"
+            )
+        if self.physics_residual_hybrid_mode == "legacy_normalized":
+            self.physics_residual_input_space = "normalized"
+            self.physics_residual_humidity_mode = "as_is"
+        elif self.physics_residual_hybrid_mode == "stable_physical":
+            self.physics_residual_input_space = "physical"
         valid_input_spaces = {"normalized", "physical"}
         if self.physics_residual_input_space not in valid_input_spaces:
             raise ValueError(
@@ -365,9 +388,11 @@ class IAM4VP(nn.Module):
                 "surface=0:4, z=4:17, t=17:30, r=30:43, u=43:56, v=56:69"
             )
             print(
-                "[PI-IAM4VP residual] physics input_space="
+                "[PI-IAM4VP residual] physics hybrid_mode="
+                f"{self.physics_residual_hybrid_mode}, input_space="
                 f"{self.physics_residual_input_space}, humidity_mode="
-                f"{self.physics_residual_humidity_mode}"
+                f"{self.physics_residual_humidity_mode}, tendency_clip="
+                f"{self.physics_residual_tendency_clip:g}"
             )
         else:
             self.physics_residual_corrector = None
@@ -417,6 +442,114 @@ class IAM4VP(nn.Module):
         mean = self.physics_data_mean.to(device=x.device, dtype=x.dtype)
         std = self.physics_data_std.to(device=x.device, dtype=x.dtype)
         return (x - mean) / std
+
+    @staticmethod
+    def _nonfinite_ratio(x: torch.Tensor) -> torch.Tensor:
+        return (~torch.isfinite(x)).float().mean()
+
+    @staticmethod
+    def _finite_or_fallback(x: torch.Tensor, fallback: torch.Tensor) -> torch.Tensor:
+        return torch.where(torch.isfinite(x), x, fallback.expand_as(x))
+
+    @staticmethod
+    def _finite_clamp(
+        x: torch.Tensor,
+        min_value: float,
+        max_value: float,
+        fallback: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if fallback is None:
+            fallback = torch.zeros_like(x)
+        x = torch.where(torch.isfinite(x), x, fallback.expand_as(x))
+        return torch.clamp(x, min=min_value, max=max_value)
+
+    def _sanitize_physical_parts(
+        self,
+        z: torch.Tensor,
+        t: torch.Tensor,
+        humidity: torch.Tensor,
+        u: torch.Tensor,
+        v: torch.Tensor,
+        *,
+        humidity_is_specific: bool,
+        fallback_parts: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+        | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        if fallback_parts is None:
+            fallback_parts = (
+                torch.zeros_like(z),
+                torch.full_like(t, 273.15),
+                torch.zeros_like(humidity),
+                torch.zeros_like(u),
+                torch.zeros_like(v),
+            )
+        fallback_z, fallback_t, fallback_humidity, fallback_u, fallback_v = fallback_parts
+        z = self._finite_clamp(z, -10000.0, 250000.0, fallback_z)
+        t = self._finite_clamp(t, 150.0, 350.0, fallback_t)
+        if humidity_is_specific:
+            humidity = self._finite_clamp(humidity, 0.0, 0.08, fallback_humidity)
+        else:
+            humidity = self._finite_clamp(humidity, 0.0, 150.0, fallback_humidity)
+        u = self._finite_clamp(u, -150.0, 150.0, fallback_u)
+        v = self._finite_clamp(v, -150.0, 150.0, fallback_v)
+        return z, t, humidity, u, v
+
+    def _sanitize_hybrid_latent_physical(
+        self,
+        x: torch.Tensor,
+        fallback: torch.Tensor,
+    ) -> torch.Tensor:
+        x_cf = x.permute(0, 3, 1, 2)
+        fallback_cf = fallback.permute(0, 3, 1, 2)
+        z, t, humidity, u, v = x_cf.chunk(5, dim=1)
+        fallback_parts = fallback_cf.chunk(5, dim=1)
+        z, t, humidity, u, v = self._sanitize_physical_parts(
+            z,
+            t,
+            humidity,
+            u,
+            v,
+            humidity_is_specific=(
+                self.physics_residual_humidity_mode == "relative_to_specific"
+            ),
+            fallback_parts=fallback_parts,
+        )
+        return torch.cat([z, t, humidity, u, v], dim=1).permute(0, 2, 3, 1)
+
+    def _clip_normalized_tendency(
+        self,
+        prior: torch.Tensor,
+        prev_state: torch.Tensor,
+    ) -> torch.Tensor:
+        clip = self.physics_residual_tendency_clip
+        if clip <= 0:
+            self._last_physics_tendency_clip_ratio = torch.zeros((), device=prior.device)
+            return prior
+        tendency = prior - prev_state
+        clipped = torch.clamp(tendency, min=-clip, max=clip)
+        self._last_physics_tendency_clip_ratio = (
+            (clipped != tendency).float().mean().detach()
+        )
+        return prev_state + clipped
+
+    def _hybrid_block_forward(
+        self,
+        pred_phys: torch.Tensor,
+        zquvtw: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.physics_residual_hybrid_mode != "stable_physical":
+            return self.hybrid_block(pred_phys, zquvtw)
+
+        batch_norm_states = []
+        for module in self.hybrid_block.modules():
+            if isinstance(module, nn.modules.batchnorm._BatchNorm):
+                batch_norm_states.append((module, module.training))
+                module.eval()
+        try:
+            return self.hybrid_block(pred_phys, zquvtw)
+        finally:
+            for module, was_training in batch_norm_states:
+                module.train(was_training)
 
     @staticmethod
     def _avoid_small_abs(x: torch.Tensor, threshold: float = 1.0) -> torch.Tensor:
@@ -483,15 +616,17 @@ class IAM4VP(nn.Module):
     def _physics_prior_from_state(self, prev_state: torch.Tensor) -> torch.Tensor:
         """Run the inherited HybridBlock on the previous state.
 
-        By default this keeps the legacy normalized-space behavior used by the
-        old PI-IAM4VP/WeatherGFT-style code. When
-        ``physics_residual_input_space='physical'`` it temporarily
-        denormalizes, converts r<->q around the HybridBlock, then returns to
-        the model's normalized 69-channel layout before building the tendency.
+        ``legacy_normalized`` keeps the old PI-IAM4VP residual behavior:
+        normalized upper-air channels are sent directly to HybridBlock.
+        ``stable_physical`` temporarily denormalizes, converts r<->q around the
+        HybridBlock, clamps nonphysical values, then returns to normalized
+        69-channel space before building the tendency.
         """
         _, _, H, W = prev_state.shape
         latent_h = H // self.downscaling_factor_all
         latent_w = W // self.downscaling_factor_all
+        self._last_physics_nonfinite_ratio = torch.zeros((), device=prev_state.device)
+        self._last_physics_tendency_clip_ratio = torch.zeros((), device=prev_state.device)
         if (latent_h, latent_w) != (8, 16):
             raise ValueError(
                 "PI-IAM4VP HybridBlock currently has hardcoded derivative "
@@ -499,31 +634,89 @@ class IAM4VP(nn.Module):
                 "Pass 32x64 crops or update PredFormerGFT_HybridBlock geometry."
             )
 
-        if self.physics_residual_input_space == "physical":
+        if self.physics_residual_hybrid_mode == "stable_physical":
             prev_physical = self._denormalize_state(prev_state)
+            mean = self.physics_data_mean.to(device=prev_state.device, dtype=prev_state.dtype)
+            prev_physical = self._finite_or_fallback(prev_physical, mean)
             z = prev_physical[:, 4:17]
             t = prev_physical[:, 17:30]
             humidity = prev_physical[:, 30:43]
             u = prev_physical[:, 43:56]
             v = prev_physical[:, 56:69]
+            z, t, humidity, u, v = self._sanitize_physical_parts(
+                z,
+                t,
+                humidity,
+                u,
+                v,
+                humidity_is_specific=False,
+            )
             if self.physics_residual_humidity_mode == "relative_to_specific":
                 humidity = self._relative_to_specific_humidity(humidity, t)
+                humidity = self._finite_clamp(humidity, 0.0, 0.08)
             hybrid_input = torch.cat([z, t, humidity, u, v], dim=1)
         else:
             prev_physical = None
             hybrid_input = prev_state[:, self.surface_channels :, :, :]
+            hybrid_input = self._finite_or_fallback(hybrid_input, torch.zeros_like(hybrid_input))
 
         pred_phys = self.x_to_zquvtw(hybrid_input)
         zquvtw = pred_phys
         for _ in range(self.physics_residual_hybrid_steps):
-            pred_phys, zquvtw = self.hybrid_block(pred_phys, zquvtw)
+            pred_phys, zquvtw = self._hybrid_block_forward(pred_phys, zquvtw)
+            if self.physics_residual_hybrid_mode == "stable_physical":
+                fallback = self.x_to_zquvtw(hybrid_input)
+                self._last_physics_nonfinite_ratio = torch.maximum(
+                    self._last_physics_nonfinite_ratio,
+                    self._nonfinite_ratio(pred_phys).detach(),
+                )
+                pred_phys = self._sanitize_hybrid_latent_physical(pred_phys, fallback)
+                zquvtw = self._sanitize_hybrid_latent_physical(zquvtw, fallback)
+            else:
+                self._last_physics_nonfinite_ratio = torch.maximum(
+                    self._last_physics_nonfinite_ratio,
+                    self._nonfinite_ratio(pred_phys).detach(),
+                )
+                pred_phys = self._finite_or_fallback(pred_phys, zquvtw)
+                zquvtw = self._finite_or_fallback(zquvtw, pred_phys)
 
         pred_phys = pred_phys.permute(0, 3, 1, 2)
         pred_phys = F.interpolate(pred_phys, size=(H, W), mode="bilinear")
-        if self.physics_residual_input_space == "physical":
+        if self.physics_residual_hybrid_mode == "stable_physical":
             z_new, t_new, humidity_new, u_new, v_new = pred_phys.chunk(5, dim=1)
+            fallback_parts = (
+                prev_physical[:, 4:17],
+                prev_physical[:, 17:30],
+                (
+                    self._relative_to_specific_humidity(
+                        prev_physical[:, 30:43],
+                        prev_physical[:, 17:30],
+                    )
+                    if self.physics_residual_humidity_mode == "relative_to_specific"
+                    else prev_physical[:, 30:43]
+                ),
+                prev_physical[:, 43:56],
+                prev_physical[:, 56:69],
+            )
+            z_new, t_new, humidity_new, u_new, v_new = self._sanitize_physical_parts(
+                z_new,
+                t_new,
+                humidity_new,
+                u_new,
+                v_new,
+                humidity_is_specific=(
+                    self.physics_residual_humidity_mode == "relative_to_specific"
+                ),
+                fallback_parts=fallback_parts,
+            )
             if self.physics_residual_humidity_mode == "relative_to_specific":
                 humidity_new = self._specific_to_relative_humidity(humidity_new, t_new)
+                humidity_new = self._finite_clamp(
+                    humidity_new,
+                    0.0,
+                    150.0,
+                    prev_physical[:, 30:43],
+                )
             prior_physical = torch.cat(
                 [
                     prev_physical[:, : self.surface_channels],
@@ -535,8 +728,11 @@ class IAM4VP(nn.Module):
                 ],
                 dim=1,
             )
-            return self._normalize_state(prior_physical)
-        return torch.cat([prev_state[:, : self.surface_channels, :, :], pred_phys], dim=1)
+            prior = self._normalize_state(prior_physical)
+            prior = self._finite_or_fallback(prior, prev_state)
+            return self._clip_normalized_tendency(prior, prev_state)
+        prior = torch.cat([prev_state[:, : self.surface_channels, :, :], pred_phys], dim=1)
+        return self._finite_or_fallback(prior, prev_state)
 
     def _residual_slice(self, x: torch.Tensor) -> torch.Tensor:
         if self.physics_residual_apply_to == "upper_air_only":
@@ -560,7 +756,10 @@ class IAM4VP(nn.Module):
             if self.physics_residual_shuffle == "batch" and y_phys.shape[0] > 1:
                 y_phys = torch.roll(y_phys, shifts=1, dims=0)
 
-        delta_phys = y_phys - prev_state
+        delta_phys = self._finite_or_fallback(
+            y_phys - prev_state,
+            torch.zeros_like(prev_state),
+        )
         y_nn_part = self._residual_slice(y_nn)
         prev_part = self._residual_slice(prev_state)
         parts = [y_nn_part, prev_part, y_nn_part - prev_part]
@@ -571,7 +770,9 @@ class IAM4VP(nn.Module):
             parts.extend([self._residual_slice(y_phys), self._residual_slice(delta_phys)])
 
         features = torch.cat(parts, dim=1)
+        features = self._finite_or_fallback(features, torch.zeros_like(features))
         correction = self.physics_residual_corrector(features)
+        correction = self._finite_or_fallback(correction, torch.zeros_like(correction))
 
         if self.physics_residual_apply_to == "upper_air_only":
             y_hat = torch.cat(
@@ -603,6 +804,16 @@ class IAM4VP(nn.Module):
         correction_rms = self._rms(full_correction.detach())
         y_nn_rms = self._rms(y_nn.detach())
         tendency_rms = self._rms(delta_phys.detach())
+        nonfinite_ratio = (
+            self._last_physics_nonfinite_ratio
+            if self._last_physics_nonfinite_ratio is not None
+            else torch.zeros((), device=y_nn.device)
+        )
+        tendency_clip_ratio = (
+            self._last_physics_tendency_clip_ratio
+            if self._last_physics_tendency_clip_ratio is not None
+            else torch.zeros((), device=y_nn.device)
+        )
         self._last_residual_diagnostics = {
             "physics_residual_correction_rms": correction_rms,
             "physics_residual_correction_to_prediction_ratio": correction_rms
@@ -610,6 +821,8 @@ class IAM4VP(nn.Module):
             "physics_residual_tendency_rms": tendency_rms,
             "physics_residual_correction_to_tendency_cosine": cosine,
             "physics_residual_pi_minus_iam4vp_rms": self._rms((y_hat - y_nn).detach()),
+            "physics_residual_nonfinite_ratio": nonfinite_ratio.detach(),
+            "physics_residual_tendency_clip_ratio": tendency_clip_ratio.detach(),
         }
         return y_hat
 

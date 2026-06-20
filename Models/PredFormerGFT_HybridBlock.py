@@ -278,7 +278,8 @@ class PDE_kernel(nn.Module):
     def scale_tensor(self, tensor, a, b):
         min_val = tensor.min().detach()
         max_val = tensor.max().detach()
-        scaled_tensor = (tensor - min_val) / (max_val - min_val)
+        denom = torch.clamp(max_val - min_val, min=1e-6)
+        scaled_tensor = (tensor - min_val) / denom
         return scaled_tensor * (b - a) + a
 
     def scale_diff(self, diff_x, x):

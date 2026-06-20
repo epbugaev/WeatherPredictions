@@ -1,13 +1,12 @@
-# PI-IAM4VP residual-corrector experiment.
-# This treats WeatherGFT/HybridBlock as a tendency feature generator, not as a
-# trusted forecast or fixed alpha/router blend.
+# Legacy HybridBlock residual experiment.
+# This matches the old PI-IAM4VP residual physics path: normalized upper-air
+# channels are sent directly into HybridBlock, with no r->q conversion and no
+# physical-unit integrator guards. Use it to compare against stable_physical.
 experiment:
-  name: PI-IAM4VP-ResidualStablePhysics-USA-v4
+  name: PI-IAM4VP-ResidualLegacyHybrid-USA-v4
 model:
   type: PI-IAM4VP
   params:
-    # Disable the legacy latent physics injection; the residual corrector below
-    # still runs the HybridBlock and applies a learned output-space correction.
     use_physics: false
     use_physics_residual_corrector: true
     physics_residual_hidden_channels: 128
@@ -17,12 +16,10 @@ model:
     physics_feature_mode: tendency
     physics_residual_shuffle: none
     physics_residual_hybrid_steps: 3
-    physics_residual_hybrid_mode: stable_physical
-    physics_residual_input_space: physical
-    physics_residual_humidity_mode: relative_to_specific
-    physics_residual_tendency_clip: 8.0
-    # Keep off for from-scratch runs. Turn on only for fine-tuning from a
-    # pretrained IAM4VP checkpoint.
+    physics_residual_hybrid_mode: legacy_normalized
+    physics_residual_input_space: normalized
+    physics_residual_humidity_mode: as_is
+    physics_residual_tendency_clip: 0.0
     freeze_iam4vp_for_residual_warmup: false
     residual_warmup_epochs: 0
 data:
