@@ -16,7 +16,11 @@ set -euo pipefail
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
 export PYTHONUNBUFFERED=1
 
-_sc_here="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+if [[ -n "${SLURM_SUBMIT_DIR:-}" && -f "${SLURM_SUBMIT_DIR}/sh_files/_shell_contract.sh" ]]; then
+  _sc_here="${SLURM_SUBMIT_DIR}/sh_files"
+else
+  _sc_here="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+fi
 # shellcheck source=sh_files/_shell_contract.sh
 source "${_sc_here}/_shell_contract.sh" "${_sc_here}"
 
