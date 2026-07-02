@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
-"""Plot pure-PDE-vs-constant metrics from ``evaluate_pure_pde_operator.py``.
+"""Plot PDE-operator metric CSVs.
 
-Input CSV columns:
+Pure-PDE input CSV columns:
     variable, lead, pde_wrmse, constant_wrmse, pde_improvement_pct
 
-The script writes two PNG files:
+Matrix-calibrated input CSV columns:
+    variable, lead, matrix_wrmse, pure_wrmse, constant_wrmse,
+    matrix_vs_constant_improvement_pct, matrix_vs_pure_improvement_pct
+
+For pure-PDE CSVs the script writes:
     pure_pde_vs_constant_wrmse.png
     pure_pde_improvement_pct.png
+
+For matrix-calibrated CSVs the script writes:
+    matrix_pde_vs_pure_constant_wrmse.png
+    matrix_pde_improvement_pct.png
 """
 
 from __future__ import annotations
@@ -48,6 +56,52 @@ def read_rows(path: Path) -> list[dict[str, float | int | str]]:
                     "pde_wrmse": float(row["pde_wrmse"]),
                     "constant_wrmse": float(row["constant_wrmse"]),
                     "pde_improvement_pct": float(row["pde_improvement_pct"]),
+                }
+            )
+    if not rows:
+        raise SystemExit(f"No rows in {path}")
+    return rows
+
+
+def latest_matrix_csv(run_dir: Path) -> Path:
+    candidates = sorted(run_dir.glob("val_metrics_epoch_*.csv"))
+    if not candidates:
+        raise SystemExit(f"No val_metrics_epoch_*.csv files found under {run_dir}")
+    return candidates[-1]
+
+
+def read_matrix_rows(path: Path) -> list[dict[str, float | int | str]]:
+    rows: list[dict[str, float | int | str]] = []
+    with path.open(newline="") as f:
+        reader = csv.DictReader(f)
+        required = {
+            "variable",
+            "lead",
+            "matrix_wrmse",
+            "pure_wrmse",
+            "constant_wrmse",
+            "matrix_vs_constant_improvement_pct",
+            "matrix_vs_pure_improvement_pct",
+        }
+        missing = required.difference(reader.fieldnames or [])
+        if missing:
+            raise SystemExit(f"{path} is missing columns: {', '.join(sorted(missing))}")
+        for row in reader:
+            lead_raw = str(row["lead"])
+            lead: int | str = "mean" if lead_raw == "mean" else int(lead_raw)
+            rows.append(
+                {
+                    "variable": str(row["variable"]),
+                    "lead": lead,
+                    "matrix_wrmse": float(row["matrix_wrmse"]),
+                    "pure_wrmse": float(row["pure_wrmse"]),
+                    "constant_wrmse": float(row["constant_wrmse"]),
+                    "matrix_vs_constant_improvement_pct": float(
+                        row["matrix_vs_constant_improvement_pct"]
+                    ),
+                    "matrix_vs_pure_improvement_pct": float(
+                        row["matrix_vs_pure_improvement_pct"]
+                    ),
                 }
             )
     if not rows:
@@ -126,9 +180,96 @@ def plot_improvement(rows: list[dict[str, float | int | str]], out_path: Path) -
     plt.close(fig)
 
 
+def plot_matrix_wrmse_grid(rows: list[dict[str, float | int | str]], out_path: Path) -> None:
+    prepare_matplotlib()
+    import matplotlib.pyplot as plt
+
+    variables = sorted_variables(rows)
+    cols = 3
+    rows_n = (len(variables) + cols - 1) // cols
+    fig, axes = plt.subplots(rows_n, cols, figsize=(5.0 * cols, 3.5 * rows_n), squeeze=False)
+    axes_flat = list(axes.ravel())
+
+    for ax, variable in zip(axes_flat, variables, strict=False):
+        data = [
+            row
+            for row in rows
+            if row["variable"] == variable and row["lead"] != "mean"
+        ]
+        data.sort(key=lambda row: int(row["lead"]))
+        leads = [int(row["lead"]) for row in data]
+        matrix = [float(row["matrix_wrmse"]) for row in data]
+        pure = [float(row["pure_wrmse"]) for row in data]
+        constant = [float(row["constant_wrmse"]) for row in data]
+        ax.plot(leads, matrix, marker="o", linewidth=2, label="Matrix PDE")
+        ax.plot(leads, pure, marker="o", linewidth=2, label="Pure PDE")
+        ax.plot(leads, constant, marker="o", linewidth=2, label="Constant")
+        ax.set_title(variable)
+        ax.set_xlabel("Lead hour")
+        ax.set_ylabel("WRMSE")
+        ax.grid(True, alpha=0.25)
+        ax.legend()
+
+    for ax in axes_flat[len(variables) :]:
+        ax.axis("off")
+
+    fig.suptitle("Matrix-Calibrated PDE vs Pure PDE vs Constant", fontsize=14)
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
+
+
+def plot_matrix_improvement(rows: list[dict[str, float | int | str]], out_path: Path) -> None:
+    prepare_matplotlib()
+    import matplotlib.pyplot as plt
+
+    variables = sorted_variables(rows)
+    mean_rows = {
+        str(row["variable"]): row
+        for row in rows
+        if row["lead"] == "mean"
+    }
+    labels = [name for name in variables if name in mean_rows]
+    vs_constant = [
+        float(mean_rows[name]["matrix_vs_constant_improvement_pct"])
+        for name in labels
+    ]
+    vs_pure = [
+        float(mean_rows[name]["matrix_vs_pure_improvement_pct"])
+        for name in labels
+    ]
+
+    x = list(range(len(labels)))
+    width = 0.38
+    fig, ax = plt.subplots(figsize=(10, 4.8))
+    ax.bar([item - width / 2 for item in x], vs_constant, width=width, label="vs Constant")
+    ax.bar([item + width / 2 for item in x], vs_pure, width=width, label="vs Pure PDE")
+    ax.axhline(0, color="black", linewidth=1)
+    ax.set_xticks(x, labels)
+    ax.set_ylabel("Improvement, %")
+    ax.set_title("Mean Matrix-PDE Improvement")
+    ax.grid(True, axis="y", alpha=0.25)
+    ax.legend()
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--csv", required=True, help="CSV from evaluate_pure_pde_operator.py.")
+    parser.add_argument("--csv", default=None, help="CSV from evaluate_pure_pde_operator.py.")
+    parser.add_argument(
+        "--matrix-csv",
+        default=None,
+        help="val_metrics_epoch_*.csv from train_pde_matrix_operator.py.",
+    )
+    parser.add_argument(
+        "--matrix-run-dir",
+        default=None,
+        help="Directory with train_log.csv and val_metrics_epoch_*.csv; latest epoch is plotted.",
+    )
     parser.add_argument(
         "--output-dir",
         default=None,
@@ -139,19 +280,45 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    csv_path = Path(args.csv)
+    if not args.csv and not args.matrix_csv and not args.matrix_run_dir:
+        raise SystemExit("Pass --csv, --matrix-csv, or --matrix-run-dir.")
+
+    csv_path = Path(args.csv) if args.csv else None
+    matrix_csv_path = Path(args.matrix_csv) if args.matrix_csv else None
+    matrix_run_dir = Path(args.matrix_run_dir) if args.matrix_run_dir else None
+    if matrix_run_dir is not None:
+        matrix_csv_path = latest_matrix_csv(matrix_run_dir)
+
+    default_stem = (
+        matrix_run_dir.name
+        if matrix_run_dir is not None
+        else matrix_csv_path.stem
+        if matrix_csv_path is not None
+        else csv_path.stem
+    )
     output_dir = (
         Path(args.output_dir)
         if args.output_dir
-        else Path("plots/pure_pde_operator") / csv_path.stem
+        else Path("plots/pde_operator") / default_stem
     )
-    rows = read_rows(csv_path)
-    wrmse_path = output_dir / "pure_pde_vs_constant_wrmse.png"
-    improvement_path = output_dir / "pure_pde_improvement_pct.png"
-    plot_wrmse_grid(rows, wrmse_path)
-    plot_improvement(rows, improvement_path)
-    print(wrmse_path)
-    print(improvement_path)
+
+    if csv_path is not None:
+        rows = read_rows(csv_path)
+        wrmse_path = output_dir / "pure_pde_vs_constant_wrmse.png"
+        improvement_path = output_dir / "pure_pde_improvement_pct.png"
+        plot_wrmse_grid(rows, wrmse_path)
+        plot_improvement(rows, improvement_path)
+        print(wrmse_path)
+        print(improvement_path)
+
+    if matrix_csv_path is not None:
+        matrix_rows = read_matrix_rows(matrix_csv_path)
+        wrmse_path = output_dir / "matrix_pde_vs_pure_constant_wrmse.png"
+        improvement_path = output_dir / "matrix_pde_improvement_pct.png"
+        plot_matrix_wrmse_grid(matrix_rows, wrmse_path)
+        plot_matrix_improvement(matrix_rows, improvement_path)
+        print(wrmse_path)
+        print(improvement_path)
 
 
 if __name__ == "__main__":
