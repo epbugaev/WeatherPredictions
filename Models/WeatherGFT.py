@@ -132,6 +132,10 @@ class PDE_kernel(nn.Module):
         self.register_buffer("pixel_z", pixel_z)
         self.register_buffer("pressure", pressure)
         self.register_buffer("M_z", M_z)
+        # BUG-FIX (Coriolis): было self.f=7.29e-5 (=Omega, без 2*sin(phi)).
+        # Корректно f = 2*Omega*sin(phi), Omega=7.2921e-5 (реф. PurePDEKernel f_spherical).
+        f_field = (2 * 7.2921e-5 * torch.sin(latitudes)).reshape([1, 1, height, 1])
+        self.register_buffer("f_field", f_field)
 
     def integral_z(self, input_tensor: torch.Tensor) -> torch.Tensor:
         """Кумулятивный интеграл по уровням давления.
@@ -252,9 +256,12 @@ class PDE_kernel(nn.Module):
         return diff_x
 
     def avoid_inf(self, tensor, threshold=1.0):
-        tensor = torch.where(torch.abs(tensor) == 0.0, torch.ones_like(tensor) * 0.1, tensor)
-        tensor = torch.where(torch.abs(tensor) < threshold, torch.sign(tensor) * threshold, tensor)
-        return tensor
+        # BUG-FIX (avoid_inf): было два where — второй перетирал первый (нули -> +1.0,
+        # а не 0.1). Схлопнуто в один where: |x|<threshold -> sign(x)*threshold,
+        # для x==0 sign=0 -> явно +threshold (реф. PurePDEKernel._avoid_inf).
+        sign = torch.sign(tensor)
+        sign = torch.where(sign == 0.0, torch.ones_like(sign), sign)
+        return torch.where(torch.abs(tensor) < threshold, sign * threshold, tensor)
 
     def share_z_dxyz(self, z):
         self.z_x = self.d_x(z)
@@ -271,8 +278,9 @@ class PDE_kernel(nn.Module):
         v_y = self.v_y
         v_z = self.d_z(v)
 
-        self.u_t = -u * u_x - v * u_y - w * u_z + self.f * v - self.z_x
-        self.v_t = -u * v_x - v * v_y - w * v_z - self.f * u - self.z_y
+        # BUG-FIX (Coriolis): self.f (скаляр 7.29e-5) -> self.f_field = 2*Omega*sin(phi).
+        self.u_t = -u * u_x - v * u_y - w * u_z + self.f_field * v - self.z_x
+        self.v_t = -u * v_x - v * v_y - w * v_z - self.f_field * u - self.z_y
         return self.u_t, self.v_t
 
     def uv_evolution(self, u, v, w):
@@ -289,8 +297,13 @@ class PDE_kernel(nn.Module):
         t_y = self.d_y(t)
         t_z = self.d_z(t)
 
-        Q = -self.L * self.z_z * w
-        self.t_t = (Q - self.z_z * w) / self.c_p - u * t_x - v * t_y - w * t_z
+        # BUG-FIX (temp tendency): было Q=-L*z_z*w; t_t=(Q-z_z*w)/c_p (~ -2488*z_z*w, ~1e6x).
+        # Корректно адиабата dT/dt = R_d*T*omega/(c_p*p), omega=100*w [Pa/s], p в Pa.
+        # self.pressure в гПа -> *100. (реф. PurePDEKernel.get_t_t, adiabatic_omega)
+        omega_pa = 100.0 * w
+        pressure_pa = self.pressure.to(t.dtype) * 100.0
+        t_t_adia = self.R_d * t * omega_pa / (self.c_p * pressure_pa)
+        self.t_t = t_t_adia - u * t_x - v * t_y - w * t_z
         return self.t_t
 
     def t_evolution(self, u, v, w, t):
@@ -302,7 +315,9 @@ class PDE_kernel(nn.Module):
 
     ############################# z #############################
     def get_z_zt(self):
-        z_zt = -self.R / self.pressure.to(self.t_t.dtype) * self.t_t
+        # BUG-FIX (hydrostatic): было self.R=8.314 (универс., на моль); корректно
+        # R_d=287 (на массу). self.pressure в гПа согласовано с M_z/pixel_z (реф. get_z_t).
+        z_zt = -self.R_d / self.pressure.to(self.t_t.dtype) * self.t_t
         return z_zt
 
     def get_z_t(self):
