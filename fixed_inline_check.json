@@ -99,13 +99,25 @@
     ]
   },
   "q_branch_bug5": {
-    "note": "Bug-5 (Magnus q_s) does NOT manifest catastrophically in the real inline path: get_qs receives p=rho*R*t (~169 Pa), same as reference PurePDEKernel.get_q_dt. The audit's 1391x was for the standalone magnus_qs called with the hPa pressure-level array — a path not used inline. The avoid_inf fix (bug 4) brought q_t from OLD 4.9e-3 to physical 1.5e-6 (ref 2.0e-6).",
+    "note": "Bug-5 (Magnus q_s) does NOT manifest in the real inline path. Verified by controlled geometry test: fixed inline q_t matches reference PurePDEKernel EXACTLY when both run on the same (global) lat grid (ratio 1.000, rel_L1 0.000). The audit's 1391x was for the standalone magnus_qs called with the hPa pressure-level array — a path not used inline.",
+    "p_used_Pa_measured": {
+      "OLD_max": 169.47634887695312,
+      "FIXED_max": 169.47634887695312,
+      "REF_usa_max": 169.47634887695312,
+      "REF_glob_max": 169.47634887695312
+    },
     "q_t_OLD_max": 0.0049162935465574265,
     "q_t_FIXED_max": 1.550507818137703e-06,
-    "q_t_REF_max": 2.014302936004242e-06,
-    "q_t_ratio_FIXED_REF_mean": 0.43000251054763794,
-    "q_t_rel_L1_FIXED_REF": 0.7855897545814514,
-    "p_used_max_Pa": 169.47634887695312,
-    "residual_diff_cause": "geometry wiring: inline latent grid uses GLOBAL latitudes (32 pts -90..90), reference built on 25-55N -> pixel_x(cos phi) differs -> z_t 44.6 vs 62.3 -> q_t ~2x. Not an equation bug."
+    "q_t_REF_glob_max": 1.550507818137703e-06,
+    "q_t_REF_usa_max": 2.014302936004242e-06,
+    "FIXED_vs_REF_same_geometry": {
+      "ratio_mean": 1.0000001192092896,
+      "rel_L1": 6.4902373253517e-08
+    },
+    "FIXED_vs_REF_diff_geometry": {
+      "ratio_mean": 0.43000251054763794,
+      "rel_L1": 0.7855897545814514
+    },
+    "geometry_conclusion": "CONTROLLED TEST: residual q_t/z_t gap (0.43 ratio) vs 25-55N reference is FULLY explained by lat-grid geometry. On the same global grid the match is EXACT (ratio 1.000, rel_L1 0.000). z_t confirms: inline z_t 44.59 == REF_glob z_t 44.59 (vs REF_usa 62.32). Not an equation bug."
   }
 }
