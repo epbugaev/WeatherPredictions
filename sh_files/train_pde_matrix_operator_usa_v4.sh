@@ -59,6 +59,7 @@ LR="${LR:-0.001}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-0.0}"
 IDENTITY_LAMBDA="${IDENTITY_LAMBDA:-0.001}"
 GRAD_CLIP="${GRAD_CLIP:-1.0}"
+TRAINING_MODE="${TRAINING_MODE:-autoregressive}"
 MATRIX_MODE="${MATRIX_MODE:-per_level}"
 MAX_DELTA="${MAX_DELTA:-0.5}"
 Q_SCALE="${Q_SCALE:-0.01}"
@@ -89,7 +90,7 @@ fi
 echo "[pde-matrix] config=${CONFIG_PATH}"
 echo "[pde-matrix] output_dir=${OUTPUT_DIR}"
 echo "[pde-matrix] python=$(command -v python)"
-echo "[pde-matrix] matrix=${MATRIX_MODE}, epochs=${EPOCHS}, lr=${LR}, horizon=${HORIZON:-config}"
+echo "[pde-matrix] matrix=${MATRIX_MODE}, training_mode=${TRAINING_MODE}, epochs=${EPOCHS}, lr=${LR}, horizon=${HORIZON:-config}"
 echo "[pde-matrix] kernel=${STENCIL}/${CORIOLIS}/${TIME_SCHEME}, block_dt=${BLOCK_DT}, substeps=${SUBSTEPS_PER_FRAME}"
 
 exec python tools/train_pde_matrix_operator.py \
@@ -102,6 +103,7 @@ exec python tools/train_pde_matrix_operator.py \
   --weight-decay "${WEIGHT_DECAY}" \
   --identity-lambda "${IDENTITY_LAMBDA}" \
   --grad-clip "${GRAD_CLIP}" \
+  --training-mode "${TRAINING_MODE}" \
   --matrix-mode "${MATRIX_MODE}" \
   --max-delta "${MAX_DELTA}" \
   --q-scale "${Q_SCALE}" \

@@ -17,6 +17,11 @@ Default matrix mode is ``per_level``: one 5x5 matrix per pressure level for
 ``z, t, q, u, v`` tendencies. That is 325 trainable parameters and no spatial
 mixing. The matrix operates in normalized tendency space, so all coefficients
 are dimensionless and comparable across variables.
+
+Use ``--training-mode tendency`` to avoid autoregressive rollout entirely: each
+lead is trained as a teacher-forced one-hour correction from the true previous
+frame. The older rollout experiment remains available as
+``--training-mode autoregressive``.
 """
 
 from __future__ import annotations
@@ -188,6 +193,60 @@ def rollout_one_frame(
     return cur
 
 
+def frame_dt_seconds(args: argparse.Namespace) -> float:
+    return float(args.block_dt) * float(args.substeps_per_frame)
+
+
+def assert_finite_state(state: dict[str, torch.Tensor], label: str) -> None:
+    for name, tensor in state.items():
+        if not torch.isfinite(tensor).all():
+            finite = torch.isfinite(tensor)
+            if finite.any():
+                finite_values = tensor[finite]
+                min_value = float(finite_values.min().detach().cpu())
+                max_value = float(finite_values.max().detach().cpu())
+            else:
+                min_value = float("nan")
+                max_value = float("nan")
+            raise FloatingPointError(
+                f"{label}.{name} contains non-finite values "
+                f"(finite_min={min_value:.6g}, finite_max={max_value:.6g})"
+            )
+
+
+def direct_euler_from_rhs(
+    kernel,
+    state: dict[str, torch.Tensor],
+    rhs: dict[str, torch.Tensor],
+    dt: float,
+) -> dict[str, torch.Tensor]:
+    out = {
+        name: state[name] + dt * rhs[f"{name}_t"]
+        for name in PDE_VARIABLES
+    }
+    out.update({f"{name}_t": rhs[f"{name}_t"] for name in PDE_VARIABLES})
+    finalized = kernel._finalize(out)
+    return {name: finalized[name] for name in PDE_VARIABLES}
+
+
+def direct_one_step_predictions(
+    kernel,
+    corrector: TendencyMatrixCorrector,
+    state: dict[str, torch.Tensor],
+    dt: float,
+) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+    rhs = kernel.rhs(state["u"], state["v"], state["t"], state["q"], state["z"])
+    corrected_rhs = corrector(rhs)
+    matrix_state = direct_euler_from_rhs(
+        kernel,
+        state,
+        {f"{name}_t": corrected_rhs[name] for name in PDE_VARIABLES},
+        dt,
+    )
+    pure_state = direct_euler_from_rhs(kernel, state, rhs, dt)
+    return matrix_state, pure_state
+
+
 def run_train_epoch(
     loader: DataLoader,
     kernel,
@@ -213,13 +272,30 @@ def run_train_epoch(
         data_loss = torch.zeros((), device=x.device)
 
         for lead_idx in range(horizon):
-            state = rollout_one_frame(kernel, corrector, state, args.substeps_per_frame)
+            if args.training_mode == "tendency":
+                source_frame = x[:, -1] if lead_idx == 0 else y[:, lead_idx - 1]
+                state = physical_state_from_frame(source_frame, kernel, args.humidity_mode)
+                state, _ = direct_one_step_predictions(
+                    kernel,
+                    corrector,
+                    state,
+                    frame_dt_seconds(args),
+                )
+            else:
+                state = rollout_one_frame(kernel, corrector, state, args.substeps_per_frame)
+            assert_finite_state(state, f"train batch={batch_idx} lead={lead_idx + 1} matrix_state")
             target = physical_state_from_frame(y[:, lead_idx], kernel, args.humidity_mode)
             data_loss = data_loss + normalized_mae(state, target, scales)
 
         data_loss = data_loss / horizon
         penalty = corrector.identity_penalty()
         loss = data_loss + args.identity_lambda * penalty
+        if not torch.isfinite(loss):
+            raise FloatingPointError(
+                f"train batch={batch_idx} produced non-finite loss "
+                f"(data_loss={float(data_loss.detach().cpu())}, "
+                f"identity_penalty={float(penalty.detach().cpu())})"
+            )
 
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
@@ -297,8 +373,21 @@ def evaluate(
         pure_state = {key: value.clone() for key, value in matrix_state.items()}
         constant_state = {key: value.clone() for key, value in matrix_state.items()}
         for lead_idx in range(horizon):
-            matrix_state = rollout_one_frame(kernel, corrector, matrix_state, args.substeps_per_frame)
-            pure_state = pde_step(kernel, pure_state, args.substeps_per_frame)
+            if args.training_mode == "tendency":
+                source_frame = x[:, -1] if lead_idx == 0 else y[:, lead_idx - 1]
+                matrix_state = physical_state_from_frame(source_frame, kernel, args.humidity_mode)
+                constant_state = {key: value.clone() for key, value in matrix_state.items()}
+                matrix_state, pure_state = direct_one_step_predictions(
+                    kernel,
+                    corrector,
+                    matrix_state,
+                    frame_dt_seconds(args),
+                )
+            else:
+                matrix_state = rollout_one_frame(kernel, corrector, matrix_state, args.substeps_per_frame)
+                pure_state = pde_step(kernel, pure_state, args.substeps_per_frame)
+            assert_finite_state(matrix_state, f"val batch={batch_idx} lead={lead_idx + 1} matrix_state")
+            assert_finite_state(pure_state, f"val batch={batch_idx} lead={lead_idx + 1} pure_state")
             target_state = physical_state_from_frame(y[:, lead_idx], kernel, args.humidity_mode)
             for variable in PDE_VARIABLES:
                 add_eval_metric(
@@ -433,6 +522,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--identity-lambda", type=float, default=1e-3)
     parser.add_argument("--grad-clip", type=float, default=1.0)
+    parser.add_argument(
+        "--training-mode",
+        choices=("autoregressive", "tendency"),
+        default="autoregressive",
+        help=(
+            "autoregressive rolls the corrected PDE state forward through target leads; "
+            "tendency trains/evaluates teacher-forced one-hour RHS corrections without "
+            "feeding predictions back."
+        ),
+    )
     parser.add_argument("--matrix-mode", choices=("diagonal", "per_level", "full"), default="per_level")
     parser.add_argument("--max-delta", type=float, default=0.5)
     parser.add_argument("--q-scale", type=float, default=0.01)
@@ -493,7 +592,8 @@ def main() -> None:
 
     print(
         f"[pde-matrix] mode={args.matrix_mode}, params={sum(p.numel() for p in corrector.parameters())}, "
-        f"max_delta={args.max_delta}, identity_lambda={args.identity_lambda}",
+        f"max_delta={args.max_delta}, identity_lambda={args.identity_lambda}, "
+        f"training_mode={args.training_mode}",
         flush=True,
     )
     print(
