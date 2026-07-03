@@ -1,0 +1,24 @@
+# Matrix-operator training config (USA crop, v4 memmap). Only `data:` is read by the trainer.
+data:
+  dataset_version: v4
+  cut: [[75, 107], [164, 228]]
+  include_target: false
+  lead_time: 1
+  sample_stride: 12
+  frame_interval: 1
+  muti_target_steps: 1
+  start_time_x: 0
+  end_time_x: 5
+  start_time_y: 6
+  end_time_y: 11
+  num_workers: 8
+  train:
+    start_time: '2000-01-01 00:00:00'
+    end_time: '2003-12-30 00:00:00'
+    batch_size: 16
+    shuffle: true
+  val:
+    start_time: '2004-01-01 00:00:00'
+    end_time: '2004-12-30 00:00:00'
+    batch_size: 16
+    shuffle: false

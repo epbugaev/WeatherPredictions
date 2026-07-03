@@ -184,7 +184,11 @@ def rollout_one_frame(
 ) -> dict[str, torch.Tensor]:
     cur = state
     for _ in range(substeps):
-        cur = corrected_euler_step(kernel, corrector, cur)
+        nxt = corrected_euler_step(kernel, corrector, cur)
+        cur = {
+            name: torch.where(torch.isfinite(nxt[name]), nxt[name], cur[name])
+            for name in nxt
+        }
     return cur
 
 
@@ -462,6 +466,8 @@ def parse_args() -> argparse.Namespace:
         default="relative_to_specific",
     )
     parser.add_argument("--use-universal-R", action="store_true")
+    parser.add_argument("--t-t-formulation", choices=("adiabatic_omega","legacy_paper"), default="adiabatic_omega")
+    parser.add_argument("--w-diagnostic", choices=("plain","mass_consistent"), default="plain")
     parser.add_argument("--train-max-batches", type=int, default=None)
     parser.add_argument("--val-max-batches", type=int, default=None)
     parser.add_argument("--output-dir", default="checkpoints/pde_matrix_operator/default")
@@ -478,6 +484,27 @@ def main() -> None:
     config = load_yaml_config(args.config)
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- Comet logging (optional; enabled when COMET_API_KEY is set) ---
+    experiment = None
+    try:
+        api_key = os.environ.get('COMET_API_KEY')
+        if api_key:
+            from comet_ml import Experiment
+            experiment = Experiment(
+                api_key=api_key,
+                project_name=os.environ.get('COMET_PROJECT_NAME', 'weatheriamvp'),
+                workspace=os.environ.get('COMET_WORKSPACE'),
+            )
+            tag = os.environ.get('EQ_VARIANT_TAG')
+            if tag:
+                experiment.set_name(tag)
+                experiment.add_tag(tag)
+            experiment.log_parameters(vars(args))
+            print(f'[pde-matrix] Comet logging ON -> project={os.environ.get("COMET_PROJECT_NAME")}', flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f'[pde-matrix] Comet disabled ({exc!r})', flush=True)
+        experiment = None
 
     train_loader = make_loader(config, "train", args, shuffle=True)
     val_loader = make_loader(config, "val", args, shuffle=False)
@@ -559,6 +586,11 @@ def main() -> None:
             "is_best": int(is_best),
         }
         write_rows(out_dir / "train_log.csv", [log_row], append=True)
+        if experiment is not None:
+            experiment.log_metrics(
+                {k: v for k, v in log_row.items() if isinstance(v, (int, float))},
+                epoch=epoch,
+            )
         write_rows(out_dir / f"val_metrics_epoch_{epoch:04d}.csv", val_rows)
         print(
             f"[epoch {epoch:04d}] train_loss={train_metrics['train_loss']:.6g} "
@@ -581,6 +613,8 @@ def main() -> None:
         out_dir / "last.pt",
     )
     print(f"[pde-matrix] wrote outputs to {out_dir}", flush=True)
+    if experiment is not None:
+        experiment.end()
 
 
 if __name__ == "__main__":

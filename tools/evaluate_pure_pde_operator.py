@@ -260,6 +260,8 @@ def build_kernel(args: argparse.Namespace, height: int, width: int, device: torc
         boundary_y=args.boundary_y,
         boundary_z=args.boundary_z,
         use_universal_R=args.use_universal_R,
+        t_t_formulation=getattr(args, "t_t_formulation", "adiabatic_omega"),
+        w_diagnostic=getattr(args, "w_diagnostic", "plain"),
     ).to(device)
     lat_weights = height * torch.cos(grid.latitudes) / torch.cos(grid.latitudes).sum()
     return kernel, lat_weights
