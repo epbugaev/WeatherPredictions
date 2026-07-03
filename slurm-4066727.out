@@ -1,0 +1,38 @@
+[train-v4] staging memmap /home/ebugaev/era5_memmap/predformer_usa_2000_2004.dat -> /tmp/ebugaev/era5_stage_4066727/
+[train-v4] staged in 31s: 24G
+[_shell_contract] Загружен .env из /home/ebugaev/WeatherPredictions/.env
+[launch_train] JobID=4066727 host=cn-015 cwd=/home/ebugaev/WeatherPredictions
+[launch_train] git_sha=unknown
+[launch_train] config=configs/predrnn_usa_v4.yaml nodes=1 gpus_per_node=1
+[launch_train] python=/home/ebugaev/.conda/envs/weatherpred-refactor/bin/python
+/home/ebugaev/.conda/envs/weatherpred-refactor/lib/python3.10/site-packages/torch/utils/data/dataloader.py:558: UserWarning: This DataLoader will create 8 worker processes in total. Our suggested max number of worker in current system is 1, which is smaller than what this DataLoader is going to create. Please be aware that excessive worker creation might get DataLoader running slow or even freeze, lower the worker number to avoid potential slowness/freeze if necessary.
+  warnings.warn(_create_warning_msg(
+COMET WARNING: To get all data logged automatically, import comet_ml before the following modules: torch.
+COMET INFO: Experiment is live on comet.com https://www.comet.com/epbugaev/weatherpredictions/a92icmwvpw9pjcuml38re2rz7s1e71wf110z1kz8vhpk6d5s5u
+
+[config] /home/ebugaev/WeatherPredictions/configs/predrnn_usa_v4.yaml
+[experiment] PredRNN-USA-v4-72h
+[checkpoint path] /home/ebugaev/checkpoints/PredRNN-USA-v4-72h/2026-06-01-19:32zwbum
+[distributed] world_size=1 rank=0
+[bench] mode active (BENCH_MAX_STEPS=3, PROFILE_TRACE_DIR=None); skipping validation and checkpointing
+[trainer] training finished
+COMET INFO: ---------------------------------------------------------------------------------------
+COMET INFO: Comet.ml Experiment Summary
+COMET INFO: ---------------------------------------------------------------------------------------
+COMET INFO:   Data:
+COMET INFO:     display_summary_level : 1
+COMET INFO:     name                  : PredRNN-USA-v4-72h-4066727
+COMET INFO:     url                   : https://www.comet.com/epbugaev/weatherpredictions/a92icmwvpw9pjcuml38re2rz7s1e71wf110z1kz8vhpk6d5s5u
+COMET INFO:   Others:
+COMET INFO:     Name : PredRNN-USA-v4-72h-4066727
+COMET INFO:   Uploads:
+COMET INFO:     conda-environment-definition : 1
+COMET INFO:     conda-info                   : 1
+COMET INFO:     conda-specification          : 1
+COMET INFO:     environment details          : 1
+COMET INFO:     filename                     : 1
+COMET INFO:     git metadata                 : 1
+COMET INFO:     installed packages           : 1
+COMET INFO:     source_code                  : 2 (19.29 KB)
+COMET INFO: 
+COMET WARNING: To get all data logged automatically, import comet_ml before the following modules: torch.

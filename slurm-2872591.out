@@ -1,0 +1,136 @@
+CometLogger will be initialized in online mode
+COMET INFO: Experiment is live on comet.com https://www.comet.com/epbugaev/weatherpredictions/fr15phr48rbh7ezgglt5hzthi3en5mtd1l1hpijq7b2myypus4
+
+GPU available: True (cuda), used: True
+TPU available: False, using: 0 TPU cores
+IPU available: False, using: 0 IPUs
+HPU available: False, using: 0 HPUs
+[checkpoint path] /home/ebugaev/checkpoints/WeatherGFT coef learnable/2025-05-30-01:18jd9h8
+Initializing distributed: GLOBAL_RANK: 0, MEMBER: 1/1
+----------------------------------------------------------------------------------------------------
+distributed_backend=nccl
+All distributed processes registered. Starting with 1 processes
+----------------------------------------------------------------------------------------------------
+
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+COMET INFO: The process of logging environment details (conda environment, git patch) is underway. Please be patient as this may take some time.
+COMET INFO: ---------------------------------------------------------------------------------------
+COMET INFO: Comet.ml Experiment Summary
+COMET INFO: ---------------------------------------------------------------------------------------
+COMET INFO:   Data:
+COMET INFO:     display_summary_level : 1
+COMET INFO:     name                  : WeatherGFT coef learnable
+COMET INFO:     url                   : https://www.comet.com/epbugaev/weatherpredictions/fr15phr48rbh7ezgglt5hzthi3en5mtd1l1hpijq7b2myypus4
+COMET INFO:   Others:
+COMET INFO:     Created from : pytorch-lightning
+COMET INFO:     Name         : WeatherGFT coef learnable
+COMET INFO:   Uploads:
+COMET INFO:     conda-environment-definition : 1
+COMET INFO:     conda-info                   : 1
+COMET INFO:     conda-specification          : 1
+COMET INFO:     environment details          : 1
+COMET INFO:     filename                     : 1
+COMET INFO:     git metadata                 : 1
+COMET INFO:     git-patch (uncompressed)     : 1 (15.73 MB)
+COMET INFO:     installed packages           : 1
+COMET INFO:     source_code                  : 3 (51.95 KB)
+COMET INFO: 
+Traceback (most recent call last):
+  File "/home/ebugaev/WeatherPredictions/train_classic.py", line 119, in <module>
+    train_model(devices=devices, num_nodes=num_nodes)
+  File "/home/ebugaev/WeatherPredictions/train_classic.py", line 106, in train_model
+    trainer.fit(model=lit_model, train_dataloaders=train_loader, val_dataloaders=valid_loader)
+  File "/home/epbugaev/.conda/envs/train_clone_five/lib/python3.9/site-packages/lightning/pytorch/trainer/trainer.py", line 544, in fit
+    call._call_and_handle_interrupt(
+  File "/home/epbugaev/.conda/envs/train_clone_five/lib/python3.9/site-packages/lightning/pytorch/trainer/call.py", line 43, in _call_and_handle_interrupt
+    return trainer.strategy.launcher.launch(trainer_fn, *args, trainer=trainer, **kwargs)
+  File "/home/epbugaev/.conda/envs/train_clone_five/lib/python3.9/site-packages/lightning/pytorch/strategies/launchers/subprocess_script.py", line 102, in launch
+    return function(*args, **kwargs)
+  File "/home/epbugaev/.conda/envs/train_clone_five/lib/python3.9/site-packages/lightning/pytorch/trainer/trainer.py", line 580, in _fit_impl
+    self._run(model, ckpt_path=ckpt_path)
+  File "/home/epbugaev/.conda/envs/train_clone_five/lib/python3.9/site-packages/lightning/pytorch/trainer/trainer.py", line 969, in _run
+    call._call_callback_hooks(self, "on_fit_start")
+  File "/home/epbugaev/.conda/envs/train_clone_five/lib/python3.9/site-packages/lightning/pytorch/trainer/call.py", line 208, in _call_callback_hooks
+    fn(trainer, trainer.lightning_module, *args, **kwargs)
+  File "/home/epbugaev/.conda/envs/train_clone_five/lib/python3.9/site-packages/lightning/pytorch/callbacks/model_summary.py", line 60, in on_fit_start
+    model_summary = self._summary(trainer, pl_module)
+  File "/home/epbugaev/.conda/envs/train_clone_five/lib/python3.9/site-packages/lightning/pytorch/callbacks/model_summary.py", line 74, in _summary
+    return summarize(pl_module, max_depth=self._max_depth)
+  File "/home/epbugaev/.conda/envs/train_clone_five/lib/python3.9/site-packages/lightning/pytorch/utilities/model_summary/model_summary.py", line 473, in summarize
+    return ModelSummary(lightning_module, max_depth=max_depth)
+  File "/home/epbugaev/.conda/envs/train_clone_five/lib/python3.9/site-packages/lightning/pytorch/utilities/model_summary/model_summary.py", line 209, in __init__
+    self._layer_summary = self.summarize()
+  File "/home/epbugaev/.conda/envs/train_clone_five/lib/python3.9/site-packages/lightning/pytorch/utilities/model_summary/model_summary.py", line 270, in summarize
+    self._forward_example_input()
+  File "/home/epbugaev/.conda/envs/train_clone_five/lib/python3.9/site-packages/lightning/pytorch/utilities/model_summary/model_summary.py", line 302, in _forward_example_input
+    model(input_)
+  File "/home/epbugaev/.conda/envs/train_clone_five/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1511, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/epbugaev/.conda/envs/train_clone_five/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1520, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/ebugaev/WeatherPredictions/LitModels/basemodel_no_history.py", line 53, in forward
+    x = self.model(x)
+  File "/home/epbugaev/.conda/envs/train_clone_five/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1511, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/epbugaev/.conda/envs/train_clone_five/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1561, in _call_impl
+    result = forward_call(*args, **kwargs)
+  File "/home/ebugaev/WeatherPredictions/Models/WeatherGFTSmallWorld.py", line 756, in forward
+    x, zquvtw = layer(x, zquvtw)
+  File "/home/epbugaev/.conda/envs/train_clone_five/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1511, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/epbugaev/.conda/envs/train_clone_five/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1520, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/epbugaev/.conda/envs/train_clone_five/lib/python3.9/site-packages/fairscale/nn/checkpoint/checkpoint_activations.py", line 171, in _checkpointed_forward
+    return original_forward(module, *args, **kwargs)
+  File "/home/ebugaev/WeatherPredictions/Models/WeatherGFTSmallWorld.py", line 586, in forward
+    x, zquvtw = regular_block(x, zquvtw)
+  File "/home/epbugaev/.conda/envs/train_clone_five/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1511, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/epbugaev/.conda/envs/train_clone_five/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1520, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/ebugaev/WeatherPredictions/Models/WeatherGFTSmallWorld.py", line 486, in forward
+    feat_pde, zquvtw = self.pde_block(x, zquvtw)
+  File "/home/epbugaev/.conda/envs/train_clone_five/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1511, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/epbugaev/.conda/envs/train_clone_five/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1520, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/ebugaev/WeatherPredictions/Models/WeatherGFTSmallWorld.py", line 323, in forward
+    x, zquvtw = PDE_kernel(x, zquvtw)
+  File "/home/epbugaev/.conda/envs/train_clone_five/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1511, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/epbugaev/.conda/envs/train_clone_five/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1520, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/ebugaev/WeatherPredictions/Models/WeatherGFTSmallWorld.py", line 284, in forward
+    zquvtw_old = (1 - self.physics_part_coef)*self.variable_norm(x) + self.physics_part_coef*zquvtw
+RuntimeError: The size of tensor a (64) must match the size of tensor b (16) at non-singleton dimension 3
+[2025-05-30 01:18:26,339] torch.distributed.elastic.multiprocessing.api: [ERROR] failed (exitcode: 1) local_rank: 0 (pid: 16809) of binary: /home/epbugaev/.conda/envs/train_clone_five/bin/python
+Traceback (most recent call last):
+  File "/home/epbugaev/.conda/envs/train_clone_five/bin/torchrun", line 33, in <module>
+    sys.exit(load_entry_point('torch==2.2.1', 'console_scripts', 'torchrun')())
+  File "/home/epbugaev/.conda/envs/train_clone_five/lib/python3.9/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 347, in wrapper
+    return f(*args, **kwargs)
+  File "/home/epbugaev/.conda/envs/train_clone_five/lib/python3.9/site-packages/torch/distributed/run.py", line 812, in main
+    run(args)
+  File "/home/epbugaev/.conda/envs/train_clone_five/lib/python3.9/site-packages/torch/distributed/run.py", line 803, in run
+    elastic_launch(
+  File "/home/epbugaev/.conda/envs/train_clone_five/lib/python3.9/site-packages/torch/distributed/launcher/api.py", line 135, in __call__
+    return launch_agent(self._config, self._entrypoint, list(args))
+  File "/home/epbugaev/.conda/envs/train_clone_five/lib/python3.9/site-packages/torch/distributed/launcher/api.py", line 268, in launch_agent
+    raise ChildFailedError(
+torch.distributed.elastic.multiprocessing.errors.ChildFailedError: 
+============================================================
+/home/ebugaev/WeatherPredictions/train_classic.py FAILED
+------------------------------------------------------------
+Failures:
+  <NO_OTHER_FAILURES>
+------------------------------------------------------------
+Root Cause (first observed failure):
+[0]:
+  time      : 2025-05-30_01:18:26
+  host      : cn-029.localdomain
+  rank      : 0 (local_rank: 0)
+  exitcode  : 1 (pid: 16809)
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+============================================================
+srun: error: cn-029: task 0: Exited with exit code 1
