@@ -1,0 +1,114 @@
+{
+  "meta": {
+    "snapshot": "2003-07-15 12:00->13:00",
+    "dt_data_s": 3600.0,
+    "H": 32,
+    "W": 64
+  },
+  "single_step_residual": {
+    "global/periodic": {
+      "u": 3.309640884399414,
+      "v": 5.230806827545166,
+      "t": 23.842695236206055,
+      "z": 66.95032501220703,
+      "q": 0.7959540486335754
+    },
+    "global/replicate": {
+      "u": 3.0657522678375244,
+      "v": 5.164551734924316,
+      "t": 21.537647247314453,
+      "z": 60.39699935913086,
+      "q": 0.7406598329544067
+    },
+    "usa/periodic": {
+      "u": 5.251749515533447,
+      "v": 11.110578536987305,
+      "t": 59.879886627197266,
+      "z": 167.4853515625,
+      "q": 1.8510452508926392
+    },
+    "usa/replicate": {
+      "u": 5.180086135864258,
+      "v": 11.079070091247559,
+      "t": 59.63418197631836,
+      "z": 166.80250549316406,
+      "q": 1.83955979347229
+    }
+  },
+  "geostrophic": {
+    "global": {
+      "v_res_rel": 0.9676952958106995,
+      "u_res_rel": 1.1413325071334839
+    },
+    "usa": {
+      "v_res_rel": 0.8412466049194336,
+      "u_res_rel": 2.415972948074341
+    }
+  },
+  "rollout_blowup": {
+    "global/periodic/euler": {
+      "blow_step": 7,
+      "maxT_step1": 313.5787048339844
+    },
+    "global/periodic/rk4": {
+      "blow_step": 4,
+      "maxT_step1": 313.5786437988281
+    },
+    "global/periodic/ssp_rk3": {
+      "blow_step": 4,
+      "maxT_step1": 313.58477783203125
+    },
+    "global/periodic/semi_implicit": {
+      "blow_step": 7,
+      "maxT_step1": 313.5787048339844
+    },
+    "global/replicate/euler": {
+      "blow_step": 8,
+      "maxT_step1": 313.5787048339844
+    },
+    "global/replicate/rk4": {
+      "blow_step": 5,
+      "maxT_step1": 313.5786437988281
+    },
+    "global/replicate/ssp_rk3": {
+      "blow_step": 5,
+      "maxT_step1": 313.58477783203125
+    },
+    "global/replicate/semi_implicit": {
+      "blow_step": 9,
+      "maxT_step1": 313.5787048339844
+    },
+    "usa/periodic/euler": {
+      "blow_step": 8,
+      "maxT_step1": 313.57220458984375
+    },
+    "usa/periodic/rk4": {
+      "blow_step": 4,
+      "maxT_step1": 313.5699157714844
+    },
+    "usa/periodic/ssp_rk3": {
+      "blow_step": 5,
+      "maxT_step1": 313.58099365234375
+    },
+    "usa/periodic/semi_implicit": {
+      "blow_step": 8,
+      "maxT_step1": 313.57220458984375
+    },
+    "usa/replicate/euler": {
+      "blow_step": 8,
+      "maxT_step1": 313.57220458984375
+    },
+    "usa/replicate/rk4": {
+      "blow_step": 4,
+      "maxT_step1": 313.5699157714844
+    },
+    "usa/replicate/ssp_rk3": {
+      "blow_step": 5,
+      "maxT_step1": 313.58099365234375
+    },
+    "usa/replicate/semi_implicit": {
+      "blow_step": 8,
+      "maxT_step1": 313.57220458984375
+    }
+  }
+}
