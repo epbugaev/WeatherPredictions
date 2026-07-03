@@ -16,6 +16,7 @@
 | **[06_boundary_conditions/](06_boundary_conditions/)** | periodic vs replicate vs reflect | Граница влияет <0.5% — приоритет низкий |
 | **[07_stability_integrators/](07_stability_integrators/)** | euler / rk4 / ssp_rk3 / semi_implicit, dt-sweep, WENO, IC-balance | Нелинейная grid-scale CFL; высокий порядок не помогает |
 | **[09_equation_improvement/](09_equation_improvement/)** | Как уменьшить невязку по данным (перекалибровка + диабатические поля) | Линейно невязку не убрать — R²≤0.17, нужен нелинейный обучаемый член |
+| **[10_governing_equations/](10_governing_equations/)** | «Не те уравнения?» — литература + 3 теста на ERA5 (координаты, ω, диабатика, набор переменных) | Координаты верны; уравнения неполны — нет диабатики Q (×48), z избыточна, ω неточна |
 | **[08_retrain_setup/](08_retrain_setup/)** | A100 sbatch + конфиг для переобучения на фиксе | Готов к запуску (не запущен) |
 
 ## Сквозной вывод
