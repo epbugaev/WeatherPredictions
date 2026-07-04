@@ -223,6 +223,7 @@ class IAM4VP(nn.Module):
         physics_residual_input_space="normalized",
         physics_residual_humidity_mode="as_is",
         physics_residual_tendency_clip=0.0,
+        physics_w_diagnostic="plain",
         freeze_iam4vp_for_residual_warmup=False,
         residual_warmup_epochs=0,
     ):
@@ -239,6 +240,11 @@ class IAM4VP(nn.Module):
         )  # for 1_4 and 5_6
         self.lp = LP(C_data, hid_S, N_S)
         self.lp_phys = LP(C_data, hid_S, N_S)
+        if physics_w_diagnostic not in ("plain", "mass_consistent"):
+            raise ValueError(
+                f"physics_w_diagnostic must be 'plain' or 'mass_consistent', got {physics_w_diagnostic!r}"
+            )
+        self.physics_w_diagnostic = physics_w_diagnostic
         self.hybrid_block = HybridBlock(
             dim=C_data - 4,
             zquvtw_channel=13,
@@ -246,6 +252,7 @@ class IAM4VP(nn.Module):
             block_dt=1200,
             inverse_time=False,
             physics_part_coef=0.5,
+            w_diagnostic=physics_w_diagnostic,
         )
 
         self.skip_mask_token = nn.Parameter(torch.zeros(T_data, hid_S, H_data, W_data))

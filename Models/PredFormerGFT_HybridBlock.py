@@ -225,7 +225,8 @@ class PDE_kernel(nn.Module):
         norm=False,
         eddy_viscosity=0.0,
         beta=1.6e-11,
-        f0=1.0313e-4,  # BUG-FIX: было 7.29e-5 (=Omega); f0=2*Omega*sin(45)=1.0313e-4
+        f0=7.29e-5,
+        w_diagnostic="plain",
     ):
         """
         eddy_viscosity: коэффициент вихревой вязкости для субрешеточной турбулентности.
@@ -235,6 +236,11 @@ class PDE_kernel(nn.Module):
         super().__init__()
         self.norm = norm
         self.eddy_viscosity = eddy_viscosity
+        if w_diagnostic not in ("plain", "mass_consistent"):
+            raise ValueError(
+                f"Unknown w_diagnostic {w_diagnostic!r}; expected 'plain' or 'mass_consistent'"
+            )
+        self.w_diagnostic = w_diagnostic
 
         self.f0 = f0
         self.beta = beta
@@ -289,10 +295,8 @@ class PDE_kernel(nn.Module):
         return self.scale_tensor(diff_x, diff_min, diff_max)
 
     def avoid_inf(self, tensor, threshold=1.0):
-        # BUG-FIX (avoid_inf): было два where — второй перетирал первый (нули -> +1.0).
-        sign = torch.sign(tensor)
-        sign = torch.where(sign == 0.0, torch.ones_like(sign), sign)
-        return torch.where(torch.abs(tensor) < threshold, sign * threshold, tensor)
+        tensor = torch.where(torch.abs(tensor) == 0.0, torch.ones_like(tensor) * 0.1, tensor)
+        return torch.where(torch.abs(tensor) < threshold, torch.sign(tensor) * threshold, tensor)
 
     def share_z_dxyz(self, z):
         self.z_x = d_x(z)
@@ -339,11 +343,8 @@ class PDE_kernel(nn.Module):
         t_x = d_x(t)
         t_y = d_y(t)
         t_z = d_z(t)
-        # BUG-FIX (temp tendency): адиабата dT/dt = R_d*T*omega/(c_p*p), omega=100*w [Pa/s], p в Pa.
-        omega_pa = 100.0 * w
-        pressure_pa = pressure.to(t.dtype).to(t.device) * 100.0
-        t_t_adia = self.R_d * t * omega_pa / (self.c_p * pressure_pa)
-        self.t_t = t_t_adia - u * t_x - v * t_y - w * t_z
+        Q = -self.L * self.z_z * w
+        self.t_t = (Q - self.z_z * w) / self.c_p - u * t_x - v * t_y - w * t_z
         return self.t_t
 
     def t_evolution(self, u, v, w, t):
@@ -354,8 +355,7 @@ class PDE_kernel(nn.Module):
 
     ############################# z #############################
     def get_z_zt(self):
-        # BUG-FIX (hydrostatic): было self.R=8.314 (на моль); корректно R_d=287 (на массу).
-        return -self.R_d / pressure.to(self.t_t.dtype).to(self.t_t.device) * self.t_t
+        return -self.R / pressure.to(self.t_t.dtype).to(self.t_t.device) * self.t_t
 
     def get_z_t(self):
         z_zt = self.get_z_zt()
@@ -372,7 +372,13 @@ class PDE_kernel(nn.Module):
     def get_w(self, u, v):
         self.u_x = d_x(u)
         self.v_y = d_y(v)
-        w_z = -self.u_x - self.v_y
+        div = self.u_x + self.v_y
+        if getattr(self, "w_diagnostic", "plain") == "mass_consistent":
+            # p-weighted column-mean divergence removed so int(div) dp ~ 0 per column
+            pz = pixel_z.reshape(1, -1, 1, 1).to(div.dtype).to(div.device)
+            div_bar = (div * pz).sum(dim=1, keepdim=True) / pz.sum()
+            div = div - div_bar
+        w_z = -div
         return integral_z(w_z).detach()
 
     ################################################################
@@ -459,7 +465,7 @@ class PDE_kernel(nn.Module):
 
 class PDE_block(nn.Module):
     def __init__(
-        self, in_dim, variable_dim, physics_part_coef, depth=3, block_dt=300, inverse_time=False
+        self, in_dim, variable_dim, physics_part_coef, depth=3, block_dt=300, inverse_time=False, w_diagnostic="plain"
     ):
         super().__init__()
         self.PDE_kernels = nn.ModuleList([])
@@ -471,6 +477,7 @@ class PDE_block(nn.Module):
                     block_dt=block_dt,
                     inverse_time=inverse_time,
                     physics_part_coef=physics_part_coef,
+                    w_diagnostic=w_diagnostic,
                 )
             )
 
@@ -901,7 +908,7 @@ class PredFormer_Model(nn.Module):
 
 
 class HybridBlock(nn.Module):
-    def __init__(self, dim, zquvtw_channel, depth, block_dt, inverse_time, physics_part_coef):
+    def __init__(self, dim, zquvtw_channel, depth, block_dt, inverse_time, physics_part_coef, w_diagnostic="plain"):
         super().__init__()
 
         self.pde_block = PDE_block(
@@ -911,6 +918,7 @@ class HybridBlock(nn.Module):
             block_dt=block_dt,
             inverse_time=inverse_time,
             physics_part_coef=physics_part_coef,
+            w_diagnostic=w_diagnostic,
         )
         self.router_weight = nn.Parameter(torch.zeros(1, 1, 1, dim), requires_grad=True)
 

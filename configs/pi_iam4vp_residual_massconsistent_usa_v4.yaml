@@ -1,0 +1,83 @@
+# PI-IAM4VP residual-corrector experiment.
+# This treats WeatherGFT/HybridBlock as a tendency feature generator, not as a
+# trusted forecast or fixed alpha/router blend.
+experiment:
+  name: PI-IAM4VP-Residual-MassConsistentW-USA-v4
+model:
+  type: PI-IAM4VP
+  params:
+    # Disable the legacy latent physics injection; the residual corrector below
+    # still runs the HybridBlock and applies a learned output-space correction.
+    use_physics: false
+    use_physics_residual_corrector: true
+    physics_residual_hidden_channels: 128
+    physics_residual_apply_to: upper_air_only
+    physics_residual_zero_init: true
+    physics_residual_lambda_l1: 0.0001
+    physics_feature_mode: tendency
+    physics_residual_shuffle: none
+    physics_residual_hybrid_steps: 3
+    physics_residual_hybrid_mode: stable_physical
+    physics_residual_input_space: physical
+    physics_residual_humidity_mode: relative_to_specific
+    physics_residual_tendency_clip: 8.0
+    physics_w_diagnostic: mass_consistent
+    # Keep off for from-scratch runs. Turn on only for fine-tuning from a
+    # pretrained IAM4VP checkpoint.
+    freeze_iam4vp_for_residual_warmup: false
+    residual_warmup_epochs: 0
+data:
+  dataset_version: v4
+  cut:
+  - - 75
+    - 107
+  - - 164
+    - 228
+  include_target: false
+  lead_time: 0
+  sample_stride: 12
+  frame_interval: 1
+  muti_target_steps: 1
+  start_time_x: 0
+  end_time_x: 5
+  start_time_y: 6
+  end_time_y: 11
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: false
+  prefetch_factor: 4
+  train:
+    start_time: '2000-01-01 00:00:00'
+    end_time: '2003-12-30 00:00:00'
+    batch_size: 16
+    shuffle: true
+  val:
+    start_time: '2004-01-01 00:00:00'
+    end_time: '2004-12-30 00:00:00'
+    batch_size: 16
+    shuffle: false
+  memmap_path: null
+training:
+  litmodel: mutiout_imvp_small_world
+  lr: 0.0005
+  eta_min: 0.0
+  max_epoch: 2000
+  loss_type: MAE
+  early_stopping_patience: 34
+  extra_kwargs:
+    muti_out_nums: 6
+    time_prediction: 6
+  warmup_ratio: 0.05
+  warmup_start_factor: 0.001
+trainer:
+  precision: 32
+  log_every_n_steps: 50
+  static_graph: false
+  find_unused_parameters: true
+  num_sanity_val_steps: 0
+  float32_matmul_precision: high
+  val_every_n_epochs: 3
+logging:
+  checkpoint_base: "${WEATHERPRED_CHECKPOINT_BASE:-./checkpoints}"
+  comet_project: "${COMET_PROJECT_NAME:-WeatherPredictions}"
+  log_code_file: null
