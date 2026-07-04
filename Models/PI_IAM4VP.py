@@ -224,6 +224,11 @@ class IAM4VP(nn.Module):
         physics_residual_humidity_mode="as_is",
         physics_residual_tendency_clip=0.0,
         physics_w_diagnostic="plain",
+        use_diabatic_term=False,
+        diabatic_hidden_channels=64,
+        diabatic_lambda_l1=0.0,
+        diabatic_constants_path=None,
+        diabatic_cut=None,
         freeze_iam4vp_for_residual_warmup=False,
         residual_warmup_epochs=0,
     ):
@@ -352,6 +357,13 @@ class IAM4VP(nn.Module):
 
         self.surface_channels = 4
         self.upper_air_channels = C_data - self.surface_channels
+        self.use_diabatic_term = bool(use_diabatic_term)
+        self.diabatic_lambda_l1 = float(diabatic_lambda_l1)
+        self.diabatic_head = None
+        if self.use_diabatic_term and not self.use_physics_residual_corrector:
+            raise ValueError(
+                "use_diabatic_term=True requires use_physics_residual_corrector=True"
+            )
         if self.use_physics_residual_corrector:
             corrected_channels = (
                 self.upper_air_channels
@@ -369,6 +381,17 @@ class IAM4VP(nn.Module):
                 hidden_channels=physics_residual_hidden_channels,
                 zero_init=physics_residual_zero_init,
             )
+            if self.use_diabatic_term:
+                geo = self._load_static_geo(
+                    diabatic_constants_path, diabatic_cut, H_data, W_data
+                )
+                self.register_buffer("diabatic_geo", geo)
+                self.diabatic_head = PhysicsTendencyResidualCorrector(
+                    in_channels=corrected_channels + geo.shape[1],
+                    out_channels=corrected_channels,
+                    hidden_channels=diabatic_hidden_channels,
+                    zero_init=True,
+                )
             if self.physics_residual_humidity_mode == "relative_to_specific":
                 warnings.warn(
                     "PI-IAM4VP residual-corrector mode treats the inherited "
@@ -620,6 +643,35 @@ class IAM4VP(nn.Module):
     def _rms(x: torch.Tensor) -> torch.Tensor:
         return torch.sqrt(torch.mean(x.float() * x.float()))
 
+    @staticmethod
+    def _load_static_geo(path, cut, H, W):
+        """Load + crop static geography (orography, |lat|, lsm) as (1, 3, H, W).
+
+        E9'-geo diabatic inputs: standardized orography, |lat|/90, land-sea mask.
+        Cropped to the region window ``cut=[lat0, lat1, lon0, lon1]`` on the
+        native constants grid. These are the geographic drivers exp 05 flagged
+        as the physics failure modes (mountains, tropics f->0).
+        """
+        import h5netcdf
+        import numpy as np
+        if path is None:
+            raise ValueError("use_diabatic_term=True requires diabatic_constants_path")
+        if cut is None:
+            cut = [75, 107, 164, 228]
+        la0, la1, lo0, lo1 = cut
+        with h5netcdf.File(path, "r") as f:
+            orog = np.asarray(f.variables["orography"], dtype=np.float32)[la0:la1, lo0:lo1]
+            lsm = np.asarray(f.variables["lsm"], dtype=np.float32)[la0:la1, lo0:lo1]
+            lat2d = np.asarray(f.variables["lat2d"], dtype=np.float32)[la0:la1, lo0:lo1]
+        if orog.shape != (H, W):
+            raise ValueError(
+                f"geo crop {orog.shape} != ({H},{W}); check diabatic_cut {cut}"
+            )
+        orog_n = (orog - orog.mean()) / (orog.std() + 1e-6)
+        abslat_n = np.abs(lat2d) / 90.0
+        geo = np.stack([orog_n, abslat_n, lsm], axis=0)[None]
+        return torch.from_numpy(geo).float()
+
     def _physics_prior_from_state(self, prev_state: torch.Tensor) -> torch.Tensor:
         """Run the inherited HybridBlock on the previous state.
 
@@ -781,6 +833,17 @@ class IAM4VP(nn.Module):
         correction = self.physics_residual_corrector(features)
         correction = self._finite_or_fallback(correction, torch.zeros_like(correction))
 
+        diabatic_term = None
+        if self.diabatic_head is not None:
+            st = self._residual_slice(prev_state)
+            geo = self.diabatic_geo.to(dtype=st.dtype, device=st.device)
+            geo = geo.expand(st.shape[0], -1, -1, -1)
+            diabatic_term = self.diabatic_head(torch.cat([st, geo], dim=1))
+            diabatic_term = self._finite_or_fallback(
+                diabatic_term, torch.zeros_like(diabatic_term)
+            )
+            correction = correction + diabatic_term
+
         if self.physics_residual_apply_to == "upper_air_only":
             y_hat = torch.cat(
                 [
@@ -804,6 +867,11 @@ class IAM4VP(nn.Module):
         self._last_residual_aux_loss = (
             self.physics_residual_lambda_l1 * full_correction.abs().mean()
         )
+        if diabatic_term is not None and self.diabatic_lambda_l1 > 0:
+            self._last_residual_aux_loss = (
+                self._last_residual_aux_loss
+                + self.diabatic_lambda_l1 * diabatic_term.abs().mean()
+            )
 
         correction_flat = correction_for_cosine.detach().flatten(1).float()
         tendency_flat = tendency_for_cosine.detach().flatten(1).float()
@@ -830,6 +898,11 @@ class IAM4VP(nn.Module):
             "physics_residual_pi_minus_iam4vp_rms": self._rms((y_hat - y_nn).detach()),
             "physics_residual_nonfinite_ratio": nonfinite_ratio.detach(),
             "physics_residual_tendency_clip_ratio": tendency_clip_ratio.detach(),
+            "physics_diabatic_rms": (
+                self._rms(diabatic_term.detach())
+                if diabatic_term is not None
+                else torch.zeros((), device=y_nn.device)
+            ),
         }
         return y_hat
 
