@@ -28,6 +28,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
+# Import comet_ml before torch so its auto-logging integration binds correctly.
+try:
+    import comet_ml  # noqa: F401
+except Exception:  # noqa: BLE001
+    comet_ml = None
+
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
@@ -166,6 +172,10 @@ def corrected_euler_step(
 ) -> dict[str, torch.Tensor]:
     rhs = kernel.rhs(state["u"], state["v"], state["t"], state["q"], state["z"])
     corrected_rhs = corrector(rhs)
+    # Grad-safe sanitation: strip any non-finite tendency before the Euler update
+    # (finite gradients, unlike torch.where) so a diverging substep cannot seed NaNs.
+    corrected_rhs = {k: torch.nan_to_num(v, nan=0.0, posinf=0.0, neginf=0.0)
+                     for k, v in corrected_rhs.items()}
     dt = kernel.block_dt
     out = {
         name: state[name] + dt * corrected_rhs[name]
@@ -186,7 +196,7 @@ def rollout_one_frame(
     for _ in range(substeps):
         nxt = corrected_euler_step(kernel, corrector, cur)
         cur = {
-            name: torch.where(torch.isfinite(nxt[name]), nxt[name], cur[name])
+            name: torch.nan_to_num(nxt[name], nan=0.0, posinf=0.0, neginf=0.0)
             for name in nxt
         }
     return cur
@@ -466,6 +476,10 @@ def parse_args() -> argparse.Namespace:
         default="relative_to_specific",
     )
     parser.add_argument("--use-universal-R", action="store_true")
+    parser.add_argument("--train-mode", choices=("singlestep","rollout1","rollout_stab","rollout"), default="rollout",
+                        help="singlestep=learn 1-step tendency (no integration); rollout1=1 substep; rollout_stab=hyperdiff+polar; rollout=as-is")
+    parser.add_argument("--hyperdiffusion", action="store_true")
+    parser.add_argument("--polar-filter", action="store_true")
     parser.add_argument("--t-t-formulation", choices=("adiabatic_omega","legacy_paper"), default="adiabatic_omega")
     parser.add_argument("--w-diagnostic", choices=("plain","mass_consistent"), default="plain")
     parser.add_argument("--train-max-batches", type=int, default=None)
@@ -480,6 +494,18 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    # --- Train-mode presets (all cover 3600 s = 1 h, matching the 1-hour target) ---
+    mode = getattr(args, 'train_mode', 'rollout')
+    if mode == 'singlestep':
+        args.substeps_per_frame = 1; args.block_dt = 3600.0
+    elif mode == 'rollout1':
+        args.substeps_per_frame = 2; args.block_dt = 1800.0
+    elif mode == 'rollout_stab':
+        args.substeps_per_frame = 6; args.block_dt = 600.0
+        args.hyperdiffusion = True; args.polar_filter = True
+    print(f'[pde-matrix] train_mode={mode}: substeps={args.substeps_per_frame} '
+          f'block_dt={args.block_dt} hyperdiff={getattr(args,"hyperdiffusion",False)} '
+          f'polar={getattr(args,"polar_filter",False)}', flush=True)
     device = torch.device(args.device)
     config = load_yaml_config(args.config)
     out_dir = Path(args.output_dir)
