@@ -26,6 +26,7 @@ OUT="${OUT:-${REPO_ROOT}/logs/physics_stats_2000_${JOB}.json}"
 export OUT
 export N_PAIRS="${N_PAIRS:-96}"
 export YEAR="${YEAR:-2000}"
+export MAPS_OUT="${MAPS_OUT:-${REPO_ROOT}/logs/physics_maps_2000_${JOB}.npz}"
 
 echo "[physics-stats] year=${YEAR} n_pairs=${N_PAIRS} out=${OUT}"
 python "${REPO_ROOT}/docs/experiments/13_sign_convention_fix/physics_stats_2000.py"

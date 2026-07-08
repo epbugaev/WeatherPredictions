@@ -207,6 +207,9 @@ def run_domain(name: str, dom: dict, hours: list[int]) -> dict:
     adv_only = {"t": RatioAccum(), "z": RatioAccum()}
     interior_residual = {v: RatioAccum() for v in ("u", "v", "t", "q", "z")}
     cfl_band_max = dict.fromkeys(bands, 0.0)
+    # Широтные профили невязки (u,v — plain; t,z — mc) для визуализаций.
+    row_num = {v: torch.zeros(dom["H"], dtype=torch.float64) for v in ("u", "v", "t", "z")}
+    row_den = {v: torch.zeros(dom["H"], dtype=torch.float64) for v in ("u", "v", "t", "z")}
     omega_corr = {"plain": CorrAccum(), "mc": CorrAccum()}
     omega_mag = {"kin_plain": RatioAccum(), "kin_mc": RatioAccum(), "implied": RatioAccum()}
     hydro_corr = CorrAccum()
@@ -305,6 +308,9 @@ def run_domain(name: str, dom: dict, hours: list[int]) -> dict:
                 "t": rhs_mc["t_t"],
                 "z": rhs_mc["z_t"],
             }
+            for var, model in model_by_var.items():
+                row_num[var] += (obs[var] - model).double().abs().sum(dim=(0, 1, 3))
+                row_den[var] += obs[var].double().abs().sum(dim=(0, 1, 3))
             for band, rows in bands.items():
                 for var, model in model_by_var.items():
                     band_residual[band][var].add(
@@ -374,12 +380,94 @@ def run_domain(name: str, dom: dict, hours: list[int]) -> dict:
         "residual_rel_adv_only": {var: acc.ratio() for var, acc in adv_only.items()},
         "residual_rel_interior": {var: acc.ratio() for var, acc in interior_residual.items()},
         "band_note": "band residuals: u,v = fixed_plain; t,z = fixed_mc; interior = fixed_plain без 2 краевых строк/столбцов",
+        "residual_rel_by_lat": {
+            "lat_deg": (grid.latitudes * 180.0 / torch.pi).tolist(),
+            **{
+                var: (row_num[var] / (row_den[var] + 1e-30)).tolist()
+                for var in ("u", "v", "t", "z")
+            },
+        },
         "n_pairs": cond["n_pairs"],
     }
 
 
+MAP_LEVELS = {"z500": 7, "t850": 10, "p500": 7, "p925": 11, "p250": 4}
+MAP_HOURS = {"jan15": 348, "jul15": 4716}  # 2000-01-15 12z, 2000-07-15 12z
+
+
+def collect_maps(dom: dict, grid: Grid, hour: int) -> dict[str, np.ndarray]:
+    """2D-поля одного снимка для карт: ω, T-невязка, конденсация, CFL, фон."""
+    kernels = {
+        diag: PurePDEKernel(
+            grid,
+            stencil="fd4",
+            coriolis="spherical",
+            block_dt=DT_CFL,
+            boundary_x=dom["boundary_x"],
+            t_t_formulation="adiabatic_omega",
+            w_diagnostic=diag,
+        ).eval()
+        for diag in ("plain", "mass_consistent")
+    }
+    k = kernels["plain"]
+    consts = k.consts
+    pressure = grid.pressure
+    s0 = load_state(hour, dom, grid)
+    s1 = load_state(hour + 1, dom, grid)
+    u, v, t, q, z = s0["u"], s0["v"], s0["t"], s0["q"], s0["z"]
+    with torch.no_grad():
+        rhs_plain = kernels["plain"].rhs(u, v, t, q, z)
+        rhs_mc = kernels["mass_consistent"].rhs(u, v, t, q, z)
+        omega_plain = -100.0 * rhs_plain["w"]
+        omega_mc = -100.0 * rhs_mc["w"]
+        t_z = k.diff.d_z(t)
+        coef = consts.R_d * t / (consts.c_p * pressure) - t_z * (-0.01)
+        obs_t = (s1["t"] - s0["t"]) / DT_OBS
+        rhs_obs = obs_t - k._horiz_adv(t, u, v)
+        omega_implied = (
+            rhs_obs / torch.where(coef.abs() < 1e-9, torch.full_like(coef, 1e-9), coef)
+        ).clamp(-10.0, 10.0)
+        q_z = k.diff.d_z(q)
+        q_adv = k._horiz_adv(q, u, v) - rhs_plain["w"] * q_z
+        q_source = rhs_plain["q_t"] - q_adv
+        lvl = MAP_LEVELS
+        fields = {
+            "omega_plain500": omega_plain[0, lvl["p500"]],
+            "omega_mc500": omega_mc[0, lvl["p500"]],
+            "omega_implied500": omega_implied[0, lvl["p500"]],
+            "t_res_mc500": (obs_t - rhs_mc["t_t"])[0, lvl["p500"]],
+            "cond_source925": q_source[0, lvl["p925"]],
+            "cfl250": (u.abs() * DT_CFL / grid.pixel_x)[0, lvl["p250"]],
+            "z500": z[0, lvl["z500"]],
+            "t850": t[0, lvl["t850"]],
+        }
+    return {name: field.numpy().astype(np.float32) for name, field in fields.items()}
+
+
+def dump_maps(maps_out: str) -> None:
+    """Собирает карты по обоим доменам/снимкам + lsm/координаты в один NPZ."""
+    arrays: dict[str, np.ndarray] = {}
+    with h5netcdf.File(f"{ERA5_ROOT}constants/constants_1.40625deg.nc", "r") as f:
+        lsm_global = np.asarray(f.variables["lsm"], dtype=np.float32)
+    lon_global = np.arange(256, dtype=np.float32) * 1.40625
+    for name, dom in DOMAINS.items():
+        grid = Grid(GridConfig(H=dom["H"], W=dom["W"], lat_range_deg=dom["lat_range"]))
+        arrays[f"{name}_lat"] = (grid.latitudes * 180.0 / torch.pi).numpy().astype(np.float32)
+        arrays[f"{name}_lon"] = lon_global[dom["cols"]]
+        arrays[f"{name}_lsm"] = lsm_global[dom["rows"], dom["cols"]]
+        for label, hour in MAP_HOURS.items():
+            for field, arr in collect_maps(dom, grid, hour).items():
+                arrays[f"{name}_{label}_{field}"] = arr
+            print(f"[maps] {name}/{label} (hour={hour}) collected", flush=True)
+    np.savez_compressed(maps_out, **arrays)
+    print("WROTE", maps_out)
+
+
 def main() -> None:
     """Считает статистику по обоим доменам и пишет JSON в $OUT."""
+    maps_out = os.environ.get("MAPS_OUT", "")
+    if maps_out and not SYNTHETIC:
+        dump_maps(maps_out)
     hours = [int(h) for h in np.linspace(0, 8760 - 2, N_PAIRS)]
     results = {
         "meta": {
