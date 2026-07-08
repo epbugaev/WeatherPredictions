@@ -254,5 +254,110 @@ class PureKernelSignFixes(unittest.TestCase):
         self.assertLess(float(rhs["q_t"][:, 7].abs().max()), 1e-12)  # 500 гПа не насыщен
 
 
+class Exp14MomentumVariants(unittest.TestCase):
+    """Знаки, размерности и бит-стабильность членов эксперимента 14.
+
+    Все новые члены уравнений движения — opt-in параметры
+    :class:`PurePDEKernel`; дефолтный путь запинен голdenами
+    (``test_default_rhs_is_byte_stable``).
+    """
+
+    @staticmethod
+    def _kernel(**kwargs) -> PurePDEKernel:
+        grid = Grid(GridConfig(H=H, W=W, lat_range_deg=(16.17, 59.77)))
+        return PurePDEKernel(grid, boundary_x="replicate", coriolis="spherical", **kwargs)
+
+    @staticmethod
+    def _pinned_state() -> dict[str, torch.Tensor]:
+        gen = torch.Generator().manual_seed(14)
+        phi = PHI_STD.expand(1, P, H, W).clone()
+        return {
+            "u": 10 + 5 * torch.randn(1, P, H, W, generator=gen),
+            "v": 5 * torch.randn(1, P, H, W, generator=gen),
+            "t": 250 + 10 * torch.randn(1, P, H, W, generator=gen),
+            "q": (3e-3 * (1 + 0.3 * torch.randn(1, P, H, W, generator=gen))).clamp_min(1e-8),
+            "z": phi + 300 * torch.randn(1, P, H, W, generator=gen),
+        }
+
+    def test_default_rhs_is_byte_stable(self) -> None:
+        """Дефолтный rhs PurePDEKernel не меняется от opt-in параметров exp 14."""
+        kernel = self._kernel()
+        rhs = kernel.rhs(**self._pinned_state())
+        golden = {
+            "u_t": -0.009438502850116492,
+            "v_t": -1.4592431275868876,
+            "t_t": -0.014798275890939294,
+            "q_t": -1.227921801313231e-05,
+            "z_t": -5.975435962147742,
+            "w": 0.06491834346371661,
+        }
+        for key, value in golden.items():
+            self.assertAlmostEqual(float(rhs[key].double().sum()), value, delta=1e-9)
+        self.assertAlmostEqual(float(rhs["u_t"][0, 6, 3, 7]), 0.0004705985775217414, delta=1e-12)
+        self.assertAlmostEqual(float(rhs["v_t"][0, 6, 3, 7]), -0.0010004773503169417, delta=1e-12)
+
+    def test_d_y_orientation_on_ascending_rows(self) -> None:
+        """rows_south_to_north=True: d_y(f=j) = +1/Δy; легаси даёт −1/Δy."""
+        legacy = self._kernel()
+        s2n = self._kernel(rows_south_to_north=True)
+        field = torch.arange(H, dtype=torch.float32).reshape(1, 1, H, 1).expand(1, 1, H, W).clone()
+        dy = float(legacy.grid.pixel_y)
+        self.assertAlmostEqual(float(legacy.diff.d_y(field)[0, 0, 4, 8]) * dy, -1.0, delta=1e-4)
+        self.assertAlmostEqual(float(s2n.diff.d_y(field)[0, 0, 4, 8]) * dy, 1.0, delta=1e-4)
+
+    def test_metric_terms_sign_and_magnitude(self) -> None:
+        """Кривизна: u_t += u·v·tanφ/a, v_t −= u²·tanφ/a (Holton 2.19–2.20)."""
+        base = self._kernel()
+        metric = self._kernel(metric_terms=True)
+        u = torch.full((1, P, H, W), 20.0)
+        v = torch.full((1, P, H, W), 5.0)
+        zeros = torch.zeros_like(u)
+        u_t0, v_t0 = base.get_uv_dt(u, v, zeros, zeros, zeros)
+        u_t1, v_t1 = metric.get_uv_dt(u, v, zeros, zeros, zeros)
+        tan_over_a = float(torch.tan(base.grid.latitudes[4]) / base.grid.config.radius)
+        self.assertAlmostEqual(float((u_t1 - u_t0)[0, 6, 4, 8]), 100.0 * tan_over_a, delta=1e-9)
+        self.assertAlmostEqual(float((v_t1 - v_t0)[0, 6, 4, 8]), -400.0 * tan_over_a, delta=1e-9)
+
+    def test_rayleigh_friction_only_in_boundary_layer(self) -> None:
+        """Трение Held–Suarez: нуль выше σ_b=0.7, −k_f·u на 1000 гПа."""
+        base = self._kernel()
+        frict = self._kernel(rayleigh_friction=True)
+        u = torch.full((1, P, H, W), 20.0)
+        zeros = torch.zeros_like(u)
+        u_t0, _ = base.get_uv_dt(u, zeros, zeros, zeros, zeros)
+        u_t1, _ = frict.get_uv_dt(u, zeros, zeros, zeros, zeros)
+        diff = (u_t1 - u_t0)[0, :, 4, 8]
+        self.assertEqual(float(diff[:10].abs().max()), 0.0)  # до 700 гПа включительно
+        self.assertAlmostEqual(float(diff[12]), -20.0 / 86400.0, delta=1e-10)  # 1000 гПа
+
+    def test_lagrange3_vertical_derivative_is_exact_on_linear_profile(self) -> None:
+        """lagrange3: d_z(2p) = −2 на всех уровнях нерегулярной сетки."""
+        kernel = self._kernel(vertical_scheme="lagrange3")
+        p_hpa = kernel.grid.pressure.reshape(-1) / 100.0
+        profile = (2.0 * p_hpa).reshape(1, P, 1, 1).expand(1, P, H, W).clone()
+        d_z = kernel._d_z(profile)
+        self.assertTrue(torch.allclose(d_z, torch.full_like(d_z, -2.0), atol=1e-4))
+
+    def test_spherical_divergence_reduces_divergence_for_northward_wind(self) -> None:
+        """Континуити на сфере: однородный v>0 в СП даёт div = −v·tanφ/a < 0."""
+        base = self._kernel()
+        sph = self._kernel(spherical_divergence=True)
+        v = torch.full((1, P, H, W), 10.0)
+        zeros = torch.zeros_like(v)
+        w_diff = sph.get_w(zeros, v) - base.get_w(zeros, v)
+        # div уменьшился → w = ∫(−div) больше у поверхности (СП: tanφ > 0).
+        self.assertGreater(float(w_diff[0, 12, 4, 8]), 0.0)
+
+    def test_grid_explicit_latitudes(self) -> None:
+        """GridConfig.latitudes_deg: точные широты строк и pixel_y из шага."""
+        lats = tuple(16.171875 + 1.40625 * i for i in range(H))
+        grid = Grid(GridConfig(H=H, W=W, latitudes_deg=lats))
+        got = grid.latitudes * 180.0 / torch.pi
+        self.assertAlmostEqual(float(got[0]), 16.171875, delta=1e-4)
+        self.assertAlmostEqual(float(got[-1]), lats[-1], delta=1e-4)
+        expected_dy = 1.40625 / 180.0 * torch.pi * grid.config.radius
+        self.assertAlmostEqual(float(grid.pixel_y), expected_dy, delta=0.5)
+
+
 if __name__ == "__main__":
     unittest.main()
