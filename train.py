@@ -36,7 +36,6 @@ from utils.normalize import WeatherNormalize
 from utils.paths import checkpoint_base as default_checkpoint_base
 from utils.registry import get_dataset, get_model, get_strategy
 
-
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-(.*?))?\}")
 
 

@@ -1039,10 +1039,9 @@ class PurePDEKernel(nn.Module):
         elif self.time_scheme == "ssp_rk3":
             # SSP-RK3 (Shu–Osher, 3-stage strong-stability-preserving).
             # Родной интегратор для WENO-5; область устойчивости включает
-            # отрезок мнимой оси (в отличие от Forward Euler).
-            #   s1 = sⁿ + dt·L(sⁿ)
-            #   s2 = ¾·sⁿ + ¼·s1 + ¼·dt·L(s1)
-            #   sⁿ⁺¹ = ⅓·sⁿ + ⅔·s2 + ⅔·dt·L(s2)
+            # отрезок мнимой оси (в отличие от Forward Euler). Стадии схемы:
+            # s1 = sⁿ + dt·L(sⁿ);  s2 = ¾·sⁿ + ¼·s1 + ¼·dt·L(s1);
+            # sⁿ⁺¹ = ⅓·sⁿ + ⅔·s2 + ⅔·dt·L(s2).
             dt = self.block_dt
             keys = ("u", "v", "t", "q", "z")
             s0 = {"u": u, "v": v, "t": t, "q": q, "z": z}

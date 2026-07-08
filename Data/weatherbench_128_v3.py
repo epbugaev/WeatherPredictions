@@ -156,9 +156,7 @@ class WeatherBench128(Dataset):
         )
         max_start_idx = len(self.x_time_ilst) - 1 - self.max_sequence_offset
         self.length = max_start_idx // self.sample_stride + 1 if max_start_idx >= 0 else 0
-        self.sample_start_indices = [
-            i * self.sample_stride for i in range(self.length)
-        ]
+        self.sample_start_indices = [i * self.sample_stride for i in range(self.length)]
 
         if self.length <= 0:
             raise ValueError("Not enough time steps available for the requested sequence lengths")
@@ -352,10 +350,10 @@ class WeatherBench128(Dataset):
                 y_sequences.append(torch.stack(y_sequence, dim=0))  # [T, C, H, W]
 
         if self.muti_target_steps > 1:
-            # [muti_target_steps, T, C, H, W]
+            # shape muti_target_steps × T × C × H × W
             sample_y_all = torch.stack(y_sequences, dim=0)
         else:
-            # [T, C, H, W]
+            # shape T × C × H × W
             sample_y_all = y_sequences[0]
         return sample_x_sequence, sample_y_all
 
@@ -420,7 +418,9 @@ class WeatherBench128Memmap(WeatherBench128):
                 self.cut[1][1],
             ]
             if "cut" in meta and list(meta["cut"]) != expected_cut:
-                raise ValueError(f"Memmap cut {meta['cut']} does not match config cut {expected_cut}")
+                raise ValueError(
+                    f"Memmap cut {meta['cut']} does not match config cut {expected_cut}"
+                )
             expected_hw = (
                 self.cut[0][1] - self.cut[0][0],
                 self.cut[1][1] - self.cut[1][0],

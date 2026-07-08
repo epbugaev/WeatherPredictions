@@ -11,7 +11,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-
 DEFAULT_WEATHERBENCH_ROOT = "/home/fratnikov/weather_bench"
 
 
@@ -42,18 +41,6 @@ def weatherbench_mean_std_path(resolution: str = "1.40625deg") -> str:
     )
 
 
-def weatherbench_constants_path(resolution: str = "1.40625deg") -> str:
-    """Path to WeatherBench constants for one resolution."""
-    return _env(
-        "WEATHERBENCH_CONSTANTS_PATH",
-        str(
-            Path(weatherbench_input_root(resolution))
-            / "constants"
-            / f"constants_{resolution}.nc"
-        ),
-    )
-
-
 def checkpoint_base() -> str:
     """Base directory for checkpoints."""
     return _env("CHECKPOINT_BASE_OVERRIDE", _env("WEATHERPRED_CHECKPOINT_BASE", "./checkpoints"))
@@ -69,12 +56,4 @@ def usa_memmap_path() -> str:
     return _env(
         "WEATHERPRED_USA_MEMMAP",
         str(Path(memmap_dir()) / "predformer_usa_2000_2004.dat"),
-    )
-
-
-def globe_memmap_path() -> str:
-    """Default packed globe/coarse memmap path used by physics checkers."""
-    return _env(
-        "WEATHERPRED_GLOBE_MEMMAP",
-        str(Path(memmap_dir()) / "predformer_globe_2000_2018.dat"),
     )

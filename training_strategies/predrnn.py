@@ -16,6 +16,7 @@ from training_strategies._log_figures import log_prediction_maps
 from training_strategies.base import StepContext, StepStrategy
 from utils.registry import register_strategy
 
+
 def _predrnn_forward(
     model: nn.Module, x: torch.Tensor, y: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:

@@ -192,7 +192,6 @@ class WeatherBench128(Dataset):
 
     def get_mean_std(self):
         mean_std = np.load(self.mean_std_path)
-        # mean_std = np.ones([2, 110]) # Test
         self.the_mean = mean_std[0]
         self.the_std = mean_std[1]
         self.data_mean_tensor = torch.from_numpy(self.the_mean[self.variables_list]).float()
@@ -209,7 +208,6 @@ class WeatherBench128(Dataset):
     def __getitem__(self, index):
         file_path = self.x_file_list[index]
         sample_x = custom_np_load(file_path, self.input_folder)  # np.load(file_path)
-        # sample_x = np.zeros([110, 128, 256]) # Test
         sample_x = self.normalization(sample_x)
         sample_x = torch.from_numpy(sample_x).float()
 
@@ -222,14 +220,10 @@ class WeatherBench128(Dataset):
                 str(y_time.year) + f"-{self.idx_in_year(y_time):04d}" + ".npy",
             )
             sample_y = custom_np_load(y_file_path, self.input_folder)  # np.load(y_file_path)
-            # sample_y = np.zeros([110, 128, 256]) # Test
             sample_y = self.normalization(sample_y)
             sample_y = torch.from_numpy(sample_y).float()
             y_list.append(sample_y)
 
-        if self.muti_target_steps > 1:
-            sample_y_all = torch.stack(y_list, dim=0)
-        else:
-            sample_y_all = y_list[0]
+        sample_y_all = torch.stack(y_list, dim=0) if self.muti_target_steps > 1 else y_list[0]
 
         return sample_x, sample_y_all

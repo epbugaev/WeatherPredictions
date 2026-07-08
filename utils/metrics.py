@@ -301,15 +301,11 @@ class Metrics:
         return (weighted_acc_torch(pred - clim_time_mean_daily, gt - clim_time_mean_daily)).tolist()
 
     # Каналы для RQE в 69-канальном layout’е после variables_list-фильтра.
-    # Соответствие имя → индекс канала:
-    #   t2m   = 0
-    #   u10   = 1
-    #   v10   = 2
-    #   z500  = 4 + PRESSURE_LEVELS_HPA.index(500) = 4 + 7 = 11
-    #   q700  = пропущено (q не входит в 69 каналов — это derived от r)
-    #   t850  = 17 + PRESSURE_LEVELS_HPA.index(850) = 17 + 10 = 27
-    # Старая версия использовала [37, 24, 0, 11, 2, 66] из неизвестного layout’а;
-    # ниже — пересчитанные индексы для текущего 69-канального layout.
+    # Вывод индексов: t2m=0, u10=1, v10=2; z500 = 4 + позиция 500 гПа в
+    # PRESSURE_LEVELS_HPA = 4 + 7 = 11; t850 = 17 + позиция 850 гПа = 17 + 10 = 27.
+    # q700 исключён: в 69-канальном layout’е нет q (группа 30:43 — относительная
+    # влажность r, q из неё только derived). Индексы пересчитаны из старого
+    # набора [37, 24, 0, 11, 2, 66], снятого с прежнего (иного) layout’а.
     _RQE_CHANNELS_69 = (0, 1, 2, 11, 27)  # t2m, u10, v10, z500, t850
 
     def RQE(self, pred: torch.Tensor, gt: torch.Tensor) -> list[list[float]]:

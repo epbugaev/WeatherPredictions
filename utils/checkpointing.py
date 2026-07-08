@@ -1,6 +1,6 @@
-"""Checkpoint save/load + converter for legacy Lightning ``.ckpt`` files.
+"""Checkpoint loading + converter for legacy Lightning ``.ckpt`` files.
 
-The native format is a flat ``torch.save`` dict::
+The native format is a flat ``torch.save`` dict (written by ``trainer.py``)::
 
     {
         "model": state_dict,            # weights only, no ``model.`` prefix
@@ -46,59 +46,6 @@ class CheckpointMeta:
     global_step: int
     metric: float
     config: dict[str, Any]
-
-
-def save_checkpoint(
-    path: str,
-    model: nn.Module,
-    optimizer: torch.optim.Optimizer | None,
-    scheduler: torch.optim.lr_scheduler.LRScheduler | None,
-    scaler: torch.amp.GradScaler | None,
-    epoch: int,
-    global_step: int,
-    metric: float,
-    config: dict[str, Any],
-    *,
-    normalize: nn.Module | None = None,
-) -> None:
-    """Save a checkpoint in the native flat format.
-
-    Unwraps ``DistributedDataParallel`` automatically so the saved state-dict
-    has no ``module.`` prefix. The directory is created if it does not exist.
-    Caller is responsible for invoking this only from the main rank.
-
-    Args:
-        path: Output file path (``.pt`` recommended).
-        model: Model to save; may be wrapped in DDP.
-        optimizer: Optional optimiser state to include.
-        scheduler: Optional LR-scheduler state to include.
-        scaler: Optional AMP grad scaler state to include.
-        epoch: Epoch number that just finished.
-        global_step: Total number of optimiser steps taken so far.
-        metric: Value of the monitored metric (for filename templating).
-        config: Top-level YAML config dict for traceability.
-        normalize: Optional pre-model normalization module to include.
-    """
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-
-    raw_model = model.module if isinstance(model, nn.parallel.DistributedDataParallel) else model
-    payload: dict[str, Any] = {
-        "model": raw_model.state_dict(),
-        "epoch": epoch,
-        "global_step": global_step,
-        "metric": metric,
-        "config": config,
-    }
-    if normalize is not None:
-        payload["normalize"] = normalize.state_dict()
-    if optimizer is not None:
-        payload["optimizer"] = optimizer.state_dict()
-    if scheduler is not None:
-        payload["scheduler"] = scheduler.state_dict()
-    if scaler is not None:
-        payload["scaler"] = scaler.state_dict()
-
-    torch.save(payload, path)
 
 
 def load_checkpoint(

@@ -10,7 +10,9 @@ import os
 import sys
 from argparse import ArgumentParser
 
-PROJECT_ROOT = os.environ.get("REPO_ROOT", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+PROJECT_ROOT = os.environ.get(
+    "REPO_ROOT", os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
 sys.path.append(PROJECT_ROOT)
 
 from Data.weatherbench_128_v3 import WeatherBench128
