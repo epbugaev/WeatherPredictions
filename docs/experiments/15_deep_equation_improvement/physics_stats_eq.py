@@ -105,6 +105,7 @@ C15_KW = dict(CBEST_KW, latent_heating_coupling=True, omega_free=("t", "q"))
 # реальные широты строк данных (принято в exp 14).
 VARIANTS: dict[str, tuple[str, dict]] = {
     "base13": ("legacy", {}),
+    "C_best14": ("exact_nodx", CBEST_KW),  # exp-14 C_best: легаси-dx (×4 на USA)
     "C_best": ("exact", CBEST_KW),
     "W_plain": ("exact", dict(CBEST_KW, w_diagnostic="plain")),
     "W_obrien": ("exact", dict(CBEST_KW, w_diagnostic="obrien")),
@@ -284,12 +285,26 @@ def data_latitudes_deg(dom: dict) -> tuple[float, ...]:
 
 
 def build_kernel(dom: dict, grid_kind: str, kernel_kwargs: dict) -> PurePDEKernel:
-    """Ядро на legacy- либо exact-сетке; остальное — конфигурация exp 13."""
+    """Ядро на legacy- либо exact-сетке; остальное — конфигурация exp 13.
+
+    'exact' включает явный шаг долготы 1.40625° (lon_step_deg): легаси-формула
+    pixel_x = окружность/W на USA-кропе (64 точки на 90°) завышала dx в 4 раза,
+    занижая все ∂/∂x; на глобусе (256 точек на 360°) формулы совпадают.
+    """
     if grid_kind == "legacy":
         lat_range = (16.875, 63.28125) if dom["H"] == 32 else (-90.0, 90.0)
         grid = Grid(GridConfig(H=dom["H"], W=dom["W"], lat_range_deg=lat_range))
-    else:
+    elif grid_kind == "exact_nodx":
         grid = Grid(GridConfig(H=dom["H"], W=dom["W"], latitudes_deg=data_latitudes_deg(dom)))
+    else:
+        grid = Grid(
+            GridConfig(
+                H=dom["H"],
+                W=dom["W"],
+                latitudes_deg=data_latitudes_deg(dom),
+                lon_step_deg=1.40625,
+            )
+        )
     return PurePDEKernel(
         grid,
         stencil="fd4",
