@@ -16,6 +16,9 @@
      за 2 ч и трапецеидального RHS (½·(RHS(t)+RHS(t+1))).
   5. Проверку дискретной бездивергентности: RMS членов ∂u/∂x, ∂v/∂y,
      метрического −v·tanφ/a и их суммы.
+  6. Карты накопленной относительной невязки (Σ_t,P |err| / Σ_t,P |obs| в
+     каждой ячейке) для base и C_full по всем 5 переменным — NPZ в $MAPS_OUT
+     (плюс lat/lon/lsm для отрисовки).
 
 Запуск (кластер):  OUT=... YEAR=2000 DOMAIN=globe STRIDE=4 python physics_stats_uv.py
 Локальный smoke:   OUT=/tmp/x.json SYNTHETIC=1 MAX_TRIPLES=2 python physics_stats_uv.py
@@ -45,7 +48,9 @@ STRIDE = int(os.environ.get("STRIDE", "4"))
 MAX_TRIPLES = int(os.environ.get("MAX_TRIPLES", "0"))  # 0 = все доступные
 SYNTHETIC = os.environ.get("SYNTHETIC", "0") == "1"
 OUT = os.environ["OUT"]
+MAPS_OUT = os.environ.get("MAPS_OUT", "")
 DT_OBS = 3600.0  # шаг между снимками, с
+MAP_VARIANTS = ("base", "C_best")  # «до» и «после» для карт невязки
 
 # Домены exp 13: (H, W, legacy lat_range для Grid, срезы в глобальном поле,
 # boundary_x). Реальные широты строк читаются из nc (exact-сетка).
@@ -84,6 +89,7 @@ VARS = (
 S2N = {"rows_south_to_north": True}
 VARIANTS: dict[str, tuple[str, dict]] = {
     "base": ("legacy", {}),
+    "base_mc": ("legacy", {"w_diagnostic": "mass_consistent"}),
     "V1_dy": ("legacy", dict(S2N)),
     "V2_lat": ("exact", {}),
     "V12_geom": ("exact", dict(S2N)),
@@ -130,8 +136,20 @@ VARIANTS: dict[str, tuple[str, dict]] = {
             advection_form="flux",
         ),
     ),
+    # Кандидат финальной комбинации: без lagrange3 и flux (дымовой прогон
+    # показал, что они ухудшают), с массо-согласованной ω.
+    "C_best": (
+        "exact",
+        dict(
+            S2N,
+            metric_terms=True,
+            spherical_divergence=True,
+            rayleigh_friction=True,
+            w_diagnostic="mass_consistent",
+        ),
+    ),
 }
-FOCUS = ("base", "V12_geom", "C_full")  # варианты с полной диагностикой
+FOCUS = ("base", "V12_geom", "C_best")  # варианты с полной диагностикой
 ALL_KEYS = ("u", "v", "t", "q", "z")
 
 
@@ -390,6 +408,11 @@ def run() -> dict:
         for name in FOCUS
     }
     div_check = {t: RatioAccum() for t in ("u_x", "v_y", "metric", "sum_plain", "sum_spherical")}
+    map_num = {
+        name: {v: torch.zeros(dom["H"], dom["W"], dtype=torch.float64) for v in ALL_KEYS}
+        for name in MAP_VARIANTS
+    }
+    map_den = {v: torch.zeros(dom["H"], dom["W"], dtype=torch.float64) for v in ALL_KEYS}
 
     wall_start = time.time()
     for i, h in enumerate(triple_starts):
@@ -409,6 +432,10 @@ def run() -> dict:
                     interior[name][var].add(
                         err[..., 2:-2, 2:-2], obs_fwd[var][..., 2:-2, 2:-2]
                     )
+                    if name in MAP_VARIANTS:
+                        map_num[name][var] += err.double().abs().sum(dim=(0, 1))
+            for var in ALL_KEYS:
+                map_den[var] += obs_fwd[var].double().abs().sum(dim=(0, 1))
 
             for name in FOCUS:
                 k = kernels[name]
@@ -472,6 +499,24 @@ def run() -> dict:
 
     if reader is not None:
         reader.close()
+
+    if MAPS_OUT:
+        arrays: dict[str, np.ndarray] = {
+            "lat": lat_deg.numpy().astype(np.float32),
+            "lon": (np.arange(256, dtype=np.float32) * 1.40625)[dom["cols"]],
+        }
+        if SYNTHETIC:
+            arrays["lsm"] = np.zeros((dom["H"], dom["W"]), dtype=np.float32)
+        else:
+            with h5netcdf.File(f"{ERA5_ROOT}constants/constants_1.40625deg.nc", "r") as f:
+                lsm_global = np.asarray(f.variables["lsm"], dtype=np.float32)
+            arrays["lsm"] = lsm_global[dom["rows"], dom["cols"]]
+        for name in MAP_VARIANTS:
+            for var in ALL_KEYS:
+                ratio = map_num[name][var] / (map_den[var] + 1e-30)
+                arrays[f"resmap_{name}_{var}"] = ratio.numpy().astype(np.float32)
+        np.savez_compressed(MAPS_OUT, **arrays)
+        print("WROTE", MAPS_OUT)
 
     return {
         "meta": {

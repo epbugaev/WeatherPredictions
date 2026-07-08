@@ -30,6 +30,7 @@ export STRIDE="${STRIDE:-4}"
 export MAX_TRIPLES="${MAX_TRIPLES:-0}"
 OUT="${OUT:-${REPO_ROOT}/logs/physics_stats_uv_${DOMAIN}_${YEAR}_${JOB}.json}"
 export OUT
+export MAPS_OUT="${MAPS_OUT:-${REPO_ROOT}/logs/physics_maps_uv_${DOMAIN}_${YEAR}_${JOB}.npz}"
 
 echo "[physics-stats-uv] year=${YEAR} domain=${DOMAIN} stride=${STRIDE} max_triples=${MAX_TRIPLES} out=${OUT}"
 python "${REPO_ROOT}/docs/experiments/14_uv_residual_improvement/physics_stats_uv.py"
