@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Fixed
+
 - **Физика, знаковые конвенции вертикали (аудит 13, B1–B4)** в
   `utils/physics_hybrid.py` и `utils/physics.py`. `get_w` возвращает
   вверх-положительную w = −ω (интеграл `M_z` идёт от уровня к поверхности) —
@@ -23,8 +24,11 @@
     поэлементным `clamp(±20)`; `_scale_tensor` удалён.
   Ветки `legacy_paper`/`scale_diff`/`beta_plane` не тронуты (байт-в-байт).
   Детали и до/после: `docs/experiments/13_sign_convention_fix/`.
+- `sh_files/remote_submit.sh`: раскрытие пустого `SBATCH_ARGS[@]` падало под
+  macOS bash 3.2 c `set -u`.
 
 ### Added
+
 - `tests/test_physics_sign_conventions.py` — 15 регрессионных тестов знаковых
   конвенций (пины ζ=−p-конвенции + голдены нетронутых путей + фикс-тесты
   B1–B4).
@@ -32,3 +36,10 @@
   статус по членам); `docs/consistency.md` — таблица согласованности
   знаков/единиц по величинам и модулям. Обе обновляются в одном коммите с
   изменением уравнений.
+- Пост-фикс статистика физики на ERA5-2000 (USA-кроп + глобус, 96 пар,
+  cHARISMa jobs 4169155/4169160): скрипт
+  `docs/experiments/13_sign_convention_fix/physics_stats_2000.py`, лончер
+  `sh_files/physics_stats_2000_cpu.sh`, отчёт `PHYSICS_STATS_2000.md`.
+  Ключевое: с mass-consistent ω исправленное ядро даёт T/z-невязку 2.4–7.3
+  (до фикса 33–126), plain-ω вредна, «диабатика ×48» опровергнута
+  (0.66–0.85×), CFL-нарушение — только полярные ряды глобуса.
