@@ -12,7 +12,7 @@
 # Использование
 # -------------
 #   sbatch sh_files/<start_*.sh>                          # из job-скрипта
-#   bash   sh_files/launch_train.sh predformer_usa        # локально / интерактивно
+#   bash   sh_files/launch_train.sh simvp_usa             # локально / интерактивно
 #   bash   sh_files/launch_train.sh configs/simvp.yaml    # явный путь
 #
 # Параметры распределённого запуска
@@ -36,7 +36,7 @@ source "${_sc_here}/_shell_contract.sh" "${_sc_here}"
 CONFIG_ARG="${1:-}"
 if [[ -z "${CONFIG_ARG}" ]]; then
   echo "Usage: $0 <config_stem|config_path> [extra args for train.py]" >&2
-  echo "Пример: $0 predformer_usa" >&2
+  echo "Пример: $0 simvp_usa" >&2
   exit 1
 fi
 shift

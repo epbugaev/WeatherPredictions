@@ -4,10 +4,9 @@
 #
 # Использование
 # -------------
-#   bash sh_files/remote_submit.sh sh_files/train_PredFormer_USA.sh
 #   bash sh_files/remote_submit.sh sh_files/train_usa_2gpu.sh simvp_usa
 #   bash sh_files/remote_submit.sh -f sh_files/train_SimVp_USA.sh   # +tail логов
-#   bash sh_files/remote_submit.sh --allow-dirty sh_files/train_PredFormer_USA.sh
+#   bash sh_files/remote_submit.sh --allow-dirty sh_files/train_usa_2gpu.sh pi_iam4vp_usa
 #
 # Переменные окружения
 # --------------------

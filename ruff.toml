@@ -1,8 +1,5 @@
 target-version = "py310"
 line-length = 100
-# Inference_and_plots.ipynb is a research notebook full of long-lines /
-# trailing whitespace; it ships as documentation, not lint-clean source.
-extend-exclude = ["Research/", "Inference_and_plots.ipynb"]
 
 [lint]
 select = ["F", "E", "W", "B", "I", "UP", "SIM", "T100", "T201"]
@@ -16,15 +13,6 @@ select = ["F", "E", "W", "B", "I", "UP", "SIM", "T100", "T201"]
 # tools/ — diagnostic / verification scripts that intentionally print and
 # sometimes pre-date the lint pass (mutable defaults, long lines).
 "tools/*.py" = ["T201", "E501", "B006", "F841"]
-# Models/dev/ — archival snapshots + single-card sanity scripts; tolerate
-# diagnostic print() and a few bugbear/simplify quirks from the original
-# upstream sources so the one-shot lint pass doesn't fight the archive.
-# E402: sanity scripts inject REPO_ROOT into sys.path before importing local
-# packages (so they run both via `python -m Models.dev.xxx` и прямой
-# `python Models/dev/xxx.py`); тот же паттерн, что уже принят в tools/.
-"Models/dev/*.py" = [
-    "B007", "SIM117", "T201", "E501", "B006", "F841", "E741", "E731", "E402",
-]
 
 [format]
 quote-style = "double"

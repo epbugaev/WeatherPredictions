@@ -1,8 +1,7 @@
 """Единый параметризованный модуль физических интеграторов для WeatherPredictions.
 
-Объединяет FD-4 и WENO-5 семьи из 5 дублирующихся файлов
-(Models/WeatherGFT*.py, Models/PredFormerGFT*.py, Models/dev/WeatherGFT_3.py).
-В отличие от старых копий:
+Объединяет FD-4 и WENO-5 семейства, которые раньше жили в нескольких
+экспериментальных физических реализациях. В отличие от старых копий:
 
   * Сетка параметризуется через :class:`Grid` (любые H, W; не hardcoded
     module-globals; широты — через ``lat_range_deg``).
@@ -14,7 +13,7 @@
     выставляются явно для каждой оси.
   * Все физические константы — атрибуты класса, видны в ``repr``.
 
-**Изменения семантики по сравнению со старой физикой** (см. CHANGELOG):
+**Изменения семантики по сравнению со старой физикой**:
 
   * Coriolis: везде ``f = 2·Ω·sin(...)`` (в старой физике было ``f = Ω``
     без множителя 2 в constant- и beta_plane-вариантах).
@@ -29,8 +28,7 @@
     оси W — единственной физически цикличной); cat-pad-поведение, ранее
     ошибочно звавшееся ``'periodic'``, переименовано в ``'replicate'``.
 
-Старая физика байт-в-байт сохранена в :mod:`utils.old_physics` для регрессии
-чекпоинтов; новые модели должны использовать только этот модуль.
+Новые модели должны использовать только этот модуль.
 """
 
 from __future__ import annotations
@@ -332,7 +330,7 @@ class FiniteDifference(nn.Module):
 class WENO5(nn.Module):
     """5-й порядок Jiang-Shu (1996) WENO-производная вдоль W и H.
 
-    `d_z` использует FD-4 (как в оригинале PredFormerGFT.py:151-166).
+    `d_z` использует FD-4, как в legacy hybrid physics kernels.
 
     Параметры:
         grid: :class:`Grid`.
@@ -503,9 +501,9 @@ class PurePDEKernel(nn.Module):
         consts: :class:`PhysicsConstants`.
         use_universal_R: если True — использовать ``R=8.314 Дж/(моль·К)`` в
             гидростатике вместо ``R_d=287 Дж/(кг·К)``. Дефолт False → R_d.
-            Это opt-in для регрессии старой физики (Models/WeatherGFT.py и
-            Models/PredFormerGFT.py использовали универсальную, что было
-            численной ошибкой ~34× в z-tendency).
+            Это opt-in для регрессии старой физики, где использовалась
+            универсальная газовая постоянная; такое поведение даёт численную
+            ошибку ~34× в z-tendency.
         t_t_formulation: формула температурной тенденции.
 
             * ``'adiabatic_omega'`` (default, физически корректно):
@@ -848,9 +846,7 @@ class PurePDEKernel(nn.Module):
         """Saturation specific humidity через Magnus formula.
 
         Args:
-            p_pa: давление в Па (НЕ гПа). Согласовано с
-                :func:`tools.check_physics_common.magnus_qs` и
-                :attr:`Grid.pressure`.
+            p_pa: давление в Па (НЕ гПа), согласовано с :attr:`Grid.pressure`.
             T: температура в K.
 
         Returns:

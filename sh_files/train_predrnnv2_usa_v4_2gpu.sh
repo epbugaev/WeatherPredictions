@@ -10,8 +10,8 @@
 #SBATCH --output=logs/slurm-%x-%j.out
 #SBATCH --error=logs/slurm-%x-%j.err
 # v4 raw-memmap training (WeatherNormalize in trainer), USA 72h horizon, 2-GPU DDP.
-# Stages the packed memmap to node-local /tmp (same trick as
-# train_PredFormer_USA_2gpu_v4.sh) so dataloader reads are NVMe, not Lustre.
+# Stages the packed memmap to node-local /tmp so dataloader reads are NVMe,
+# not Lustre.
 set -euo pipefail
 export OMP_NUM_THREADS=4
 export PYTHONUNBUFFERED=1

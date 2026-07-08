@@ -22,11 +22,8 @@ class WeatherNormalize(nn.Module):
     ``(B, S, T, C, H, W)``.
 
     Note:
-        Не путать с ``tools.check_physics_common.load_snapshot(..., mean, std)`` —
-        у него обратная конвенция: одноимённые аргументы ``mean``/``std`` там
-        используются для **денормализации** ``raw * std + mean`` к физическим
-        единицам (для legacy v3 memmap). См. ``WeatherNormalize.denormalize``
-        для эквивалентной операции в этом классе.
+        ``WeatherNormalize.denormalize`` performs the inverse operation,
+        ``raw * std + mean``, when physical-unit tensors are needed.
 
     Args:
         mean: 1-D tensor of length ``C``.

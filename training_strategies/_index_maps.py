@@ -3,8 +3,8 @@
 Each map points from a human-readable variable name (e.g. ``z500``) to the
 position of that channel in the model's output tensor. Two layouts exist:
 
-  * ``BASEMODEL_INDEX_MAP`` — used by ``SimpleStep`` (PredFormer / SimVP on the
-    v4 raw-memmap pipeline).
+  * ``BASEMODEL_INDEX_MAP`` — used by ``SimpleStep`` (SimVP on the v4
+    raw-memmap pipeline).
   * ``MULTIOUT_INDEX_MAP`` — used by every strategy derived from
     LitModels/basemodel_no_history (mutiout, multiout_double, mutiout_imvp,
     mutiout_predrnn).
@@ -13,7 +13,7 @@ Both now cover **all 69 channels** so per-variable val RMSE is observable for
 every channel (Pareto monitoring), not just a 13-channel surrogate subset.
 
 Channel layout (identical for both maps — the v4 memmap is the 69-filtered
-ERA5 1.4° artefact; see ``tools.check_physics_common.CHANNEL_RANGES``)::
+ERA5 1.4° artefact)::
 
     0..3   surface : t2, u10, v10, tp
     4..16  z  @ 13 pressure levels (ascending hPa)

@@ -300,8 +300,7 @@ class Metrics:
         clim_time_mean_daily = clim_time_mean_daily.to(gt.device)
         return (weighted_acc_torch(pred - clim_time_mean_daily, gt - clim_time_mean_daily)).tolist()
 
-    # Каналы для RQE в 69-канальном layout’е после variables_list-фильтра
-    # (см. ``tools.check_physics_common.CHANNEL_RANGES``).
+    # Каналы для RQE в 69-канальном layout’е после variables_list-фильтра.
     # Соответствие имя → индекс канала:
     #   t2m   = 0
     #   u10   = 1
@@ -319,7 +318,7 @@ class Metrics:
         Принимает z-score `pred`/`gt`, денормализует через `data_mean/std`,
         затем считает `top_quantiles_error_torch` на каналах
         :attr:`_RQE_CHANNELS_69` (= t2m, u10, v10, z500, t850 в layout’е после
-        variables_list-фильтра 110→69; см. :data:`tools.check_physics_common.CHANNEL_RANGES`).
+        variables_list-фильтра 110→69).
 
         Args:
             pred: z-score предсказание ``(B, 69, H, W)``.
