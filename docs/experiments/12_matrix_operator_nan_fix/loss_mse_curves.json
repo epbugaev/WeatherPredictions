@@ -1,0 +1,28 @@
+{
+  "run": "3-epoch CPU verification (job 4160712)",
+  "train_loss": {
+    "singlestep (вар.1)": [
+      1068090.0,
+      14084200.0,
+      83394.3
+    ],
+    "rollout1 (вар.2)": [
+      NaN,
+      NaN,
+      NaN
+    ],
+    "rollout_stab (вар.3)": [
+      NaN,
+      NaN,
+      NaN
+    ]
+  },
+  "singlestep_vs_pure_pct": [
+    4.38,
+    9.571,
+    14.181
+  ],
+  "val_pure_wrmse": 14486700000.0,
+  "val_constant_wrmse": 39.7172,
+  "note": "вар.2/3 train_loss=nan (rollout взрыв); single-step обучается"
+}

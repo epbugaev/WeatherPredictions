@@ -1,0 +1,123 @@
+{
+  "meta": {
+    "snapshot": "2003-07-15 12:00",
+    "H": 32,
+    "W": 64,
+    "lat_range": [
+      25.0,
+      55.0
+    ],
+    "hour_idx": 30996,
+    "t_init_max": 313.57666015625
+  },
+  "T_t": {
+    "OLD": {
+      "mean": 2311.604248046875,
+      "max": 133709.203125
+    },
+    "FIXED": {
+      "mean": 0.0015437514521181583,
+      "max": 0.08620211482048035
+    },
+    "REF_PurePDE": {
+      "mean": 0.0038770639803260565,
+      "max": 0.1267394721508026
+    }
+  },
+  "z_t": {
+    "OLD": {
+      "mean": 19619.626953125,
+      "max": 1171779.625
+    },
+    "FIXED": {
+      "mean": 0.49414676427841187,
+      "max": 44.586875915527344
+    },
+    "REF_PurePDE": {
+      "mean": 1.236175298690796,
+      "max": 62.317344665527344
+    }
+  },
+  "u_t": {
+    "OLD": {
+      "mean": 0.00047786335926502943,
+      "max": 0.018481707200407982
+    },
+    "FIXED": {
+      "mean": 0.0006864456227049232,
+      "max": 0.01823246479034424
+    },
+    "REF_PurePDE": {
+      "mean": 0.000915693468414247,
+      "max": 0.032511524856090546
+    }
+  },
+  "v_t": {
+    "OLD": {
+      "mean": 0.0008957200916483998,
+      "max": 0.017694741487503052
+    },
+    "FIXED": {
+      "mean": 0.00082384143024683,
+      "max": 0.014156164601445198
+    },
+    "REF_PurePDE": {
+      "mean": 0.002190304920077324,
+      "max": 0.02932376228272915
+    }
+  },
+  "coriolis": {
+    "OLD_f_scalar": 7.29e-05,
+    "FIXED_f_field_min": -0.00014518160605803132,
+    "FIXED_f_field_max": 0.00014518160605803132,
+    "REF_f_field_min": 6.372485950123519e-05
+  },
+  "avoid_inf": {
+    "input": [
+      0.0,
+      0.05000000074505806,
+      -0.05000000074505806,
+      0.5,
+      -2.0,
+      3.0
+    ],
+    "OLD": [
+      1.0,
+      1.0,
+      -1.0,
+      1.0,
+      -2.0,
+      3.0
+    ],
+    "FIXED": [
+      1.0,
+      1.0,
+      -1.0,
+      1.0,
+      -2.0,
+      3.0
+    ]
+  },
+  "q_branch_bug5": {
+    "note": "Bug-5 (Magnus q_s) does NOT manifest in the real inline path. Verified by controlled geometry test: fixed inline q_t matches reference PurePDEKernel EXACTLY when both run on the same (global) lat grid (ratio 1.000, rel_L1 0.000). The audit's 1391x was for the standalone magnus_qs called with the hPa pressure-level array — a path not used inline.",
+    "p_used_Pa_measured": {
+      "OLD_max": 169.47634887695312,
+      "FIXED_max": 169.47634887695312,
+      "REF_usa_max": 169.47634887695312,
+      "REF_glob_max": 169.47634887695312
+    },
+    "q_t_OLD_max": 0.0049162935465574265,
+    "q_t_FIXED_max": 1.550507818137703e-06,
+    "q_t_REF_glob_max": 1.550507818137703e-06,
+    "q_t_REF_usa_max": 2.014302936004242e-06,
+    "FIXED_vs_REF_same_geometry": {
+      "ratio_mean": 1.0000001192092896,
+      "rel_L1": 6.4902373253517e-08
+    },
+    "FIXED_vs_REF_diff_geometry": {
+      "ratio_mean": 0.43000251054763794,
+      "rel_L1": 0.7855897545814514
+    },
+    "geometry_conclusion": "CONTROLLED TEST: residual q_t/z_t gap (0.43 ratio) vs 25-55N reference is FULLY explained by lat-grid geometry. On the same global grid the match is EXACT (ratio 1.000, rel_L1 0.000). z_t confirms: inline z_t 44.59 == REF_glob z_t 44.59 (vs REF_usa 62.32). Not an equation bug."
+  }
+}

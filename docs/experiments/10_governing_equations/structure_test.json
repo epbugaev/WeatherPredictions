@@ -1,0 +1,18 @@
+{
+  "z_redundancy": {
+    "corr_obs_vs_hydrostatic": -0.3523987260561417,
+    "ratio_absmean_hyd_over_obs": 0.9819998192230369,
+    "note": "if corr high, z is diagnosable from T -> redundant as prognostic"
+  },
+  "time_scale": {
+    "1h": {
+      "t_corr2": 3.493017114430999e-06,
+      "v_corr2": 0.002702011922812274
+    },
+    "6h": {
+      "t_corr2": 2.2237403922370866e-06,
+      "v_corr2": 0.0007702275524643932
+    },
+    "note": "corr^2 = explained-variance ceiling of physics RHS at each step"
+  }
+}

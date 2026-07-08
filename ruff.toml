@@ -1,5 +1,8 @@
 target-version = "py310"
 line-length = 100
+# docs/experiments/ — архив воспроизводимых скриптов и отчётов с ветки
+# fix_inline_equations; исторические артефакты, не production-код.
+extend-exclude = ["docs"]
 
 [lint]
 select = ["F", "E", "W", "B", "I", "UP", "SIM", "T100", "T201"]
@@ -10,6 +13,8 @@ select = ["F", "E", "W", "B", "I", "UP", "SIM", "T100", "T201"]
 "train.py" = ["T201"]
 "train/_common.py" = ["T201"]
 "utils/checkpointing.py" = ["T201"]
+# Standalone train entry scripts bootstrap sys.path before local imports.
+"train/train_*.py" = ["E402"]
 # tools/ — diagnostic / verification scripts that intentionally print and
 # sometimes pre-date the lint pass (mutable defaults, long lines).
 "tools/*.py" = ["T201", "E501", "B006", "F841"]
