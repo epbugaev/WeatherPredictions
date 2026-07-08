@@ -81,12 +81,31 @@ VARS = (
     ("v_component_of_wind", "v"),
 )
 
-# Матрица вариантов: имя → (сетка, kwargs ядра). Сетка: 'legacy' — как в
-# exp 13 (linspace lat_range), 'exact' — реальные широты строк данных.
-# Изолированные улучшения V3–V8 меряются ПОВЕРХ V12_geom (корректная
+# Матрица вариантов: имя → (сетка, kwargs ядра). Сетки: 'legacy' — как в
+# exp 13 (linspace lat_range, pixel_x = окружность/W); 'exact' — реальные
+# широты строк данных (но легаси-pixel_x); 'exact_dx' — плюс корректный шаг
+# долготы dx = R·cosφ·Δλ (легаси-формула на USA-кропе завышала dx в 4 раза).
+# Изолированные улучшения V3–V9 меряются ПОВЕРХ V12_geom (корректная
 # ориентация d_y + точные широты): без правильного знака ∂/∂y их эффект
-# тонет в знаковой ошибке PGF.
+# тонет в знаковой ошибке PGF. Комбинации: C_best — полный набор принятых
+# кандидатов; C_drop_* — выкинуть по одному члену из C_best (абляция
+# на уровне комбинации, решает конфликты измерением).
 S2N = {"rows_south_to_north": True}
+BEST_KW = dict(
+    S2N,
+    metric_terms=True,
+    spherical_divergence=True,
+    vertical_scheme="lagrange3",
+    rayleigh_friction=True,
+    w_diagnostic="mass_consistent",
+)
+
+
+def _without(kw: dict, *keys: str) -> dict:
+    """Копия kwargs без перечисленных ключей (drop-one абляции комбинации)."""
+    return {k: v for k, v in kw.items() if k not in keys}
+
+
 VARIANTS: dict[str, tuple[str, dict]] = {
     "base": ("legacy", {}),
     "base_mc": ("legacy", {"w_diagnostic": "mass_consistent"}),
@@ -99,55 +118,16 @@ VARIANTS: dict[str, tuple[str, dict]] = {
     "V6_flux": ("exact", dict(S2N, advection_form="flux")),
     "V7_mc": ("exact", dict(S2N, w_diagnostic="mass_consistent")),
     "V8_sphdiv": ("exact", dict(S2N, spherical_divergence=True)),
-    "C_geo": ("exact", dict(S2N, metric_terms=True, spherical_divergence=True)),
-    "C_geo_dz": (
-        "exact",
-        dict(S2N, metric_terms=True, spherical_divergence=True, vertical_scheme="lagrange3"),
-    ),
-    "C_full": (
-        "exact",
-        dict(
-            S2N,
-            metric_terms=True,
-            spherical_divergence=True,
-            vertical_scheme="lagrange3",
-            rayleigh_friction=True,
-        ),
-    ),
-    "C_full_mc": (
-        "exact",
-        dict(
-            S2N,
-            metric_terms=True,
-            spherical_divergence=True,
-            vertical_scheme="lagrange3",
-            rayleigh_friction=True,
-            w_diagnostic="mass_consistent",
-        ),
-    ),
-    "C_full_flux": (
-        "exact",
-        dict(
-            S2N,
-            metric_terms=True,
-            spherical_divergence=True,
-            vertical_scheme="lagrange3",
-            rayleigh_friction=True,
-            advection_form="flux",
-        ),
-    ),
-    # Кандидат финальной комбинации: без lagrange3 и flux (дымовой прогон
-    # показал, что они ухудшают), с массо-согласованной ω.
-    "C_best": (
-        "exact",
-        dict(
-            S2N,
-            metric_terms=True,
-            spherical_divergence=True,
-            rayleigh_friction=True,
-            w_diagnostic="mass_consistent",
-        ),
-    ),
+    "V9_dx": ("exact_dx", dict(S2N)),
+    "C_geo": ("exact_dx", dict(S2N, metric_terms=True, spherical_divergence=True)),
+    "C_best": ("exact_dx", dict(BEST_KW)),
+    "C_drop_dx": ("exact", dict(BEST_KW)),
+    "C_drop_metric": ("exact_dx", _without(BEST_KW, "metric_terms")),
+    "C_drop_sphdiv": ("exact_dx", _without(BEST_KW, "spherical_divergence")),
+    "C_drop_dz": ("exact_dx", _without(BEST_KW, "vertical_scheme")),
+    "C_drop_frict": ("exact_dx", _without(BEST_KW, "rayleigh_friction")),
+    "C_drop_mc": ("exact_dx", _without(BEST_KW, "w_diagnostic")),
+    "C_full_flux": ("exact_dx", dict(BEST_KW, advection_form="flux")),
 }
 FOCUS = ("base", "V12_geom", "C_best")  # варианты с полной диагностикой
 ALL_KEYS = ("u", "v", "t", "q", "z")
@@ -284,11 +264,20 @@ def data_latitudes_deg(dom: dict) -> tuple[float, ...]:
 
 
 def build_kernel(dom: dict, grid_kind: str, kernel_kwargs: dict) -> PurePDEKernel:
-    """Ядро на legacy- либо exact-сетке; остальное — конфигурация exp 13."""
+    """Ядро на legacy/exact/exact_dx-сетке; остальное — конфигурация exp 13."""
     if grid_kind == "legacy":
         grid = Grid(GridConfig(H=dom["H"], W=dom["W"], lat_range_deg=dom["lat_range"]))
-    else:
+    elif grid_kind == "exact":
         grid = Grid(GridConfig(H=dom["H"], W=dom["W"], latitudes_deg=data_latitudes_deg(dom)))
+    else:  # exact_dx: плюс корректный шаг долготы (существенно для кропов)
+        grid = Grid(
+            GridConfig(
+                H=dom["H"],
+                W=dom["W"],
+                latitudes_deg=data_latitudes_deg(dom),
+                lon_step_deg=1.40625,
+            )
+        )
     return PurePDEKernel(
         grid,
         stencil="fd4",
@@ -478,8 +467,8 @@ def run() -> dict:
             for var in ("u", "v"):
                 obs_level[var].add(obs_fwd[var], obs_fwd[var])
 
-            # Бездивергентность (на exact-сетке с корректным d_y)
-            kg = kernels["V12_geom"]
+            # Бездивергентность (exact_dx-сетка, корректные d_y и dx)
+            kg = kernels["C_geo"]
             u_x = kg.diff.d_x(s0["u"])
             v_y = kg.diff.d_y(s0["v"])
             metric = -s0["v"] * kernels["C_geo"].tan_phi_over_a

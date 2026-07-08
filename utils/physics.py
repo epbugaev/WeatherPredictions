@@ -79,6 +79,12 @@ class GridConfig:
             ``linspace(-90, 90, H+2)[1:-1]``, дающим шаг 1.3953°; см.
             docs/experiments/14_uv_residual_improvement). Дефолт ``None`` —
             прежнее поведение бит-в-бит.
+        lon_step_deg: явный шаг по долготе в градусах. Легаси-формула
+            ``pixel_x = 2πR·cosφ/W`` предполагает, что W точек покрывают
+            полный круг долготы; на региональном кропе (USA: W=64 при 90°
+            долготы) она завышает шаг в 360/(W·Δλ) раз — ×4 для USA, что
+            занижало ∂Φ/∂x и диагностическую ω в 4 раза (баг найден в
+            эксперименте 14). Дефолт ``None`` — легаси-формула бит-в-бит.
     """
 
     H: int
@@ -102,6 +108,7 @@ class GridConfig:
     radius: float = 6371.0 * 1000.0
     lat_range_deg: tuple[float, float] = (-90.0, 90.0)
     latitudes_deg: tuple[float, ...] | None = None
+    lon_step_deg: float | None = None
 
 
 class Grid(nn.Module):
@@ -155,8 +162,14 @@ class Grid(nn.Module):
             pixel_y_value = lat_span_rad * config.radius / (H + 1)
 
         latitudes = latitudes_deg / 180.0 * torch.pi  # (H,)
-        c_lats = 2 * torch.pi * config.radius * torch.cos(latitudes)
-        pixel_x = (c_lats / W).reshape(1, 1, H, 1)
+        if config.lon_step_deg is not None:
+            # Явный шаг по долготе: dx = R·cosφ·Δλ (корректно и для кропов).
+            dlon_rad = config.lon_step_deg / 180.0 * torch.pi
+            pixel_x = (config.radius * torch.cos(latitudes) * dlon_rad).reshape(1, 1, H, 1)
+        else:
+            # Легаси: W точек на полный круг долготы (верно только для глобуса).
+            c_lats = 2 * torch.pi * config.radius * torch.cos(latitudes)
+            pixel_x = (c_lats / W).reshape(1, 1, H, 1)
         pixel_y = torch.tensor([pixel_y_value])
 
         pressure_hpa = torch.tensor(config.pressure_levels, dtype=torch.float32)
