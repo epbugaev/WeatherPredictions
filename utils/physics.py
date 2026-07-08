@@ -23,7 +23,14 @@
   * Температурная tendency: дефолт ``adiabatic_omega``
     ``dT/dt = R_d·T·ω/(c_p·p)``, не сломанная ``(Q − z_z·w)/c_p`` с
     ``Q = −L·z_z·w``. Старая формула — ``t_t_formulation='legacy_paper'``.
-  * Magnus saturation работает в SI: ``e_s`` в Па, ``p`` в Па.
+  * Magnus saturation работает в SI: ``e_s`` в Па, ``p`` в Па; экспонента
+    ограничивается поэлементным ``clamp(±20)``, а не batch-global remap.
+  * Знаковая конвенция вертикали (аудит 13, 2026-07-08): ``d_z`` возвращает
+    −∂/∂p, ``get_w`` — вверх-положительную w = −ω [гПа/с]; адиабата берёт
+    ``ω = −100·w``, гидростатика интегрирует ``+R·T_t/p`` от уровня к
+    поверхности, конденсация триггерится на подъёме (ω < 0) с реальным
+    давлением уровней. См. ``docs/equations.md`` и
+    ``docs/experiments/13_sign_convention_fix/``.
   * Boundary ``'periodic'`` теперь настоящее периодическое замыкание (на
     оси W — единственной физически цикличной); cat-pad-поведение, ранее
     ошибочно звавшееся ``'periodic'``, переименовано в ``'replicate'``.
@@ -644,15 +651,18 @@ class PurePDEKernel(nn.Module):
         for j in range(P):
             d = torch.zeros(1, P, 1, 1)
             d[0, j, 0, 0] = 1.0
+            # Зеркалит фактическую цепочку rhs: ω = −100·w и z_zt = +R/p·t_t
+            # (знак-фиксы аудита 13). Оба флипа гасятся — оператор A численно
+            # совпадает с прежним.
             w = integral_z(-d, self.grid.M_z)
             t_t = (
                 self.consts.R_d
                 * t_ref
-                * (100.0 * w)
+                * (-100.0 * w)
                 / (self.consts.c_p * p_col.reshape(1, P, 1, 1))
             )
             p_hpa = p_col.reshape(1, P, 1, 1) / 100.0
-            z_t = integral_z(-self.R_eff / p_hpa * t_t, self.grid.M_z)
+            z_t = integral_z(self.R_eff / p_hpa * t_t, self.grid.M_z)
             a_mat[:, j] = -z_t.reshape(P)
         # A (cumsum-integral_z) НЕ самосопряжён → дефектен (нет
         # well-conditioned модального базиса; pinv даёт V·Vinv≠I). Стандартный
@@ -748,6 +758,11 @@ class PurePDEKernel(nn.Module):
     def get_w(self, u: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         """Диагностическая вертикальная скорость w из континуити.
 
+        ВАЖНО (конвенция, аудит 13): ``integral_z``/``M_z`` суммируют от
+        уровня К ПОВЕРХНОСТИ, поэтому возвращается w = −∫_p^ps div dp' =
+        −ω(p) [гПа/с] — вверх-положительная величина, а не ω. Потребители,
+        которым нужна ω (адиабата, конденсация), берут ω = −100·w [Па/с].
+
         ``mass_consistent`` (E5): вычесть p-взвешенное колоночное среднее
         дивергенции, чтобы ∫(∂ₓu+∂_yv) dp ≈ 0 на каждый столб — нет
         накопления дрейфа массы по вертикали.
@@ -790,8 +805,9 @@ class PurePDEKernel(nn.Module):
 
         * ``adiabatic_omega`` (default, физически корректно):
           ``dT/dt|_adia = R_d·T·ω/(c_p·p)``, где ``ω`` — pressure velocity
-          в Pa/s. В этой реализации `w` приходит из `get_w()` в hPa/s, поэтому
-          ``ω = 100·w``. Минус знаки advection как обычно.
+          в Pa/s. `get_w()` возвращает вверх-положительную ``w = −ω`` в hPa/s
+          (интеграл идёт от уровня к поверхности), поэтому ``ω = −100·w``
+          (знак-фикс B1, аудит 13). Минус знаки advection как обычно.
         * ``legacy_paper`` (eq. (17)-(18) WeatherGFT NeurIPS 2024):
           ``(Q − z_z·w)/c_p`` с ``Q = −L·z_z·w``. Документально точная,
           но даёт overflow в первый substep на ERA5.
@@ -799,7 +815,7 @@ class PurePDEKernel(nn.Module):
         t_z = self.diff.d_z(t)
         adv = self._horiz_adv(t, u, v) - w * t_z
         if self.t_t_formulation == "adiabatic_omega":
-            omega_pa = 100.0 * w  # w в hPa/s → ω в Pa/s
+            omega_pa = -100.0 * w  # w = −ω в hPa/s → ω в Pa/s
             t_t_adia = self.consts.R_d * t * omega_pa / (self.consts.c_p * self.grid.pressure)
             return t_t_adia + adv
         # legacy_paper:
@@ -809,14 +825,17 @@ class PurePDEKernel(nn.Module):
     def get_z_t(self, t_t: torch.Tensor) -> torch.Tensor:
         """Tendency геопотенциала через гидростатику.
 
-        ∂z/∂t = -∫ (R_eff / p) · ∂T/∂t dp. Переменная интегрирования p и
-        делитель p должны быть в ОДНИХ единицах. `integral_z` использует
-        `M_z`/`pixel_z` в **hPa**, поэтому делитель тоже берётся в hPa
-        (`grid.pressure` зарегистрирован в Pa → /100). Без этого z_t был
-        бы ×100 меньше корректного (геопотенциал «замерзал»).
+        Φ_t(p) = Φ_t(p_s) + ∫_p^{p_s} (R_eff/p')·T_t dp' — `integral_z`/`M_z`
+        суммируют именно от уровня к поверхности, подынтегральное
+        ПОЛОЖИТЕЛЬНОЕ (прогрев столба поднимает геопотенциал над
+        поверхностью; прежний минус — знак-баг B2 аудита 13, давал −Φ_t).
+        Переменная интегрирования p и делитель p должны быть в ОДНИХ
+        единицах: `M_z`/`pixel_z` в **hPa**, поэтому делитель тоже в hPa
+        (`grid.pressure` зарегистрирован в Pa → /100); иначе z_t был бы
+        ×100 меньше корректного.
         """
         pressure_hpa = self.grid.pressure / 100.0
-        z_zt = -self.R_eff / pressure_hpa * t_t
+        z_zt = self.R_eff / pressure_hpa * t_t
         return integral_z(z_zt, self.grid.M_z)
 
     @staticmethod
@@ -835,13 +854,6 @@ class PurePDEKernel(nn.Module):
         sign = torch.where(sign == 0.0, torch.ones_like(sign), sign)
         return torch.where(torch.abs(tensor) < threshold, sign * threshold, tensor)
 
-    @staticmethod
-    def _scale_tensor(tensor: torch.Tensor, a: float, b: float) -> torch.Tensor:
-        mn = tensor.min().detach()
-        mx = tensor.max().detach()
-        scaled = (tensor - mn) / (mx - mn + 1e-12)
-        return scaled * (b - a) + a
-
     def _get_qs(self, p_pa: torch.Tensor, T: torch.Tensor) -> torch.Tensor:
         """Saturation specific humidity через Magnus formula.
 
@@ -853,13 +865,17 @@ class PurePDEKernel(nn.Module):
             q_s: безразмерное (кг/кг), та же форма что и p_pa·T.
 
         Note:
-            `_scale_tensor(arg, -3.47, 3.01)` — clipping из оригинала
-            (WeatherGFT.py:336), сохранён для устойчивости при экстремальных T.
+            Экспонента ограничивается ПОЭЛЕМЕНТНЫМ ``clamp(±20)`` — числовой
+            guard, batch-независимый (как в
+            ``physics_hybrid.saturation_specific_humidity``). Прежний
+            batch-global remap ``_scale_tensor(arg, -3.47, 3.01)`` из
+            оригинала WeatherGFT связывал сэмплы батча и искажал q_s даже
+            для типичных T (баг №4 exp 01, здесь оставался неисправленным).
             `e_s` получается в Па (6.112 hPa × 100 = 611.2 Pa).
         """
         t_c = T - 273.15
         arg = 17.67 * t_c / self._avoid_inf(t_c + 243.5)
-        e_s = 6.112 * torch.exp(self._scale_tensor(arg, -3.47, 3.01)) * 100  # Па
+        e_s = 6.112 * torch.exp(torch.clamp(arg, min=-20.0, max=20.0)) * 100  # Па
         return 0.622 * e_s / self._avoid_inf(p_pa - 0.378 * e_s)
 
     def get_q_dt(
@@ -869,20 +885,29 @@ class PurePDEKernel(nn.Module):
         t: torch.Tensor,
         w: torch.Tensor,
         q: torch.Tensor,
-        z_x: torch.Tensor,
-        z_y: torch.Tensor,
-        z_z: torch.Tensor,
-        z_t: torch.Tensor,
     ) -> torch.Tensor:
-        """Tendency влажности (Magnus + упрощённый Kuo)."""
+        """Tendency влажности: адвекция + крупномасштабная конденсация.
+
+        Конденсация — схема насыщенной псевдоадиабаты (Haltiner & Williams):
+        ``dq/dt|cond = δ·F(T, q_s)·ω/p``, δ=1 при подъёме (ω<0) и q >= q_s.
+        Давление — реальные уровни (:attr:`Grid.pressure`, Па), а не
+        реконструкция ``p = ρRT`` из ``z_z`` (та давала p < 0: конвенция
+        d_z = −∂/∂p, шкала гПа и универсальная R — баг B3 аудита 13).
+        ω = −100·w, т.к. ``get_w`` возвращает вверх-положительную w = −ω.
+
+        Args:
+            u, v: горизонтальный ветер ``(B, P, H, W)``, м/с.
+            t: температура, K. w: скорость из ``get_w``, гПа/с.
+            q: удельная влажность, кг/кг.
+
+        Returns:
+            ``torch.Tensor`` ``(B, P, H, W)`` — dq/dt, (кг/кг)/с.
+        """
         q_z = self.diff.d_z(q)
 
-        rho = -1.0 / self._avoid_inf(z_z)
-        p = rho * self.consts.R * t
-        q_s = torch.maximum(self._get_qs(p, t), torch.full_like(q, 1e-6))
-
-        p_t = z_t + u * z_x + v * z_y + w * z_z
-        delta = ((p_t < 0) & (q >= q_s)).float()
+        q_s = torch.maximum(self._get_qs(self.grid.pressure, t), torch.full_like(q, 1e-6))
+        omega_pa = -100.0 * w
+        delta = ((omega_pa < 0) & (q >= q_s)).to(q.dtype)
         R_moist = (1 + 0.608 * q) * self.consts.R_d
         F_factor = (
             (self.consts.L * R_moist - self.consts.c_p * self.consts.R_v * t)
@@ -890,11 +915,7 @@ class PurePDEKernel(nn.Module):
             * q_s
             * t
         )
-        return (
-            self._horiz_adv(q, u, v)
-            - w * q_z
-            + p_t * delta * F_factor / self._avoid_inf(self.consts.R * t)
-        )
+        return self._horiz_adv(q, u, v) - w * q_z + delta * F_factor * omega_pa / self.grid.pressure
 
     # ----- Time stepping -----
 
@@ -960,7 +981,7 @@ class PurePDEKernel(nn.Module):
         u_t, v_t = self.get_uv_dt(u, v, w, z_x, z_y)
         t_t = self.get_t_t(u, v, w, t, z_z)
         z_t = self.get_z_t(t_t)
-        q_t = self.get_q_dt(u, v, t, w, q, z_x, z_y, z_z, z_t)
+        q_t = self.get_q_dt(u, v, t, w, q)
         return {"u_t": u_t, "v_t": v_t, "t_t": t_t, "q_t": q_t, "z_t": z_t, "w": w}
 
     def step(

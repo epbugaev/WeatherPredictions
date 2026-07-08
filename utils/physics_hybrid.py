@@ -183,7 +183,11 @@ def d_y_weno(input_tensor, boundary="reflect", dy=None):
 
 
 def d_z(input_tensor):
-    # Вертикальная производная по давлению; края реплицируются через concat
+    # Вертикальная производная; края реплицируются через concat.
+    # ВАЖНО (конвенция, аудит 13): стенсиль [-1, 8, 0, -8, 1] — это МИНУС
+    # стандартного FD-4 по оси индекса, а индекс растёт с давлением, поэтому
+    # d_z возвращает −∂/∂p (эквивалентно ∂/∂ζ при ζ=−p). Все адвективные
+    # члены самосогласованы с w = −ω из get_w (двойные инверсии гасятся).
     conv_kernel = torch.zeros(
         [1, 1, 5, 1, 1], device=input_tensor.device, dtype=input_tensor.dtype, requires_grad=False
     )
@@ -486,8 +490,11 @@ class PDE_kernel(nn.Module):
         t_y = self._d_y(t)
         t_z = d_z(t)
         if self.t_t_formulation == "adiabatic_omega":
-            # Адиабата dT/dt = R_d·T·ω/(c_p·p); ω=100·w [Pa/с] (w из get_w в гПа/с), p в Pa.
-            omega_pa = 100.0 * w
+            # Адиабата dT/dt = R_d·T·ω/(c_p·p), p в Pa. Знаковая конвенция ядра:
+            # get_w возвращает вверх-положительную w = −ω [гПа/с] (интеграл M_z
+            # идёт от уровня к поверхности), поэтому ω = −100·w. См.
+            # docs/experiments/13_sign_convention_fix и docs/equations.md.
+            omega_pa = -100.0 * w
             pressure_pa = pressure.to(t.dtype).to(t.device) * 100.0
             t_t_adia = self.R_d * t * omega_pa / (self.c_p * pressure_pa)
             self.t_t = t_t_adia - u * t_x - v * t_y - w * t_z
@@ -505,8 +512,12 @@ class PDE_kernel(nn.Module):
     ############################# z #############################
     def get_z_zt(self):
         # Гидростатика: R_d=287 (масс-удельная) по умолчанию; use_universal_R → R=8.314 (молярная).
+        # Знак: integral_z суммирует ОТ уровня К поверхности (∫_p^ps), а
+        # Φ_t(p) = Φ_t(ps) + ∫_p^ps R·T_t/p' dp' — подынтегральное ПОЛОЖИТЕЛЬНОЕ
+        # (прогрев столба поднимает геопотенциал выше поверхности). Минус здесь
+        # (знак-баг B2 аудита 13) давал z_t = −Φ_t.
         r_eff = self.R if self.use_universal_R else self.R_d
-        return -r_eff / pressure.to(self.t_t.dtype).to(self.t_t.device) * self.t_t
+        return r_eff / pressure.to(self.t_t.dtype).to(self.t_t.device) * self.t_t
 
     def get_z_t(self):
         z_zt = self.get_z_zt()
@@ -521,6 +532,11 @@ class PDE_kernel(nn.Module):
 
     ############################# w #############################
     def get_w(self, u, v):
+        # Диагностика вертикальной скорости из континуити ∂ω/∂p = −div.
+        # ВАЖНО (конвенция, аудит 13): integral_z суммирует ОТ уровня К
+        # поверхности, поэтому возвращается w = −∫_p^ps div dp' = −ω(p)
+        # [гПа/с] — вверх-положительная величина. Потребители, которым нужна
+        # настоящая ω (адиабата, конденсация), берут ω = −100·w [Па/с].
         self.u_x = self._d_x(u)
         self.v_y = self._d_y(v)
         div = self.u_x + self.v_y
@@ -536,18 +552,34 @@ class PDE_kernel(nn.Module):
 
     ############################# q #############################
     def get_q_dt(self, u, v, t, w, q):
+        """Tendency влажности: адвекция + крупномасштабная конденсация.
+
+        Конденсация — стандартная схема насыщенной псевдоадиабаты
+        (Haltiner & Williams): dq/dt|cond = δ·F(T, q_s)·ω/p, где δ=1 при
+        подъёме (ω<0) и q >= q_s, иначе 0; F > 0, так что подъём сушит.
+        Давление — реальные уровни (буфер ``pressure``, гПа → Па), а не
+        реконструкция p=ρRT из z_z (та давала p<0 из-за конвенции d_z=−∂/∂p,
+        шкалы гПа и универсальной R — баг B3 аудита 13). ω = −100·w, т.к.
+        ``get_w`` возвращает вверх-положительную w = −ω [гПа/с].
+
+        Args:
+            u, v: горизонтальный ветер, ``(B, P, H, W)``, м/с.
+            t: температура, K. w: вертикальная скорость из ``get_w``, гПа/с.
+            q: удельная влажность, кг/кг.
+
+        Returns:
+            ``torch.Tensor`` ``(B, P, H, W)`` — dq/dt, (кг/кг)/с.
+        """
+
         def get_qs(p, T):
-            # Magnus: экспонента ограничивается ПОЭЛЕМЕНТНЫМ clamp — числовой guard,
-            # batch-независимый. Ранее scale_tensor делал batch-global min/max remap:
-            # связывал сэмплы батча и искажал q_s даже для in-range температур.
+            # Magnus в СИ (e_s и p в Па). Поэлементный clamp ±20 — числовой
+            # guard как в saturation_specific_humidity; прежний диапазон
+            # [-3.47, 3.01] (наследие batch-remap) занижал/завышал e_s
+            # вне -35..+24 C.
             t_c = T - 273.15
-            exponent = torch.clamp(17.67 * t_c / self.avoid_inf(t_c + 243.5), min=-3.47, max=3.01)
+            exponent = torch.clamp(17.67 * t_c / self.avoid_inf(t_c + 243.5), min=-20.0, max=20.0)
             e_s = 6.112 * torch.exp(exponent) * 100
             return 0.622 * e_s / self.avoid_inf(p - 0.378 * e_s)
-
-        def get_delta(p_t, q, q_s):
-            cond = torch.logical_and(p_t < 0, torch.ge(q, q_s))
-            return torch.where(cond, torch.ones_like(p_t), torch.zeros_like(p_t))
 
         def get_F(T, q, q_s):
             R_ = (1 + 0.608 * q) * self.R_d
@@ -560,17 +592,15 @@ class PDE_kernel(nn.Module):
         q_y = self._d_y(q)
         q_z = d_z(q)
 
-        rho = -1 / self.avoid_inf(self.z_z)
-        p = rho * self.R * t
+        pressure_pa = pressure.to(t.dtype).to(t.device) * 100.0
+        omega_pa = -100.0 * w
 
-        q_s = get_qs(p, t).detach()
+        q_s = get_qs(pressure_pa, t).detach()
         q_s = torch.maximum(q_s, torch.ones_like(q_s) * 1e-6)
-        delta = get_delta(self.z_t + u * self.z_x + v * self.z_y + w * self.z_z, q, q_s).detach()
+        delta = torch.logical_and(omega_pa < 0, torch.ge(q, q_s)).to(q.dtype).detach()
         F_ = get_F(t, q, q_s).detach()
 
-        q_t = -(u * q_x + v * q_y + w * q_z) + (
-            self.z_t + u * self.z_x + v * self.z_y + w * self.z_z
-        ) * delta * F_ / self.avoid_inf(self.R * t)
+        q_t = -(u * q_x + v * q_y + w * q_z) + delta * F_ * omega_pa / pressure_pa
         return q_t
 
     def q_evolution(self, u, v, t, w, q):
