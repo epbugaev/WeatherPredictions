@@ -162,6 +162,17 @@ class RatioAccum:
         return float(np.sqrt(self.sq / max(self.count, 1.0)))
 
 
+def latitude_bands(grid: Grid) -> dict[str, torch.Tensor]:
+    """Индексы строк широтных поясов: tropics |φ|<23.5, midlat, polar |φ|≥66.5."""
+    lat_deg = grid.latitudes * 180.0 / torch.pi
+    bands = {
+        "tropics": (lat_deg.abs() < 23.5).nonzero().flatten(),
+        "midlat": ((lat_deg.abs() >= 23.5) & (lat_deg.abs() < 66.5)).nonzero().flatten(),
+        "polar": (lat_deg.abs() >= 66.5).nonzero().flatten(),
+    }
+    return {name: rows for name, rows in bands.items() if rows.numel() > 0}
+
+
 def run_domain(name: str, dom: dict, hours: list[int]) -> dict:
     """Полный набор статистик по одному домену."""
     grid = Grid(GridConfig(H=dom["H"], W=dom["W"], lat_range_deg=dom["lat_range"]))
@@ -185,6 +196,17 @@ def run_domain(name: str, dom: dict, hours: list[int]) -> dict:
         mode: {v: RatioAccum() for v in ("u", "v", "t", "q", "z")}
         for mode in ("fixed_plain", "fixed_mc", "prefix_emulated")
     }
+    # Дебаг-разбивки (автономный аудит результатов первого рана):
+    # 1) по широтным поясам — источник асимметрии v≫u и полярного CFL;
+    # 2) adv_only — вклад адиабаты с шумной ω в T/z-невязку;
+    # 3) interior (без 2 краевых строк/столбцов) — вклад границы кропа.
+    bands = latitude_bands(grid)
+    band_residual = {
+        band: {v: RatioAccum() for v in ("u", "v", "t", "z")} for band in bands
+    }
+    adv_only = {"t": RatioAccum(), "z": RatioAccum()}
+    interior_residual = {v: RatioAccum() for v in ("u", "v", "t", "q", "z")}
+    cfl_band_max = dict.fromkeys(bands, 0.0)
     omega_corr = {"plain": CorrAccum(), "mc": CorrAccum()}
     omega_mag = {"kin_plain": RatioAccum(), "kin_mc": RatioAccum(), "implied": RatioAccum()}
     hydro_corr = CorrAccum()
@@ -271,10 +293,40 @@ def run_domain(name: str, dom: dict, hours: list[int]) -> dict:
             diabatic["mc"].add(obs["t"] - rhs_mc["t_t"], adia_mc)
 
             # --- CFL ---
-            cfl_x = (u.abs() * DT_CFL / grid.pixel_x).max()
+            cfl_field = u.abs() * DT_CFL / grid.pixel_x
             cfl_y = (v.abs() * DT_CFL / grid.pixel_y).max()
-            cfl["adv_max"] = max(cfl["adv_max"], float(cfl_x), float(cfl_y))
-            cfl["adv_mean_sum"] += float((u.abs() * DT_CFL / grid.pixel_x).mean())
+            cfl["adv_max"] = max(cfl["adv_max"], float(cfl_field.max()), float(cfl_y))
+            cfl["adv_mean_sum"] += float(cfl_field.mean())
+
+            # --- Дебаг-разбивки ---
+            model_by_var = {
+                "u": rhs_plain["u_t"],
+                "v": rhs_plain["v_t"],
+                "t": rhs_mc["t_t"],
+                "z": rhs_mc["z_t"],
+            }
+            for band, rows in bands.items():
+                for var, model in model_by_var.items():
+                    band_residual[band][var].add(
+                        (obs[var] - model).index_select(2, rows),
+                        obs[var].index_select(2, rows),
+                    )
+                cfl_band_max[band] = max(
+                    cfl_band_max[band], float(cfl_field.index_select(2, rows).max())
+                )
+            adv_only["t"].add(obs["t"] - adv_t, obs["t"])
+            adv_only["z"].add(obs["z"] - k.get_z_t(adv_t), obs["z"])
+            model_interior = {
+                "u": rhs_plain["u_t"],
+                "v": rhs_plain["v_t"],
+                "t": rhs_plain["t_t"],
+                "q": rhs_plain["q_t"],
+                "z": rhs_plain["z_t"],
+            }
+            for var, model in model_interior.items():
+                interior_residual[var].add(
+                    (obs[var] - model)[..., 2:-2, 2:-2], obs[var][..., 2:-2, 2:-2]
+                )
         print(f"[{name}] pair {i + 1}/{len(hours)} hour={hour} done", flush=True)
 
     n = max(cond["n_pairs"], 1)
@@ -310,7 +362,18 @@ def run_domain(name: str, dom: dict, hours: list[int]) -> dict:
             "plain": diabatic["plain"].ratio(),
             "mass_consistent": diabatic["mc"].ratio(),
         },
-        "cfl_dt300": {"adv_max": cfl["adv_max"], "adv_mean": cfl["adv_mean_sum"] / n},
+        "cfl_dt300": {
+            "adv_max": cfl["adv_max"],
+            "adv_mean": cfl["adv_mean_sum"] / n,
+            "band_max": cfl_band_max,
+        },
+        "residual_rel_by_band": {
+            band: {var: acc.ratio() for var, acc in accs.items()}
+            for band, accs in band_residual.items()
+        },
+        "residual_rel_adv_only": {var: acc.ratio() for var, acc in adv_only.items()},
+        "residual_rel_interior": {var: acc.ratio() for var, acc in interior_residual.items()},
+        "band_note": "band residuals: u,v = fixed_plain; t,z = fixed_mc; interior = fixed_plain без 2 краевых строк/столбцов",
         "n_pairs": cond["n_pairs"],
     }
 

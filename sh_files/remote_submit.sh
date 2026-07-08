@@ -75,7 +75,9 @@ fi
 echo "[remote_submit] push ${BRANCH} → origin"
 git push origin "HEAD:refs/heads/${BRANCH}"
 
-weatherpred__sbatch_cmd="$(printf "%q " sbatch "${SCRIPT}" "${SBATCH_ARGS[@]}")"
+# ${arr[@]+...} — безопасное раскрытие пустого массива под set -u в bash 3.2
+# (macOS): голое "${SBATCH_ARGS[@]}" там падает с "unbound variable".
+weatherpred__sbatch_cmd="$(printf "%q " sbatch "${SCRIPT}" ${SBATCH_ARGS[@]+"${SBATCH_ARGS[@]}"})"
 echo "[remote_submit] sync & sbatch on ${REMOTE_HOST}:${REMOTE_REPO}"
 SUBMIT_OUT="$(ssh "${REMOTE_HOST}" bash -se <<EOF
 set -euo pipefail
