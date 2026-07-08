@@ -7,6 +7,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **PI-IAM4VP inline-physics equation-variant and geometry flags** on
+  `PDE_kernel` / `HybridBlock` / `IAM4VP`: `t_t_formulation`,
+  `use_universal_R`, `coriolis_formulation`, `lat_start_deg` / `dlat_deg` /
+  `dlon_deg`, `tendency_limiter` / `tendency_caps`,
+  `physics_tendency_on_latent`, `physics_prior_detach` and
+  `physics_horizon_seconds`. Defaults select the fixed physics; the legacy
+  behaviour stays reachable by flag (see the `legacy_hybrid` arm).
+- **Hybrid drift diagnostics** logged by the residual corrector:
+  `physics_router_weight_abs` and `physics_hybrid_bn_gamma_drift`.
+- **DDP guard for residual warmup** (`IterativeManualStep._set_residual_warmup`):
+  raises `ValueError` when `freeze_iam4vp_for_residual_warmup` is requested with a
+  positive warmup under `DistributedDataParallel`, because toggling `requires_grad`
+  after DDP wrapping breaks gradient bucketing (buckets are built once at
+  construction time) — audit F11.
+- `docs/ideas/01`–`05` and the PI-IAM4VP integration audit report
+  (`docs/PI_IAM4VP_integration_audit_ru.md`).
 - **Per-variable val RMSE для всех 69 каналов.** `BASEMODEL_INDEX_MAP` /
   `MULTIOUT_INDEX_MAP` (`training_strategies/_index_maps.py`) расширены с
   13-канального суррогата до полного 69-канального покрытия (surface +
@@ -165,6 +181,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- PI-IAM4VP `block_dt` is now derived from `physics_horizon_seconds`
+  (`3600 s / (depth * steps)` = 400 s) instead of the hardcoded 1200 s
+  (a nominal 3 h per 1 h autoregressive step) — audit F3b.
+- `configs/pi_iam4vp_residual_diabatic_usa_v4.yaml`: `diabatic_lambda_l1`
+  1e-5 → 1e-4 (equal to `physics_residual_lambda_l1`; removes the 10x
+  incentive for Q_θ to absorb non-diabatic correction mass) — audit F7b.
+- `configs/pi_iam4vp_residual_*.yaml`: residual experiment names suffixed
+  `-fixv2` so post-fix Comet runs never mix with the pre-fix (poisoned) runs.
+- PI-IAM4VP construction-time channel-layout prints converted to warnings.
 - Унифицирован namespace per-variable RMSE-метрик: multiout-стратегии
   (`autoregressive`, `predrnn`, `iterative_manual`, `timestep_select`)
   больше не добавляют legacy-префикс `"f "` к ключам — теперь все модели
@@ -387,6 +412,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **PI-IAM4VP inline-physics / integration fixes (branch `fix_inline_v2`).**
+  - Re-applied the 4 inline-equation fixes silently reverted by `5ae159c`
+    (Coriolis `f0`, adiabatic `t_t`, `R_d` hydrostatics, `avoid_inf`) — audit F1.
+  - Crop-aware `HybridBlock` geometry: the kernel used a fake global -70..70
+    latent grid on the USA crop (negative Coriolis rows, dx/dy off 3-5x) — F2.
+  - Tendency limiter `physical_clip` restores `block_dt` semantics and removes
+    the cross-batch min/max leakage of `scale_diff` — F3.
+  - Physics tendency is now built on the latent grid (no resampling high-pass
+    contamination of `delta_phys`) — F4.
+  - Validation now logs the real physics aux loss (was always 0 in val) — F10.
+  - Router weight naming (`weight_physics` / `weight_ai`) matched to the actual
+    physics / AI paths — F9.
 - **Неверные legacy-индексы `BASEMODEL_INDEX_MAP`** для v4-layout
   (`training_strategies/_index_maps.py`, используется `SimpleStep` —
   PredFormer/SimVP). Прежние hand-written индексы ссылались на старый

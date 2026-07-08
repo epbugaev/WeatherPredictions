@@ -70,9 +70,32 @@ class IterativeManualStep(StepStrategy):
         return diagnostics_fn()
 
     def _set_residual_warmup(self, model: nn.Module, epoch: int) -> None:
+        """Toggle IAM4VP-backbone freezing for the residual-corrector warmup.
+
+        Args:
+            model: predictor, possibly wrapped in ``DistributedDataParallel``.
+            epoch: current epoch; the backbone is frozen while
+                ``epoch < warmup_epochs`` and freezing is requested.
+
+        Raises:
+            ValueError: when freezing is requested with a positive warmup under a
+                ``DistributedDataParallel`` wrapper. Toggling ``requires_grad``
+                after DDP wrapping breaks gradient bucketing (parameters are
+                bucketed once at construction time), so the warmup must be applied
+                before the DDP wrap or the run must be single-GPU.
+        """
         inner = self._inner_model(model)
         warmup_epochs = int(getattr(inner, "residual_warmup_epochs", 0))
         freeze = bool(getattr(inner, "freeze_iam4vp_for_residual_warmup", False))
+        is_ddp = isinstance(model, nn.parallel.DistributedDataParallel)
+        if freeze and warmup_epochs > 0 and is_ddp:
+            raise ValueError(
+                "freeze_iam4vp_for_residual_warmup=True with "
+                f"residual_warmup_epochs={warmup_epochs} is incompatible with "
+                "DistributedDataParallel: toggling requires_grad after DDP wrapping "
+                "breaks gradient bucketing (parameters are bucketed at construction "
+                "time). Apply the warmup before the DDP wrap or run single-GPU."
+            )
         setter = getattr(inner, "set_residual_warmup", None)
         if setter is not None:
             setter(freeze and epoch < warmup_epochs)
@@ -99,12 +122,17 @@ class IterativeManualStep(StepStrategy):
             x: input tensor.
             y: ground truth, shape ``(B, T, ...)``; the t-th step is supervised by ``y[:, t]``.
             ctx: trainer context (only ``device`` is read here).
-            backward_each_step: when ``True``, calls ``step_loss.backward()`` after
+            backward_each_step: when ``True`` (train path) the physics aux loss is
+                added to ``step_loss`` and ``step_loss.backward()`` is called after
                 each per-timestep loss (manual_optimization train_step contract).
+                When ``False`` (val path) the aux loss is still fetched and
+                accumulated for logging but excluded from ``step_loss``, so
+                ``val_loss`` / early-stopping semantics stay unchanged.
 
         Returns:
-            Predictions appended detached, regularized loss, forecast-only loss,
-            auxiliary residual loss, and averaged residual diagnostics.
+            Predictions appended detached, per-step loss (train: forecast + aux;
+            val: forecast only), forecast-only loss, auxiliary residual loss
+            (fetched in both train and val), and averaged residual diagnostics.
         """
         total_loss = torch.zeros((), device=ctx.device)
         forecast_total_loss = torch.zeros((), device=ctx.device)
@@ -116,12 +144,8 @@ class IterativeManualStep(StepStrategy):
             prediction = model(x, pred_list, t)
             pred_list.append(prediction.detach())
             forecast_loss = self.loss(prediction, y[:, idx_time])
-            aux_loss = (
-                self._physics_residual_aux_loss(model, ctx.device)
-                if backward_each_step
-                else torch.zeros((), device=ctx.device)
-            )
-            step_loss = forecast_loss + aux_loss
+            aux_loss = self._physics_residual_aux_loss(model, ctx.device)
+            step_loss = forecast_loss + aux_loss if backward_each_step else forecast_loss
             forecast_total_loss = forecast_total_loss + forecast_loss.detach()
             aux_total_loss = aux_total_loss + aux_loss.detach()
             total_loss = total_loss + step_loss
@@ -178,7 +202,7 @@ class IterativeManualStep(StepStrategy):
     ) -> dict[str, torch.Tensor]:
         x, y = batch
 
-        pred_list, total_loss, _, _, diagnostics = self._iterate_timesteps(
+        pred_list, total_loss, _, aux_total_loss, diagnostics = self._iterate_timesteps(
             model, x, y, ctx, backward_each_step=False
         )
 
@@ -196,6 +220,7 @@ class IterativeManualStep(StepStrategy):
             target_full=y[:, : self.time_prediction],
         )
         metrics.update({f"val_{key}": value for key, value in diagnostics.items()})
+        metrics["val_physics_residual_aux_loss"] = aux_total_loss / self.time_prediction
 
         if ctx.is_main_process and (not self.log_figures_once or not self._figures_logged):
             log_prediction_maps(

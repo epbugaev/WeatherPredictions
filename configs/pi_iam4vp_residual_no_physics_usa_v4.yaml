@@ -1,7 +1,7 @@
 # Residual-head control: same output-space residual corrector, but without
 # HybridBlock/tendency features. Compare against pi_iam4vp_residual_usa_v4.
 experiment:
-  name: PI-IAM4VP-ResidualNoPhysics-USA-v4
+  name: PI-IAM4VP-ResidualNoPhysics-USA-v4-fixv2
 model:
   type: PI-IAM4VP
   params:
@@ -13,6 +13,10 @@ model:
     physics_residual_lambda_l1: 0.0001
     physics_feature_mode: no_physics
     physics_residual_shuffle: none
+    # True USA-crop latent geometry (grid S->N, crop rows 75..106 = 16.17..59.77N).
+    physics_lat_start_deg: 18.28125
+    physics_dlat_deg: 5.625
+    physics_dlon_deg: 5.625
     freeze_iam4vp_for_residual_warmup: false
     residual_warmup_epochs: 0
 data:

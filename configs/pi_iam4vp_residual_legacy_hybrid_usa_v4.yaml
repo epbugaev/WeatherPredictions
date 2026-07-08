@@ -3,7 +3,7 @@
 # channels are sent directly into HybridBlock, with no r->q conversion and no
 # physical-unit integrator guards. Use it to compare against stable_physical.
 experiment:
-  name: PI-IAM4VP-ResidualLegacyHybrid-USA-v4
+  name: PI-IAM4VP-ResidualLegacyHybrid-USA-v4-fixv2
 model:
   type: PI-IAM4VP
   params:
@@ -20,6 +20,15 @@ model:
     physics_residual_input_space: normalized
     physics_residual_humidity_mode: as_is
     physics_residual_tendency_clip: 0.0
+    # Historical legacy path: pin the OLD equation behavior so this control keeps
+    # its meaning under the new fixed-physics defaults.
+    physics_t_t_formulation: legacy_paper
+    physics_use_universal_R: true
+    physics_coriolis_formulation: beta_plane
+    physics_tendency_limiter: scale_diff
+    physics_tendency_on_latent: false
+    # NOTE: deliberately NO physics_lat_start_deg/dlat/dlon here — this arm must
+    # keep the old fake-global -70..70 latent grid it was designed to control for.
     freeze_iam4vp_for_residual_warmup: false
     residual_warmup_epochs: 0
 data:

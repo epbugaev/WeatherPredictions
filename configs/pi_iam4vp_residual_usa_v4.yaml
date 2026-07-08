@@ -2,7 +2,7 @@
 # This treats WeatherGFT/HybridBlock as a tendency feature generator, not as a
 # trusted forecast or fixed alpha/router blend.
 experiment:
-  name: PI-IAM4VP-ResidualStablePhysics-USA-v4
+  name: PI-IAM4VP-ResidualStablePhysics-USA-v4-fixv2
 model:
   type: PI-IAM4VP
   params:
@@ -21,6 +21,10 @@ model:
     physics_residual_input_space: physical
     physics_residual_humidity_mode: relative_to_specific
     physics_residual_tendency_clip: 8.0
+    # True USA-crop latent geometry (grid S->N, crop rows 75..106 = 16.17..59.77N).
+    physics_lat_start_deg: 18.28125
+    physics_dlat_deg: 5.625
+    physics_dlon_deg: 5.625
     # Keep off for from-scratch runs. Turn on only for fine-tuning from a
     # pretrained IAM4VP checkpoint.
     freeze_iam4vp_for_residual_warmup: false

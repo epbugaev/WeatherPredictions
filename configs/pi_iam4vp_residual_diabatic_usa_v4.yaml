@@ -2,7 +2,7 @@
 # This treats WeatherGFT/HybridBlock as a tendency feature generator, not as a
 # trusted forecast or fixed alpha/router blend.
 experiment:
-  name: PI-IAM4VP-Residual-Diabatic-USA-v4
+  name: PI-IAM4VP-Residual-Diabatic-USA-v4-fixv2
 model:
   type: PI-IAM4VP
   params:
@@ -24,9 +24,15 @@ model:
     physics_w_diagnostic: mass_consistent
     use_diabatic_term: true
     diabatic_hidden_channels: 64
-    diabatic_lambda_l1: 0.00001
+    # Match physics_residual_lambda_l1 (removes the 10x incentive for Q_theta to
+    # absorb non-diabatic correction mass) — audit F7b.
+    diabatic_lambda_l1: 0.0001
     diabatic_constants_path: /home/fratnikov/weather_bench/1.40625deg/constants/constants_1.40625deg.nc
     diabatic_cut: [75, 107, 164, 228]
+    # True USA-crop latent geometry (grid S->N, crop rows 75..106 = 16.17..59.77N).
+    physics_lat_start_deg: 18.28125
+    physics_dlat_deg: 5.625
+    physics_dlon_deg: 5.625
     # Keep off for from-scratch runs. Turn on only for fine-tuning from a
     # pretrained IAM4VP checkpoint.
     freeze_iam4vp_for_residual_warmup: false
