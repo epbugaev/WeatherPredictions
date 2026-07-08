@@ -125,40 +125,53 @@ def weno_derivative(u, dx, epsilon=1e-6, boundary="periodic"):
     return (flux_iphalf - flux_imhalf) / dx
 
 
-def d_x_weno(input_tensor, boundary="reflect"):
+def d_x_weno(input_tensor, boundary="reflect", dx=None):
+    """Производная по оси 3 (ширина, долгота) схемой WENO 5-го порядка.
+
+    Args:
+        input_tensor: ``torch.Tensor`` формы ``(B, C, H, W)``.
+        boundary: режим границ ``"periodic"`` или ``"reflect"``.
+        dx: тензор шага по долготе формы ``(1, 1, H, 1)``. При ``None`` берётся
+            module-level ``pixel_x`` (глобальная сетка, backward-compat).
+
+    Returns:
+        ``torch.Tensor`` формы ``(B, C, H, W)`` — производная по ширине.
     """
-    Вычисляет производную по оси 3 (ширина) с использованием WENO 5-го порядка.
-    Результат масштабируется с помощью pixel_x.
-    """
+    if dx is None:
+        dx = pixel_x
     B, C, H, W = input_tensor.shape
     input_flat = input_tensor.reshape(B * C * H, W)
-    dx_flat = pixel_x.expand(B, C, H, 1).reshape(B * C * H)
+    dx_flat = dx.expand(B, C, H, 1).reshape(B * C * H)
     derivative_flat = weno_derivative(input_flat, dx_flat, boundary=boundary)
     derivative = derivative_flat.reshape(B, C, H, W)
     return derivative
 
 
-def d_y_weno(input_tensor, boundary="reflect"):
+def d_y_weno(input_tensor, boundary="reflect", dy=None):
+    """Производная по оси 2 (высота, широта) схемой WENO 5-го порядка.
+
+    Args:
+        input_tensor: ``torch.Tensor`` формы ``(B, C, H, W)``.
+        boundary: режим границ ``"periodic"`` или ``"reflect"``.
+        dy: скалярный тензор шага по широте. При ``None`` берётся module-level
+            ``pixel_y`` (глобальная сетка, backward-compat).
+
+    Returns:
+        ``torch.Tensor`` формы ``(B, C, H, W)`` — производная по высоте.
     """
-    Вычисляет производную по оси 2 (высота) с использованием WENO 5-го порядка.
-    Результат масштабируется с помощью pixel_y.
-    """
+    if dy is None:
+        dy = pixel_y
     B, C, H, W = input_tensor.shape
     input_perm = input_tensor.permute(0, 1, 3, 2)
     input_flat = input_perm.reshape(B * C * W, H)
-    derivative_flat = weno_derivative(input_flat, pixel_y, boundary=boundary)
+    derivative_flat = weno_derivative(input_flat, dy, boundary=boundary)
     derivative_perm = derivative_flat.reshape(B, C, W, H)
     derivative = derivative_perm.permute(0, 1, 3, 2)
     return derivative
 
 
-# Используем функции d_x_weno и d_y_weno напрямую
-d_x = d_x_weno
-d_y = d_y_weno
-
-
 def d_z(input_tensor):
-    # Вертикальная производная по давлению без изменений (используется периодическая логика через concat)
+    # Вертикальная производная по давлению; края реплицируются через concat
     conv_kernel = torch.zeros(
         [1, 1, 5, 1, 1], device=input_tensor.device, dtype=input_tensor.dtype, requires_grad=False
     )
@@ -173,12 +186,6 @@ def d_z(input_tensor):
     output_z = output_z.squeeze(1)
     output_z = output_z / pixel_z.to(output_z.dtype).to(output_z.device)
     return output_z
-
-
-def laplacian_tensor(u):
-    d2u_dx2 = d_x(d_x(u))
-    d2u_dy2 = d_y(d_y(u))
-    return d2u_dx2 + d2u_dy2
 
 
 # ===== Пространственная производная на нативной латент-сетке =====
@@ -199,7 +206,7 @@ def compute_spatial_derivative(field, derivative_fn, boundary="reflect"):
 
     Args:
         field: ``torch.Tensor`` ``(B, C, H, W)`` на латент-сетке.
-        derivative_fn: ``d_x``/``d_y`` (WENO-5).
+        derivative_fn: связанный метод ``_d_x``/``_d_y`` ядра (WENO-5).
         boundary: режим границ, пробрасывается в ``derivative_fn``.
 
     Returns:
@@ -208,47 +215,126 @@ def compute_spatial_derivative(field, derivative_fn, boundary="reflect"):
     return derivative_fn(field, boundary=boundary)
 
 
-# ===== Класс PDE_kernel с учётом бета-подхода, улучшенных граничных условий и AMR =====
-#
-# Коэффициент Кориолиса определяется как:
-#     f = f0 + beta * y,
-# где y = R * lat (меридиональное расстояние в метрах).
-#
 class PDE_kernel(nn.Module):
+    """Инлайн-ядро примитивных уравнений (физический prior PI-IAM4VP).
+
+    Эволюционирует состояние ``zquvtw`` (порядок каналов z, t, q, u, v) на
+    латент-сетке одним явным шагом за вызов. Геометрия кропа (широты, шаги
+    ``pixel_x``/``pixel_y``, параметр Кориолиса ``f_field``) строится в
+    ``__init__`` под конкретное окно и хранится в буферах — DDP-совместимо и
+    не зависит от module-level глобалей. Формулировки термодинамики,
+    гидростатики, Кориолиса и способ ограничения приращений — переключаемы
+    явными флагами конструктора (по умолчанию — исправленная физика).
+    """
+
     def __init__(
         self,
-        in_dim,
-        physics_part_coef,
-        variable_dim=13,
-        block_dt=300,
-        inverse_time=False,
-        norm=False,
-        eddy_viscosity=0.0,
-        beta=1.6e-11,
-        f0=7.29e-5,
-        w_diagnostic="plain",
+        in_dim: int,
+        physics_part_coef: float | None,
+        variable_dim: int = 13,
+        block_dt: float = 300,
+        inverse_time: bool = False,
+        norm: bool = False,
+        eddy_viscosity: float = 0.0,
+        beta: float = 1.6e-11,
+        f0: float = 1.0313e-4,
+        w_diagnostic: str = "plain",
+        lat_start_deg: float = -70.0,
+        dlat_deg: float = 20.0,
+        dlon_deg: float = 22.5,
+        grid_h: int = 8,
+        coriolis_formulation: str = "spherical",
+        t_t_formulation: str = "adiabatic_omega",
+        use_universal_R: bool = False,
+        tendency_limiter: str = "physical_clip",
+        tendency_caps: dict[str, float] | None = None,
     ):
-        """
-        eddy_viscosity: коэффициент вихревой вязкости для субрешеточной турбулентности.
-        beta: коэффициент бета (с^-1 м^-1) для вариации f по меридионали.
-        f0: базовое значение коэффициента Кориолиса.
+        """Инициализирует ядро с crop-aware геометрией и переключателями физики.
+
+        Args:
+            in_dim: число каналов x-пути (Conv2d ``variable_norm``/``variable_innorm``).
+            physics_part_coef: вес физической ветки; ``None`` → обучаемая матрица.
+            variable_dim: число уровней давления на переменную (13).
+            block_dt: физический шаг интегрирования (с); знак задаёт ``inverse_time``.
+            inverse_time: если True, ``block_dt`` берётся со знаком минус.
+            norm: флаг нормировки (совместимость; в арифметике не используется).
+            eddy_viscosity: коэффициент вихревой вязкости (лапласиан u/v).
+            beta: β (с⁻¹·м⁻¹) для ``coriolis_formulation='beta_plane'``.
+            f0: базовый Кориолис (с⁻¹) для ``beta_plane``; дефолт 2Ω·sin45°=1.0313e-4.
+            w_diagnostic: ``'plain'`` или ``'mass_consistent'`` — диагностика ω.
+            lat_start_deg: широта (град) центра южной (первой) строки латента.
+            dlat_deg: шаг по широте между строками латента (град).
+            dlon_deg: шаг по долготе между столбцами латента (град).
+            grid_h: число строк по широте (H) латент-сетки.
+            coriolis_formulation: ``'spherical'`` (f=2Ω·sinφ) или ``'beta_plane'``
+                (f0+β·R·φ, для регрессии старого поведения).
+            t_t_formulation: ``'adiabatic_omega'`` (R_d·T·ω/(c_p·p)) или
+                ``'legacy_paper'`` (старая Q=−L·z_z·w, байт-в-байт).
+            use_universal_R: если True — R=8.314 (молярная) в гидростатике вместо
+                R_d=287 (масс-удельная).
+            tendency_limiter: ``'physical_clip'`` (поэлементный кап приращения) или
+                ``'scale_diff'`` (легаси min-max нормировка приращения по батчу).
+            tendency_caps: поэлементные капы приращения на вызов ядра по переменной;
+                ``None`` → ``{'z':500,'t':5,'q':5,'u':10,'v':10}`` (единицы:
+                м²/с², K, ед. влажности, м/с, м/с).
+
+        Raises:
+            ValueError: при недопустимом значении любого строкового флага
+                (``w_diagnostic``/``coriolis_formulation``/``t_t_formulation``/
+                ``tendency_limiter``).
         """
         super().__init__()
-        self.norm = norm
-        self.eddy_viscosity = eddy_viscosity
         if w_diagnostic not in ("plain", "mass_consistent"):
             raise ValueError(
                 f"Unknown w_diagnostic {w_diagnostic!r}; expected 'plain' or 'mass_consistent'"
             )
+        if coriolis_formulation not in ("spherical", "beta_plane"):
+            raise ValueError(
+                f"Unknown coriolis_formulation {coriolis_formulation!r}; "
+                "expected 'spherical' or 'beta_plane'"
+            )
+        if t_t_formulation not in ("adiabatic_omega", "legacy_paper"):
+            raise ValueError(
+                f"Unknown t_t_formulation {t_t_formulation!r}; "
+                "expected 'adiabatic_omega' or 'legacy_paper'"
+            )
+        if tendency_limiter not in ("physical_clip", "scale_diff"):
+            raise ValueError(
+                f"Unknown tendency_limiter {tendency_limiter!r}; "
+                "expected 'physical_clip' or 'scale_diff'"
+            )
+
+        self.norm = norm
+        self.eddy_viscosity = eddy_viscosity
         self.w_diagnostic = w_diagnostic
+        self.coriolis_formulation = coriolis_formulation
+        self.t_t_formulation = t_t_formulation
+        self.use_universal_R = use_universal_R
+        self.tendency_limiter = tendency_limiter
+        self.tendency_caps = (
+            {"z": 500.0, "t": 5.0, "q": 5.0, "u": 10.0, "v": 10.0}
+            if tendency_caps is None
+            else dict(tendency_caps)
+        )
 
         self.f0 = f0
         self.beta = beta
-        # Вычисляем меридиональное расстояние y = R * lat для каждого пикселя по широте.
-        y_coords = radius * latitudes  # в метрах
-        # f_field имеет форму [1, 1, H, 1] для вещания с полями [B, C, H, W]
-        f_field = self.f0 + self.beta * y_coords
-        self.register_buffer("f_field", f_field.reshape(1, 1, -1, 1))
+        self.grid_h = grid_h
+
+        # ===== Crop-aware геометрия (буферы → DDP-совместимо, .to(device) авто) =====
+        deg2rad = torch.pi / 180.0
+        lat_rad = (lat_start_deg + dlat_deg * torch.arange(grid_h, dtype=torch.float32)) * deg2rad
+        pixel_x = (radius * torch.cos(lat_rad) * (dlon_deg * deg2rad)).reshape(1, 1, grid_h, 1)
+        pixel_y = torch.tensor(radius * dlat_deg * deg2rad, dtype=torch.float32)
+        if coriolis_formulation == "spherical":
+            f_field = 2.0 * 7.2921e-5 * torch.sin(lat_rad)
+        else:  # beta_plane: старая f0 + β·y, y = R·lat (для регрессии)
+            f_field = self.f0 + self.beta * (radius * lat_rad)
+        # Буферы имеют форму [1, 1, H, 1] для вещания с полями [B, C, H, W].
+        self.register_buffer("latitudes", lat_rad)
+        self.register_buffer("pixel_x", pixel_x)
+        self.register_buffer("pixel_y", pixel_y)
+        self.register_buffer("f_field", f_field.reshape(1, 1, grid_h, 1))
 
         self.variable_norm = nn.Conv2d(
             in_channels=in_dim, out_channels=variable_dim * 5, kernel_size=3, stride=1, padding=1
@@ -294,26 +380,63 @@ class PDE_kernel(nn.Module):
         diff_max = (x_max - x_mean) * self.diff_ratio
         return self.scale_tensor(diff_x, diff_min, diff_max)
 
+    def _limit_increment(
+        self, raw_increment: torch.Tensor, state: torch.Tensor, var_key: str
+    ) -> torch.Tensor:
+        """Ограничивает физическое приращение поля за один вызов ядра.
+
+        В режиме ``physical_clip`` — поэлементный ``clamp`` в ``±tendency_caps[var_key]``:
+        приращение пропорционально ``block_dt`` для ненасыщенных тенденций и не
+        связывает сэмплы батча. В режиме ``scale_diff`` — легаси min-max нормировка
+        (инвариантна к положительному масштабу, ``block_dt`` по модулю не влияет).
+
+        Args:
+            raw_increment: ``torch.Tensor`` формы ``(B, C, H, W)`` = tendency·block_dt.
+            state: текущее поле ``(B, C, H, W)`` (нужно ``scale_diff`` для диапазона).
+            var_key: ключ переменной для капа, одно из ``{'z','t','q','u','v'}``.
+
+        Returns:
+            ``torch.Tensor`` той же формы, отвязанный от графа (``.detach()``) —
+            приращение для аддитивной эволюции поля (frozen-prior).
+        """
+        if self.tendency_limiter == "scale_diff":
+            return self.scale_diff(raw_increment, state).detach()
+        cap = self.tendency_caps[var_key]
+        return torch.clamp(raw_increment, -cap, cap).detach()
+
     def avoid_inf(self, tensor, threshold=1.0):
-        tensor = torch.where(torch.abs(tensor) == 0.0, torch.ones_like(tensor) * 0.1, tensor)
-        return torch.where(torch.abs(tensor) < threshold, torch.sign(tensor) * threshold, tensor)
+        sign = torch.sign(tensor)
+        sign = torch.where(sign == 0.0, torch.ones_like(sign), sign)
+        return torch.where(torch.abs(tensor) < threshold, sign * threshold, tensor)
+
+    def _d_x(self, field: torch.Tensor, boundary: str = "reflect") -> torch.Tensor:
+        """Производная по долготе (ось x) на геометрии инстанса (``self.pixel_x``)."""
+        return d_x_weno(field, boundary=boundary, dx=self.pixel_x)
+
+    def _d_y(self, field: torch.Tensor, boundary: str = "reflect") -> torch.Tensor:
+        """Производная по широте (ось y) на геометрии инстанса (``self.pixel_y``)."""
+        return d_y_weno(field, boundary=boundary, dy=self.pixel_y)
+
+    def _laplacian(self, field: torch.Tensor) -> torch.Tensor:
+        """∂²/∂x²+∂²/∂y² на геометрии инстанса (для вихревой вязкости)."""
+        return self._d_x(self._d_x(field)) + self._d_y(self._d_y(field))
 
     def share_z_dxyz(self, z):
-        self.z_x = d_x(z)
-        self.z_y = d_y(z)
+        self.z_x = self._d_x(z)
+        self.z_y = self._d_y(z)
         self.z_z = d_z(z)
 
     ############################# u, v #############################
     def get_uv_dt(self, u, v, w):
-        # Консервативное представление нелинейных членов с применением AMR для уточнения
+        # Консервативное представление нелинейных членов (адвекция) на геометрии инстанса
         adv_u = (
-            compute_spatial_derivative(u * u, d_x)
-            + compute_spatial_derivative(u * v, d_y)
+            compute_spatial_derivative(u * u, self._d_x)
+            + compute_spatial_derivative(u * v, self._d_y)
             + d_z(u * w)
-        )  # вертикальная производная без AMR
+        )
         adv_v = (
-            compute_spatial_derivative(u * v, d_x)
-            + compute_spatial_derivative(v * v, d_y)
+            compute_spatial_derivative(u * v, self._d_x)
+            + compute_spatial_derivative(v * v, self._d_y)
             + d_z(v * w)
         )
 
@@ -323,8 +446,8 @@ class PDE_kernel(nn.Module):
 
         # Параметризация субрешеточной турбулентности через вихревую вязкость
         if self.eddy_viscosity > 0:
-            lap_u = laplacian_tensor(u)
-            lap_v = laplacian_tensor(v)
+            lap_u = self._laplacian(u)
+            lap_v = self._laplacian(v)
             self.u_t += self.eddy_viscosity * lap_u
             self.v_t += self.eddy_viscosity * lap_v
 
@@ -332,30 +455,39 @@ class PDE_kernel(nn.Module):
 
     def uv_evolution(self, u, v, w):
         u_t, v_t = self.get_uv_dt(u, v, w)
-        u = u + self.scale_diff(u_t * self.block_dt, u).detach()
-        v = v + self.scale_diff(v_t * self.block_dt, v).detach()
+        u = u + self._limit_increment(u_t * self.block_dt, u, "u")
+        v = v + self._limit_increment(v_t * self.block_dt, v, "v")
         return u, v
 
     ################################################################
 
     ############################# t #############################
     def get_t_t(self, u, v, w, t):
-        t_x = d_x(t)
-        t_y = d_y(t)
+        t_x = self._d_x(t)
+        t_y = self._d_y(t)
         t_z = d_z(t)
-        Q = -self.L * self.z_z * w
-        self.t_t = (Q - self.z_z * w) / self.c_p - u * t_x - v * t_y - w * t_z
+        if self.t_t_formulation == "adiabatic_omega":
+            # Адиабата dT/dt = R_d·T·ω/(c_p·p); ω=100·w [Pa/с] (w из get_w в гПа/с), p в Pa.
+            omega_pa = 100.0 * w
+            pressure_pa = pressure.to(t.dtype).to(t.device) * 100.0
+            t_t_adia = self.R_d * t * omega_pa / (self.c_p * pressure_pa)
+            self.t_t = t_t_adia - u * t_x - v * t_y - w * t_z
+        else:  # legacy_paper: старая формула Q=−L·z_z·w (байт-в-байт)
+            Q = -self.L * self.z_z * w
+            self.t_t = (Q - self.z_z * w) / self.c_p - u * t_x - v * t_y - w * t_z
         return self.t_t
 
     def t_evolution(self, u, v, w, t):
         t_t = self.get_t_t(u, v, w, t)
-        return t + self.scale_diff(t_t * self.block_dt, t).detach()
+        return t + self._limit_increment(t_t * self.block_dt, t, "t")
 
     ################################################################
 
     ############################# z #############################
     def get_z_zt(self):
-        return -self.R / pressure.to(self.t_t.dtype).to(self.t_t.device) * self.t_t
+        # Гидростатика: R_d=287 (масс-удельная) по умолчанию; use_universal_R → R=8.314 (молярная).
+        r_eff = self.R if self.use_universal_R else self.R_d
+        return -r_eff / pressure.to(self.t_t.dtype).to(self.t_t.device) * self.t_t
 
     def get_z_t(self):
         z_zt = self.get_z_zt()
@@ -364,14 +496,14 @@ class PDE_kernel(nn.Module):
 
     def z_evolution(self, z):
         z_t = self.get_z_t()
-        return z + self.scale_diff(z_t * self.block_dt, z).detach()
+        return z + self._limit_increment(z_t * self.block_dt, z, "z")
 
     ################################################################
 
     ############################# w #############################
     def get_w(self, u, v):
-        self.u_x = d_x(u)
-        self.v_y = d_y(v)
+        self.u_x = self._d_x(u)
+        self.v_y = self._d_y(v)
         div = self.u_x + self.v_y
         if getattr(self, "w_diagnostic", "plain") == "mass_consistent":
             # p-weighted column-mean divergence removed so int(div) dp ~ 0 per column
@@ -386,14 +518,12 @@ class PDE_kernel(nn.Module):
     ############################# q #############################
     def get_q_dt(self, u, v, t, w, q):
         def get_qs(p, T):
+            # Magnus: экспонента ограничивается ПОЭЛЕМЕНТНЫМ clamp — числовой guard,
+            # batch-независимый. Ранее scale_tensor делал batch-global min/max remap:
+            # связывал сэмплы батча и искажал q_s даже для in-range температур.
             t_c = T - 273.15
-            e_s = (
-                6.112
-                * torch.exp(
-                    self.scale_tensor(17.67 * t_c / self.avoid_inf(t_c + 243.5), -3.47, 3.01)
-                )
-                * 100
-            )
+            exponent = torch.clamp(17.67 * t_c / self.avoid_inf(t_c + 243.5), min=-3.47, max=3.01)
+            e_s = 6.112 * torch.exp(exponent) * 100
             return 0.622 * e_s / self.avoid_inf(p - 0.378 * e_s)
 
         def get_delta(p_t, q, q_s):
@@ -407,8 +537,8 @@ class PDE_kernel(nn.Module):
             )
             return F_ * q_s * T
 
-        q_x = d_x(q)
-        q_y = d_y(q)
+        q_x = self._d_x(q)
+        q_y = self._d_y(q)
         q_z = d_z(q)
 
         rho = -1 / self.avoid_inf(self.z_z)
@@ -426,7 +556,7 @@ class PDE_kernel(nn.Module):
 
     def q_evolution(self, u, v, t, w, q):
         q_t = self.get_q_dt(u, v, t, w, q)
-        return q + self.scale_diff(q_t * self.block_dt, q).detach()
+        return q + self._limit_increment(q_t * self.block_dt, q, "q")
 
     ################################################################
 
@@ -464,9 +594,47 @@ class PDE_kernel(nn.Module):
 
 
 class PDE_block(nn.Module):
+    """Стек из ``depth`` идентично сконфигурированных ядер ``PDE_kernel``."""
+
     def __init__(
-        self, in_dim, variable_dim, physics_part_coef, depth=3, block_dt=300, inverse_time=False, w_diagnostic="plain"
+        self,
+        in_dim: int,
+        variable_dim: int,
+        physics_part_coef: float | None,
+        depth: int = 3,
+        block_dt: float = 300,
+        inverse_time: bool = False,
+        w_diagnostic: str = "plain",
+        lat_start_deg: float = -70.0,
+        dlat_deg: float = 20.0,
+        dlon_deg: float = 22.5,
+        grid_h: int = 8,
+        coriolis_formulation: str = "spherical",
+        t_t_formulation: str = "adiabatic_omega",
+        use_universal_R: bool = False,
+        tendency_limiter: str = "physical_clip",
+        tendency_caps: dict[str, float] | None = None,
     ):
+        """Собирает стек ядер, прокидывая геометрию и флаги физики в каждое.
+
+        Args:
+            in_dim: число каналов x-пути.
+            variable_dim: число уровней давления на переменную.
+            physics_part_coef: вес физической ветки (или ``None`` для обучаемой).
+            depth: число ядер в стеке.
+            block_dt: физический шаг интегрирования (с).
+            inverse_time: инверсия знака шага.
+            w_diagnostic: диагностика ω (``'plain'``/``'mass_consistent'``).
+            lat_start_deg: широта южной строки латента (град).
+            dlat_deg: шаг по широте (град).
+            dlon_deg: шаг по долготе (град).
+            grid_h: число строк по широте (H).
+            coriolis_formulation: ``'spherical'``/``'beta_plane'``.
+            t_t_formulation: ``'adiabatic_omega'``/``'legacy_paper'``.
+            use_universal_R: R=8.314 вместо R_d в гидростатике.
+            tendency_limiter: ``'physical_clip'``/``'scale_diff'``.
+            tendency_caps: поэлементные капы приращения по переменной.
+        """
         super().__init__()
         self.PDE_kernels = nn.ModuleList([])
         for _ in range(depth):
@@ -478,6 +646,15 @@ class PDE_block(nn.Module):
                     inverse_time=inverse_time,
                     physics_part_coef=physics_part_coef,
                     w_diagnostic=w_diagnostic,
+                    lat_start_deg=lat_start_deg,
+                    dlat_deg=dlat_deg,
+                    dlon_deg=dlon_deg,
+                    grid_h=grid_h,
+                    coriolis_formulation=coriolis_formulation,
+                    t_t_formulation=t_t_formulation,
+                    use_universal_R=use_universal_R,
+                    tendency_limiter=tendency_limiter,
+                    tendency_caps=tendency_caps,
                 )
             )
 
@@ -797,7 +974,8 @@ class PredFormer_Model(nn.Module):
             x: Входной тензор формы [B, C, H, W], где C - число каналов (обычно 65)
 
         Returns:
-            zquvtw: Тензор формы [B, H//4, W//4, C] - пространственно понижающее преобразование и перестановка осей
+            zquvtw: Тензор формы [B, H//4, W//4, C] — пространственное понижение
+                и перестановка осей.
         """
         # x имеет форму [B, C, H, W]
         B, C, H, W = x.shape
@@ -833,7 +1011,7 @@ class PredFormer_Model(nn.Module):
             zquvtw = self.x_to_zquvtw(x_patch)
             x_patch = zquvtw.clone()
 
-            for j in range(12):
+            for _ in range(12):
                 # Получаем физические эмбеддинги через hybrid_block
                 x_patch, zquvtw = self.hybrid_block(
                     x_patch, zquvtw
@@ -848,7 +1026,7 @@ class PredFormer_Model(nn.Module):
 
             x_gft_list.append(x_gft)
 
-        # Создаем новый список с нулевым тензором в начале и элементами из оригинального списка, исключая последний
+        # Новый список: нулевой тензор в начале + элементы прежнего без последнего
         zero_tensor = torch.zeros_like(x[:, 0, 4:, :, :], device=x.device)
         x_gft_list = [zero_tensor] + x_gft_list  # [B, 0, C-4, H, W] + [B, T-1, C-4, H, W]
         # Объединяем результаты в один тензор
@@ -895,7 +1073,7 @@ class PredFormer_Model(nn.Module):
         x_combined += self.pos_embedding.to(x.device)
 
         # PredFormer Encoder
-        for idx, blk in enumerate(self.blocks):
+        for blk in self.blocks:
             x_combined = blk(x_combined)
         # MLP head
         x = self.mlp_head(x_combined.reshape(-1, self.dim))
@@ -908,7 +1086,47 @@ class PredFormer_Model(nn.Module):
 
 
 class HybridBlock(nn.Module):
-    def __init__(self, dim, zquvtw_channel, depth, block_dt, inverse_time, physics_part_coef, w_diagnostic="plain"):
+    """Адаптивный роутер между PDE-эволюцией (физика) и conv-путём (AI)."""
+
+    def __init__(
+        self,
+        dim: int,
+        zquvtw_channel: int,
+        depth: int,
+        block_dt: float,
+        inverse_time: bool,
+        physics_part_coef: float | None,
+        w_diagnostic: str = "plain",
+        lat_start_deg: float = -70.0,
+        dlat_deg: float = 20.0,
+        dlon_deg: float = 22.5,
+        grid_h: int = 8,
+        coriolis_formulation: str = "spherical",
+        t_t_formulation: str = "adiabatic_omega",
+        use_universal_R: bool = False,
+        tendency_limiter: str = "physical_clip",
+        tendency_caps: dict[str, float] | None = None,
+    ):
+        """Строит стек ``PDE_block`` и обучаемый роутер-вес.
+
+        Args:
+            dim: число каналов x-пути (и роутер-веса).
+            zquvtw_channel: число уровней давления на переменную (variable_dim).
+            depth: число ядер в ``PDE_block``.
+            block_dt: физический шаг интегрирования (с).
+            inverse_time: инверсия знака шага.
+            physics_part_coef: вес физической ветки (или ``None`` для обучаемой).
+            w_diagnostic: диагностика ω (``'plain'``/``'mass_consistent'``).
+            lat_start_deg: широта южной строки латента (град).
+            dlat_deg: шаг по широте (град).
+            dlon_deg: шаг по долготе (град).
+            grid_h: число строк по широте (H).
+            coriolis_formulation: ``'spherical'``/``'beta_plane'``.
+            t_t_formulation: ``'adiabatic_omega'``/``'legacy_paper'``.
+            use_universal_R: R=8.314 вместо R_d в гидростатике.
+            tendency_limiter: ``'physical_clip'``/``'scale_diff'``.
+            tendency_caps: поэлементные капы приращения по переменной.
+        """
         super().__init__()
 
         self.pde_block = PDE_block(
@@ -919,15 +1137,24 @@ class HybridBlock(nn.Module):
             inverse_time=inverse_time,
             physics_part_coef=physics_part_coef,
             w_diagnostic=w_diagnostic,
+            lat_start_deg=lat_start_deg,
+            dlat_deg=dlat_deg,
+            dlon_deg=dlon_deg,
+            grid_h=grid_h,
+            coriolis_formulation=coriolis_formulation,
+            t_t_formulation=t_t_formulation,
+            use_universal_R=use_universal_R,
+            tendency_limiter=tendency_limiter,
+            tendency_caps=tendency_caps,
         )
         self.router_weight = nn.Parameter(torch.zeros(1, 1, 1, dim), requires_grad=True)
 
     def forward(self, x, zquvtw=None):
-
         feat_pde, zquvtw = self.pde_block(x, zquvtw)
 
-        # Adaptive Router
-        weight_AI = 0.5 * torch.ones_like(x) + self.router_weight
-        weight_Physics = 0.5 * torch.ones_like(x) - self.router_weight
-        x = weight_AI * zquvtw + weight_Physics * feat_pde
+        # Adaptive Router. zquvtw = PDE-эволюция (физический путь);
+        # feat_pde = conv-heavy x-путь (AI). Имена весов сопоставлены содержимому.
+        weight_physics = 0.5 * torch.ones_like(x) + self.router_weight
+        weight_ai = 0.5 * torch.ones_like(x) - self.router_weight
+        x = weight_physics * zquvtw + weight_ai * feat_pde
         return x, zquvtw

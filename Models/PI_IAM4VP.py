@@ -1,13 +1,14 @@
 import math
 import warnings
 
+import h5netcdf
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
 
 from .imvp_modules import Attention, CircularConvSC, ConvNeXt_block, ConvNeXt_bottle
 from .PredFormerGFT_HybridBlock import HybridBlock
-
 
 PRESSURE_LEVELS_HPA: tuple[int, ...] = (
     50,
@@ -133,7 +134,7 @@ class Predictor(nn.Module):
 
         self.N_T = N_T
         st_block = [ConvNeXt_bottle(dim=channel_in)]
-        for i in range(0, N_T):
+        for _ in range(N_T):
             st_block.append(ConvNeXt_block(dim=channel_in))
 
         self.st_block = nn.Sequential(*st_block)
@@ -224,6 +225,17 @@ class IAM4VP(nn.Module):
         physics_residual_humidity_mode="as_is",
         physics_residual_tendency_clip=0.0,
         physics_w_diagnostic="plain",
+        physics_horizon_seconds: float = 3600.0,
+        physics_lat_start_deg: float = -70.0,
+        physics_dlat_deg: float = 20.0,
+        physics_dlon_deg: float = 22.5,
+        physics_coriolis_formulation: str = "spherical",
+        physics_t_t_formulation: str = "adiabatic_omega",
+        physics_use_universal_R: bool = False,
+        physics_tendency_limiter: str = "physical_clip",
+        physics_tendency_caps: dict[str, float] | None = None,
+        physics_tendency_on_latent: bool = True,
+        physics_prior_detach: bool = False,
         use_diabatic_term=False,
         diabatic_hidden_channels=64,
         diabatic_lambda_l1=0.0,
@@ -247,18 +259,10 @@ class IAM4VP(nn.Module):
         self.lp_phys = LP(C_data, hid_S, N_S)
         if physics_w_diagnostic not in ("plain", "mass_consistent"):
             raise ValueError(
-                f"physics_w_diagnostic must be 'plain' or 'mass_consistent', got {physics_w_diagnostic!r}"
+                "physics_w_diagnostic must be 'plain' or 'mass_consistent', "
+                f"got {physics_w_diagnostic!r}"
             )
         self.physics_w_diagnostic = physics_w_diagnostic
-        self.hybrid_block = HybridBlock(
-            dim=C_data - 4,
-            zquvtw_channel=13,
-            depth=3,
-            block_dt=1200,
-            inverse_time=False,
-            physics_part_coef=0.5,
-            w_diagnostic=physics_w_diagnostic,
-        )
 
         self.skip_mask_token = nn.Parameter(torch.zeros(T_data, hid_S, H_data, W_data))
         self.embed_1_mask_token = nn.Parameter(torch.zeros(T_data, hid_S, H_data // 2, W_data // 2))
@@ -282,6 +286,20 @@ class IAM4VP(nn.Module):
         self.physics_residual_input_space = physics_residual_input_space
         self.physics_residual_humidity_mode = physics_residual_humidity_mode
         self.physics_residual_tendency_clip = float(physics_residual_tendency_clip or 0.0)
+        self.physics_horizon_seconds = float(physics_horizon_seconds)
+        if self.physics_horizon_seconds <= 0:
+            raise ValueError(
+                f"physics_horizon_seconds must be > 0, got {self.physics_horizon_seconds!r}"
+            )
+        self.physics_lat_start_deg = float(physics_lat_start_deg)
+        self.physics_dlat_deg = float(physics_dlat_deg)
+        self.physics_dlon_deg = float(physics_dlon_deg)
+        self.physics_coriolis_formulation = physics_coriolis_formulation
+        self.physics_t_t_formulation = physics_t_t_formulation
+        self.physics_use_universal_R = bool(physics_use_universal_R)
+        self.physics_tendency_limiter = physics_tendency_limiter
+        self.physics_tendency_on_latent = bool(physics_tendency_on_latent)
+        self.physics_prior_detach = bool(physics_prior_detach)
         self.freeze_iam4vp_for_residual_warmup = freeze_iam4vp_for_residual_warmup
         self.residual_warmup_epochs = int(residual_warmup_epochs)
         self._last_residual_aux_loss: torch.Tensor | None = None
@@ -357,13 +375,44 @@ class IAM4VP(nn.Module):
 
         self.surface_channels = 4
         self.upper_air_channels = C_data - self.surface_channels
+
+        # Build the physics prior AFTER the humidity/hybrid mode is resolved: the
+        # q-cap and geometry depend on it. grid_h = H_data // 4 (patch factor 4),
+        # block_dt splits the 1-hour horizon across depth*hybrid_steps kernel calls.
+        if physics_tendency_caps is None:
+            physics_tendency_caps = {"z": 500.0, "t": 5.0, "q": 5.0, "u": 10.0, "v": 10.0}
+            if self.physics_residual_humidity_mode == "relative_to_specific":
+                # Kernel then sees specific humidity q (kg/kg); cap in kg/kg.
+                physics_tendency_caps["q"] = 2e-3
+        self.physics_tendency_caps = physics_tendency_caps
+        hybrid_depth = 3
+        physics_block_dt = self.physics_horizon_seconds / (
+            hybrid_depth * max(1, self.physics_residual_hybrid_steps)
+        )
+        self.hybrid_block = HybridBlock(
+            dim=self.upper_air_channels,
+            zquvtw_channel=13,
+            depth=hybrid_depth,
+            block_dt=physics_block_dt,
+            inverse_time=False,
+            physics_part_coef=0.5,
+            w_diagnostic=self.physics_w_diagnostic,
+            lat_start_deg=self.physics_lat_start_deg,
+            dlat_deg=self.physics_dlat_deg,
+            dlon_deg=self.physics_dlon_deg,
+            grid_h=H_data // self.downscaling_factor_all,
+            coriolis_formulation=self.physics_coriolis_formulation,
+            t_t_formulation=self.physics_t_t_formulation,
+            use_universal_R=self.physics_use_universal_R,
+            tendency_limiter=self.physics_tendency_limiter,
+            tendency_caps=self.physics_tendency_caps,
+        )
+
         self.use_diabatic_term = bool(use_diabatic_term)
         self.diabatic_lambda_l1 = float(diabatic_lambda_l1)
         self.diabatic_head = None
         if self.use_diabatic_term and not self.use_physics_residual_corrector:
-            raise ValueError(
-                "use_diabatic_term=True requires use_physics_residual_corrector=True"
-            )
+            raise ValueError("use_diabatic_term=True requires use_physics_residual_corrector=True")
         if self.use_physics_residual_corrector:
             corrected_channels = (
                 self.upper_air_channels
@@ -382,9 +431,7 @@ class IAM4VP(nn.Module):
                 zero_init=physics_residual_zero_init,
             )
             if self.use_diabatic_term:
-                geo = self._load_static_geo(
-                    diabatic_constants_path, diabatic_cut, H_data, W_data
-                )
+                geo = self._load_static_geo(diabatic_constants_path, diabatic_cut, H_data, W_data)
                 self.register_buffer("diabatic_geo", geo)
                 self.diabatic_head = PhysicsTendencyResidualCorrector(
                     in_channels=corrected_channels + geo.shape[1],
@@ -413,16 +460,15 @@ class IAM4VP(nn.Module):
                     UserWarning,
                     stacklevel=2,
                 )
-            print(
-                "[PI-IAM4VP residual] channel layout: "
-                "surface=0:4, z=4:17, t=17:30, r=30:43, u=43:56, v=56:69"
-            )
-            print(
-                "[PI-IAM4VP residual] physics hybrid_mode="
+            warnings.warn(
+                "PI-IAM4VP residual channel layout: surface=0:4, z=4:17, "
+                "t=17:30, r=30:43, u=43:56, v=56:69; physics hybrid_mode="
                 f"{self.physics_residual_hybrid_mode}, input_space="
                 f"{self.physics_residual_input_space}, humidity_mode="
                 f"{self.physics_residual_humidity_mode}, tendency_clip="
-                f"{self.physics_residual_tendency_clip:g}"
+                f"{self.physics_residual_tendency_clip:g}",
+                UserWarning,
+                stacklevel=2,
             )
         else:
             self.physics_residual_corrector = None
@@ -442,9 +488,7 @@ class IAM4VP(nn.Module):
                 f"got {tuple(mean.shape)} and {tuple(std.shape)}"
             )
         if mean.numel() != self.C_data:
-            raise ValueError(
-                f"Expected {self.C_data} normalization channels, got {mean.numel()}"
-            )
+            raise ValueError(f"Expected {self.C_data} normalization channels, got {mean.numel()}")
         device = next(self.parameters()).device
         self.physics_data_mean = mean.view(1, -1, 1, 1).to(device=device)
         self.physics_data_std = std.view(1, -1, 1, 1).to(device=device)
@@ -539,9 +583,7 @@ class IAM4VP(nn.Module):
             humidity,
             u,
             v,
-            humidity_is_specific=(
-                self.physics_residual_humidity_mode == "relative_to_specific"
-            ),
+            humidity_is_specific=(self.physics_residual_humidity_mode == "relative_to_specific"),
             fallback_parts=fallback_parts,
         )
         return torch.cat([z, t, humidity, u, v], dim=1).permute(0, 2, 3, 1)
@@ -557,9 +599,7 @@ class IAM4VP(nn.Module):
             return prior
         tendency = prior - prev_state
         clipped = torch.clamp(tendency, min=-clip, max=clip)
-        self._last_physics_tendency_clip_ratio = (
-            (clipped != tendency).float().mean().detach()
-        )
+        self._last_physics_tendency_clip_ratio = (clipped != tendency).float().mean().detach()
         return prev_state + clipped
 
     def _hybrid_block_forward(
@@ -567,6 +607,25 @@ class IAM4VP(nn.Module):
         pred_phys: torch.Tensor,
         zquvtw: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run one HybridBlock step, forcing BatchNorm to eval in stable_physical.
+
+        In ``stable_physical`` mode every ``nn.BatchNorm`` inside
+        ``self.hybrid_block`` is forced to ``eval()`` for the call. Consequently
+        their running stats stay frozen at initialisation (running mean 0,
+        running var 1) forever, and BatchNorm acts purely as the learnable affine
+        ``gamma * x + beta``. This invariant is load-bearing: the hybrid working
+        space is in physical units, and eval-mode BN leaves those units intact.
+        Any new code path that runs the block in train mode would let the running
+        stats adapt to physical-unit activations and silently change the semantics
+        of the physics prior.
+
+        Args:
+            pred_phys: x-path latent ``(B, h, w, C)`` on the coarse grid.
+            zquvtw: physics-path latent ``(B, h, w, C)`` on the coarse grid.
+
+        Returns:
+            Tuple ``(x, zquvtw)``, each ``torch.Tensor`` of shape ``(B, h, w, C)``.
+        """
         if self.physics_residual_hybrid_mode != "stable_physical":
             return self.hybrid_block(pred_phys, zquvtw)
 
@@ -580,6 +639,26 @@ class IAM4VP(nn.Module):
         finally:
             for module, was_training in batch_norm_states:
                 module.train(was_training)
+
+    def _hybrid_bn_gamma_drift(self) -> torch.Tensor:
+        """Mean ``|gamma - 1|`` over all BatchNorm affine weights in the block.
+
+        Diagnostic only (reads parameters, runs no forward): tracks how far the
+        HybridBlock BatchNorm affine scale has drifted from its identity
+        initialisation. Cheap drift observability for the frozen-prior invariant.
+
+        Returns:
+            Scalar ``torch.Tensor`` (detached); zero if the block exposes no
+            affine BatchNorm weight.
+        """
+        drifts = [
+            (module.weight.detach() - 1.0).abs().mean()
+            for module in self.hybrid_block.modules()
+            if isinstance(module, nn.modules.batchnorm._BatchNorm) and module.weight is not None
+        ]
+        if not drifts:
+            return torch.zeros((), device=self.hybrid_block.router_weight.device)
+        return torch.stack(drifts).mean()
 
     @staticmethod
     def _avoid_small_abs(x: torch.Tensor, threshold: float = 1.0) -> torch.Tensor:
@@ -622,7 +701,8 @@ class IAM4VP(nn.Module):
             x: Входной тензор формы [B, C, H, W], где C - число каналов (обычно 65)
 
         Returns:
-            zquvtw: Тензор формы [B, H//4, W//4, C] - пространственно понижающее преобразование и перестановка осей
+            zquvtw: Тензор формы [B, H//4, W//4, C] — пространственно понижающее
+                преобразование и перестановка осей.
         """
         # x имеет форму [B, C, H, W]
         B, C, H, W = x.shape
@@ -652,8 +732,6 @@ class IAM4VP(nn.Module):
         native constants grid. These are the geographic drivers exp 05 flagged
         as the physics failure modes (mountains, tropics f->0).
         """
-        import h5netcdf
-        import numpy as np
         if path is None:
             raise ValueError("use_diabatic_term=True requires diabatic_constants_path")
         if cut is None:
@@ -664,9 +742,7 @@ class IAM4VP(nn.Module):
             lsm = np.asarray(f.variables["lsm"], dtype=np.float32)[la0:la1, lo0:lo1]
             lat2d = np.asarray(f.variables["lat2d"], dtype=np.float32)[la0:la1, lo0:lo1]
         if orog.shape != (H, W):
-            raise ValueError(
-                f"geo crop {orog.shape} != ({H},{W}); check diabatic_cut {cut}"
-            )
+            raise ValueError(f"geo crop {orog.shape} != ({H},{W}); check diabatic_cut {cut}")
         orog_n = (orog - orog.mean()) / (orog.std() + 1e-6)
         abslat_n = np.abs(lat2d) / 90.0
         geo = np.stack([orog_n, abslat_n, lsm], axis=0)[None]
@@ -680,6 +756,21 @@ class IAM4VP(nn.Module):
         ``stable_physical`` temporarily denormalizes, converts r<->q around the
         HybridBlock, clamps nonphysical values, then returns to normalized
         69-channel space before building the tendency.
+
+        When ``physics_tendency_on_latent`` is True the evolved upper-air state is
+        ``hybrid_input + up(pred_latent - state_latent)``: only the latent-grid
+        physics increment is upsampled, so the prior differs from the input by
+        physics alone rather than by the coarse<->fine resampling residual of the
+        whole state. When False the legacy path upsamples the evolved latent state
+        directly.
+
+        Args:
+            prev_state: normalized state ``torch.Tensor`` of shape ``(B, C, H, W)``
+                with ``C = 69`` (surface 0:4, then z/t/r/u/v blocks of 13).
+
+        Returns:
+            ``torch.Tensor`` of shape ``(B, C, H, W)`` — the physics prior in the
+            same normalized space as ``prev_state``.
         """
         _, _, H, W = prev_state.shape
         latent_h = H // self.downscaling_factor_all
@@ -719,30 +810,35 @@ class IAM4VP(nn.Module):
             hybrid_input = prev_state[:, self.surface_channels :, :, :]
             hybrid_input = self._finite_or_fallback(hybrid_input, torch.zeros_like(hybrid_input))
 
-        pred_phys = self.x_to_zquvtw(hybrid_input)
-        zquvtw = pred_phys
+        state_coarse = self.x_to_zquvtw(hybrid_input)
+        pred_phys = state_coarse
+        zquvtw = state_coarse
         for _ in range(self.physics_residual_hybrid_steps):
             pred_phys, zquvtw = self._hybrid_block_forward(pred_phys, zquvtw)
+            self._last_physics_nonfinite_ratio = torch.maximum(
+                self._last_physics_nonfinite_ratio,
+                self._nonfinite_ratio(pred_phys).detach(),
+            )
             if self.physics_residual_hybrid_mode == "stable_physical":
-                fallback = self.x_to_zquvtw(hybrid_input)
-                self._last_physics_nonfinite_ratio = torch.maximum(
-                    self._last_physics_nonfinite_ratio,
-                    self._nonfinite_ratio(pred_phys).detach(),
-                )
-                pred_phys = self._sanitize_hybrid_latent_physical(pred_phys, fallback)
-                zquvtw = self._sanitize_hybrid_latent_physical(zquvtw, fallback)
+                # F14: reuse the once-computed coarse state as the sanitize fallback.
+                pred_phys = self._sanitize_hybrid_latent_physical(pred_phys, state_coarse)
+                zquvtw = self._sanitize_hybrid_latent_physical(zquvtw, state_coarse)
             else:
-                self._last_physics_nonfinite_ratio = torch.maximum(
-                    self._last_physics_nonfinite_ratio,
-                    self._nonfinite_ratio(pred_phys).detach(),
-                )
                 pred_phys = self._finite_or_fallback(pred_phys, zquvtw)
                 zquvtw = self._finite_or_fallback(zquvtw, pred_phys)
 
-        pred_phys = pred_phys.permute(0, 3, 1, 2)
-        pred_phys = F.interpolate(pred_phys, size=(H, W), mode="bilinear")
+        if self.physics_tendency_on_latent:
+            # F4: upsample only the latent physics increment and add it to the
+            # working-space input, so the prior carries physics alone rather than
+            # the coarse<->fine resampling residual of the whole state.
+            evolved_upper = (pred_phys - state_coarse).permute(0, 3, 1, 2)
+            evolved_upper = F.interpolate(evolved_upper, size=(H, W), mode="bilinear")
+            evolved_upper = hybrid_input + evolved_upper
+        else:
+            evolved_upper = pred_phys.permute(0, 3, 1, 2)
+            evolved_upper = F.interpolate(evolved_upper, size=(H, W), mode="bilinear")
         if self.physics_residual_hybrid_mode == "stable_physical":
-            z_new, t_new, humidity_new, u_new, v_new = pred_phys.chunk(5, dim=1)
+            z_new, t_new, humidity_new, u_new, v_new = evolved_upper.chunk(5, dim=1)
             fallback_parts = (
                 prev_physical[:, 4:17],
                 prev_physical[:, 17:30],
@@ -790,7 +886,7 @@ class IAM4VP(nn.Module):
             prior = self._normalize_state(prior_physical)
             prior = self._finite_or_fallback(prior, prev_state)
             return self._clip_normalized_tendency(prior, prev_state)
-        prior = torch.cat([prev_state[:, : self.surface_channels, :, :], pred_phys], dim=1)
+        prior = torch.cat([prev_state[:, : self.surface_channels, :, :], evolved_upper], dim=1)
         return self._finite_or_fallback(prior, prev_state)
 
     def _residual_slice(self, x: torch.Tensor) -> torch.Tensor:
@@ -814,6 +910,10 @@ class IAM4VP(nn.Module):
             y_phys = self._physics_prior_from_state(prev_state)
             if self.physics_residual_shuffle == "batch" and y_phys.shape[0] > 1:
                 y_phys = torch.roll(y_phys, shifts=1, dims=0)
+        if self.physics_prior_detach:
+            # F5: freeze the physics feature generator — no task-loss gradient into
+            # the HybridBlock convs / BN affine / router through the corrector path.
+            y_phys = y_phys.detach()
 
         delta_phys = self._finite_or_fallback(
             y_phys - prev_state,
@@ -839,9 +939,7 @@ class IAM4VP(nn.Module):
             geo = self.diabatic_geo.to(dtype=st.dtype, device=st.device)
             geo = geo.expand(st.shape[0], -1, -1, -1)
             diabatic_term = self.diabatic_head(torch.cat([st, geo], dim=1))
-            diabatic_term = self._finite_or_fallback(
-                diabatic_term, torch.zeros_like(diabatic_term)
-            )
+            diabatic_term = self._finite_or_fallback(diabatic_term, torch.zeros_like(diabatic_term))
             correction = correction + diabatic_term
 
         if self.physics_residual_apply_to == "upper_air_only":
@@ -869,8 +967,7 @@ class IAM4VP(nn.Module):
         )
         if diabatic_term is not None and self.diabatic_lambda_l1 > 0:
             self._last_residual_aux_loss = (
-                self._last_residual_aux_loss
-                + self.diabatic_lambda_l1 * diabatic_term.abs().mean()
+                self._last_residual_aux_loss + self.diabatic_lambda_l1 * diabatic_term.abs().mean()
             )
 
         correction_flat = correction_for_cosine.detach().flatten(1).float()
@@ -891,8 +988,7 @@ class IAM4VP(nn.Module):
         )
         self._last_residual_diagnostics = {
             "physics_residual_correction_rms": correction_rms,
-            "physics_residual_correction_to_prediction_ratio": correction_rms
-            / (y_nn_rms + 1e-8),
+            "physics_residual_correction_to_prediction_ratio": correction_rms / (y_nn_rms + 1e-8),
             "physics_residual_tendency_rms": tendency_rms,
             "physics_residual_correction_to_tendency_cosine": cosine,
             "physics_residual_pi_minus_iam4vp_rms": self._rms((y_hat - y_nn).detach()),
@@ -904,6 +1000,13 @@ class IAM4VP(nn.Module):
                 else torch.zeros((), device=y_nn.device)
             ),
         }
+        if self.physics_feature_mode != "no_physics":
+            self._last_residual_diagnostics["physics_router_weight_abs"] = (
+                self.hybrid_block.router_weight.detach().abs().mean()
+            )
+            self._last_residual_diagnostics["physics_hybrid_bn_gamma_drift"] = (
+                self._hybrid_bn_gamma_drift()
+            )
         return y_hat
 
     def physics_residual_aux_loss(self) -> torch.Tensor | None:
@@ -965,7 +1068,7 @@ class IAM4VP(nn.Module):
                 zquvtw = self.x_to_zquvtw(pred_phys)
                 pred_phys = zquvtw
 
-                for j in range(3):
+                for _ in range(3):
                     # Получаем физические эмбеддинги через hybrid_block
                     pred_phys, zquvtw = self.hybrid_block(
                         pred_phys, zquvtw
