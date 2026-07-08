@@ -71,6 +71,14 @@ class GridConfig:
             ``utils.regions.USA_CROP``) передавайте свои значения, чтобы
             ``pixel_x``, ``pixel_y`` и Coriolis-буферы соответствовали
             реальным широтам данных.
+        latitudes_deg: явные широты строк данных в градусах (длина H,
+            равномерный шаг). Если заданы, используются вместо
+            ``lat_range_deg``-конструкции — это точный способ совместить
+            ``pixel_x``/``pixel_y``/Кориолис с реальной сеткой WeatherBench
+            (глобус 1.40625°: −89.296875…89.296875 несовместим с
+            ``linspace(-90, 90, H+2)[1:-1]``, дающим шаг 1.3953°; см.
+            docs/experiments/14_uv_residual_improvement). Дефолт ``None`` —
+            прежнее поведение бит-в-бит.
     """
 
     H: int
@@ -93,6 +101,7 @@ class GridConfig:
     pixel_z_values: tuple[int, ...] = (50, 50, 50, 50, 50, 75, 100, 100, 100, 125, 112, 75, 75)
     radius: float = 6371.0 * 1000.0
     lat_range_deg: tuple[float, float] = (-90.0, 90.0)
+    latitudes_deg: tuple[float, ...] | None = None
 
 
 class Grid(nn.Module):
@@ -118,23 +127,37 @@ class Grid(nn.Module):
         self.config = config
         H, W = config.H, config.W
 
-        lat_low, lat_high = config.lat_range_deg
-        if not (-90.0 <= lat_low < lat_high <= 90.0):
-            raise ValueError(
-                f"Invalid lat_range_deg {config.lat_range_deg!r}: expected "
-                "(low, high) with -90 ≤ low < high ≤ 90."
-            )
-        # linspace(low, high, H+2)[1:-1] — равномерная сетка широт в указанном
-        # диапазоне без крайних точек.
-        latitudes_deg = torch.linspace(lat_low, lat_high, steps=H + 2)[1:-1]
+        if config.latitudes_deg is not None:
+            latitudes_deg = torch.tensor(config.latitudes_deg, dtype=torch.float32)
+            if latitudes_deg.numel() != H:
+                raise ValueError(
+                    f"latitudes_deg has {latitudes_deg.numel()} entries, expected H={H}."
+                )
+            lat_steps = latitudes_deg[1:] - latitudes_deg[:-1]
+            if not bool((lat_steps > 0).all()):
+                raise ValueError("latitudes_deg must be strictly ascending (south→north rows).")
+            if float((lat_steps - lat_steps[0]).abs().max()) > 1e-4:
+                raise ValueError("latitudes_deg must be uniformly spaced.")
+            pixel_y_value = float(lat_steps[0]) / 180.0 * torch.pi * config.radius
+        else:
+            lat_low, lat_high = config.lat_range_deg
+            if not (-90.0 <= lat_low < lat_high <= 90.0):
+                raise ValueError(
+                    f"Invalid lat_range_deg {config.lat_range_deg!r}: expected "
+                    "(low, high) with -90 ≤ low < high ≤ 90."
+                )
+            # linspace(low, high, H+2)[1:-1] — равномерная сетка широт в указанном
+            # диапазоне без крайних точек.
+            latitudes_deg = torch.linspace(lat_low, lat_high, steps=H + 2)[1:-1]
+            # pixel_y соответствует длине одного шага широты в метрах:
+            # (high - low) [deg] / (H + 1) * π/180 * R.
+            lat_span_rad = (lat_high - lat_low) / 180.0 * torch.pi
+            pixel_y_value = lat_span_rad * config.radius / (H + 1)
 
         latitudes = latitudes_deg / 180.0 * torch.pi  # (H,)
         c_lats = 2 * torch.pi * config.radius * torch.cos(latitudes)
         pixel_x = (c_lats / W).reshape(1, 1, H, 1)
-        # pixel_y соответствует длине одного шага широты в метрах:
-        # (high - low) [deg] / (H + 1) * π/180 * R.
-        lat_span_rad = (lat_high - lat_low) / 180.0 * torch.pi
-        pixel_y = torch.tensor([lat_span_rad * config.radius / (H + 1)])
+        pixel_y = torch.tensor([pixel_y_value])
 
         pressure_hpa = torch.tensor(config.pressure_levels, dtype=torch.float32)
         pressure = (pressure_hpa * 100.0).reshape(1, -1, 1, 1)  # Па
@@ -198,6 +221,33 @@ def integral_z(field: torch.Tensor, M_z: torch.Tensor) -> torch.Tensor:
     return out.reshape(B, P, H, W)
 
 
+def _lagrange3_dz_matrix(pressure_hpa: torch.Tensor) -> torch.Tensor:
+    """Матрица −∂/∂p (1/гПа) 3-точечной производной Лагранжа на нерегулярной сетке.
+
+    Для внутренних уровней — центрированный шаблон (i−1, i, i+1), на краях —
+    односторонний трёхточечный; второй порядок точности при любом шаге
+    (Fornberg, 1988). Знак — вертикальная конвенция ядра ζ = −p.
+
+    Args:
+        pressure_hpa: torch.Tensor формы (P,) — давления уровней в гПа,
+            строго возрастающие.
+
+    Returns:
+        torch.Tensor формы (P, P): d_z(f) = matrix @ f = −∂f/∂p.
+    """
+    n_levels = pressure_hpa.numel()
+    p64 = pressure_hpa.double()
+    matrix = torch.zeros(n_levels, n_levels, dtype=torch.float64)
+    for i in range(n_levels):
+        j = min(max(i, 1), n_levels - 2)
+        x0, x1, x2 = p64[j - 1], p64[j], p64[j + 1]
+        xi = p64[i]
+        matrix[i, j - 1] = (2 * xi - x1 - x2) / ((x0 - x1) * (x0 - x2))
+        matrix[i, j] = (2 * xi - x0 - x2) / ((x1 - x0) * (x1 - x2))
+        matrix[i, j + 1] = (2 * xi - x0 - x1) / ((x2 - x0) * (x2 - x1))
+    return (-matrix).float()
+
+
 BoundaryMode = Literal["periodic", "reflect", "replicate"]
 
 
@@ -212,6 +262,14 @@ class FiniteDifference(nn.Module):
             циклична, а 'reflect' через полюс физически бессмыслен.
         boundary_z: то же для оси P (pressure). Дефолт 'replicate'; 'periodic'
             запрещён (давление не цикличное).
+        rows_south_to_north: ориентация оси H относительно данных.
+            ``None`` (дефолт) — легаси-поведение бит-в-бит: d_y считает, что
+            индекс строки растёт К ЮГУ (см. docstring :meth:`d_y`).
+            ``True`` — строки данных идут юг→север (порядок WeatherBench
+            1.40625°: lat = −89.297…+89.297 по возрастанию), d_y возвращает
+            +∂/∂y. Знаковый баг диагностики FD-4 найден в эксперименте 14:
+            на данных с возрастающей широтой легаси d_y даёт −∂/∂y, что
+            переворачивает меридиональный барический градиент в v-уравнении.
 
     Семантика опций:
         * 'periodic' — настоящая периодика: cat(last2, …, first2) на циклической
@@ -229,6 +287,7 @@ class FiniteDifference(nn.Module):
         boundary_x: BoundaryMode = "periodic",
         boundary_y: BoundaryMode = "replicate",
         boundary_z: BoundaryMode = "replicate",
+        rows_south_to_north: bool | None = None,
     ):
         super().__init__()
         if boundary_z == "periodic":
@@ -240,6 +299,7 @@ class FiniteDifference(nn.Module):
         self.boundary_x = boundary_x
         self.boundary_y = boundary_y
         self.boundary_z = boundary_z
+        self.rows_south_to_north = rows_south_to_north
 
     @staticmethod
     def _pad_2d(field: torch.Tensor, dim: int, boundary: BoundaryMode) -> torch.Tensor:
@@ -296,6 +356,11 @@ class FiniteDifference(nn.Module):
         упорядочено high→low), а y-координата (метров) растёт к северу. Этот
         знак сохранён байт-в-байт из оригинальной физики, чтобы новая семья
         давала те же численные значения на тех же входах.
+
+        При ``rows_south_to_north=True`` (данные упорядочены юг→север, как в
+        WeatherBench-файлах 1.40625°) результат отрицается: d_y = +∂/∂y для
+        строк, растущих к северу. Отрицание в IEEE-754 точное, легаси-ветка
+        не затрагивается.
         """
         B, C, H, W = field.shape
         kernel = torch.zeros([1, 1, 5, 1], device=field.device, dtype=field.dtype)
@@ -308,6 +373,8 @@ class FiniteDifference(nn.Module):
         _, _, H_, W_ = padded.shape
         out = F.conv2d(padded.reshape(B * C, 1, H_, W_), kernel) / 12.0
         out = out.reshape(B, C, H, W)
+        if self.rows_south_to_north:
+            out = -out
         return out / self.grid.pixel_y
 
     def d_z(self, field: torch.Tensor) -> torch.Tensor:
@@ -347,6 +414,11 @@ class WENO5(nn.Module):
         boundary_y: то же для оси H (lat). Дефолт 'replicate'.
         boundary_z: 'replicate' или 'reflect' для оси P (pressure); 'periodic'
             запрещён (давление не цикличное). Дефолт 'replicate'.
+        rows_south_to_north: ориентация оси H. ``None`` (дефолт) — легаси
+            бит-в-бит: d_y = +∂/∂j (в отличие от FD-4-семейства, где легаси
+            d_y = −∂/∂j — исторический рассинхрон двух стенсилей).
+            ``True`` — данные юг→север, d_y = +∂/∂y (совпадает с легаси).
+            ``False`` — данные север→юг, d_y отрицается.
     """
 
     def __init__(
@@ -356,6 +428,7 @@ class WENO5(nn.Module):
         boundary_x: BoundaryMode = "periodic",
         boundary_y: BoundaryMode = "replicate",
         boundary_z: BoundaryMode = "replicate",
+        rows_south_to_north: bool | None = None,
     ):
         super().__init__()
         if boundary_z == "periodic":
@@ -367,6 +440,7 @@ class WENO5(nn.Module):
         self.boundary_x = boundary_x
         self.boundary_y = boundary_y
         self.boundary_z = boundary_z
+        self.rows_south_to_north = rows_south_to_north
 
     def _weno5_flux(self, u: torch.Tensor, boundary: BoundaryMode) -> torch.Tensor:
         eps = self.epsilon
@@ -439,7 +513,10 @@ class WENO5(nn.Module):
         flat = perm.reshape(B * C * W, H)
         dy = self.grid.pixel_y
         deriv = self._weno_derivative(flat, dy, self.boundary_y)
-        return deriv.reshape(B, C, W, H).permute(0, 1, 3, 2)
+        out = deriv.reshape(B, C, W, H).permute(0, 1, 3, 2)
+        if self.rows_south_to_north is False:
+            out = -out
+        return out
 
     def d_z(self, field: torch.Tensor) -> torch.Tensor:
         """FD-4 по давлению; 'periodic' по pressure запрещён в __init__."""
@@ -521,6 +598,21 @@ class PurePDEKernel(nn.Module):
               ``Q = −L·z_z·w`` — дословно eq. (17)-(18) WeatherGFT paper.
               Известно даёт overflow в первом substep (см.
               ``tools/diagnose_first_substep.py``). Доступно для регрессии.
+        rows_south_to_north: ориентация строк данных для d_y (см.
+            :class:`FiniteDifference`). ``None`` — легаси бит-в-бит.
+        metric_terms: члены кривизны сферы в уравнениях движения
+            (+u·v·tanφ/a, −u²·tanφ/a; Holton & Hakim ур. 2.19–2.20).
+            Дефолт False.
+        spherical_divergence: метрический член −v·tanφ/a в дивергенции
+            континуити (``get_w``). Дефолт False.
+        vertical_scheme: ``'stencil'`` (легаси FD-4/Δp) или ``'lagrange3'``
+            (точная 3-точечная производная на нерегулярной p-сетке).
+            Дефолт 'stencil'.
+        rayleigh_friction: линейное трение Held–Suarez (1994) в пограничном
+            слое (σ > σ_b). Дефолт False.
+        rayleigh_kf_per_day: k_f трения, 1/сутки. Дефолт 1.0 (Held & Suarez).
+        rayleigh_sigma_b: σ_b — верхняя граница пограничного слоя в σ-коорд.
+            Дефолт 0.7 (Held & Suarez).
     """
 
     def __init__(
@@ -542,6 +634,13 @@ class PurePDEKernel(nn.Module):
         polar_filter_lat_deg: float = 60.0,
         advection_form: Literal["advective", "flux"] = "advective",
         w_diagnostic: Literal["plain", "mass_consistent"] = "plain",
+        rows_south_to_north: bool | None = None,
+        metric_terms: bool = False,
+        spherical_divergence: bool = False,
+        vertical_scheme: Literal["stencil", "lagrange3"] = "stencil",
+        rayleigh_friction: bool = False,
+        rayleigh_kf_per_day: float = 1.0,
+        rayleigh_sigma_b: float = 0.7,
     ):
         super().__init__()
         self.grid = grid
@@ -557,14 +656,61 @@ class PurePDEKernel(nn.Module):
 
         if stencil == "fd4":
             self.diff = FiniteDifference(
-                grid, boundary_x=boundary_x, boundary_y=boundary_y, boundary_z=boundary_z
+                grid,
+                boundary_x=boundary_x,
+                boundary_y=boundary_y,
+                boundary_z=boundary_z,
+                rows_south_to_north=rows_south_to_north,
             )
         elif stencil == "weno5":
             self.diff = WENO5(
-                grid, boundary_x=boundary_x, boundary_y=boundary_y, boundary_z=boundary_z
+                grid,
+                boundary_x=boundary_x,
+                boundary_y=boundary_y,
+                boundary_z=boundary_z,
+                rows_south_to_north=rows_south_to_north,
             )
         else:
             raise ValueError(f"Unknown stencil {stencil!r}")
+
+        # Эксперимент 14: сферическая геометрия и параметризации (все opt-in).
+        # metric_terms — члены кривизны +u·v·tanφ/a (u_t), −u²·tanφ/a (v_t):
+        # Holton & Hakim, 5th ed., ур. (2.19)–(2.20). spherical_divergence —
+        # меридиональный метрический член континуити: ∇·V на сфере содержит
+        # (1/(a·cosφ))·∂(v·cosφ)/∂φ = ∂v/∂y − v·tanφ/a. rayleigh_friction —
+        # линейное трение пограничного слоя Held & Suarez (1994, BAMS 75):
+        # k_v(σ) = k_f·max(0, (σ−σ_b)/(1−σ_b)), σ = p/p₀, p₀ = 1000 гПа.
+        self.metric_terms = metric_terms
+        self.spherical_divergence = spherical_divergence
+        self.rayleigh_friction = rayleigh_friction
+        if metric_terms or spherical_divergence:
+            tan_over_a = torch.tan(grid.latitudes).reshape(1, 1, -1, 1) / grid.config.radius
+            self.register_buffer("tan_phi_over_a", tan_over_a)
+        else:
+            self.tan_phi_over_a = None
+        if rayleigh_friction:
+            sigma = grid.pressure / 1.0e5  # p₀ = 1000 гПа = 1e5 Па
+            k_v = (rayleigh_kf_per_day / 86400.0) * torch.clamp(
+                (sigma - rayleigh_sigma_b) / (1.0 - rayleigh_sigma_b), min=0.0
+            )
+            self.register_buffer("rayleigh_k", k_v)  # (1, P, 1, 1), 1/с
+        else:
+            self.rayleigh_k = None
+
+        # Вертикальная производная на НЕРАВНОМЕРНОЙ сетке уровней давления.
+        # 'stencil' (дефолт) — легаси FD-4 с делением на локальный Δp (несёт
+        # систематическую ошибку у скачков шага 300→400 и 700→850 гПа).
+        # 'lagrange3' — точная 3-точечная производная Лагранжа по реальным
+        # p-уровням (2-й порядок на любой сетке), односторонняя на краях;
+        # знак — конвенция ядра d_z = −∂/∂p [1/гПа].
+        if vertical_scheme not in ("stencil", "lagrange3"):
+            raise ValueError(f"Unknown vertical_scheme {vertical_scheme!r}")
+        self.vertical_scheme = vertical_scheme
+        if vertical_scheme == "lagrange3":
+            pressure_hpa = self.grid.pressure.reshape(-1) / 100.0
+            self.register_buffer("dz_lagrange", _lagrange3_dz_matrix(pressure_hpa))
+        else:
+            self.dz_lagrange = None
 
         # ∇⁴-гипердиффузия — НЕЯВНЫЙ зональный спектральный фильтр
         # (анти-алиасинг, scale-selective замена scale_diff).
@@ -740,6 +886,16 @@ class PurePDEKernel(nn.Module):
 
     # ----- RHS computations (no autograd-breaking) -----
 
+    def _d_z(self, field: torch.Tensor) -> torch.Tensor:
+        """Вертикальная производная в конвенции ядра (−∂/∂p, 1/гПа).
+
+        ``vertical_scheme='stencil'`` (дефолт) — легаси ``diff.d_z`` бит-в-бит;
+        ``'lagrange3'`` — точная производная на нерегулярной p-сетке.
+        """
+        if self.vertical_scheme == "lagrange3":
+            return torch.einsum("pq,bqhw->bphw", self.dz_lagrange, field)
+        return self.diff.d_z(field)
+
     def _horiz_adv(self, field: torch.Tensor, u: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         """Горизонтальный перенос поля X потоком (u, v).
 
@@ -768,6 +924,8 @@ class PurePDEKernel(nn.Module):
         накопления дрейфа массы по вертикали.
         """
         div = self.diff.d_x(u) + self.diff.d_y(v)
+        if self.spherical_divergence:
+            div = div - v * self.tan_phi_over_a
         if self.w_diagnostic == "mass_consistent":
             pz = self.grid.pixel_z  # (1,P,1,1) hPa
             div_bar = (div * pz).sum(dim=1, keepdim=True) / pz.sum()
@@ -783,12 +941,26 @@ class PurePDEKernel(nn.Module):
         z_y: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Tendency для (u, v) — momentum (горизонт. адвекция через _horiz_adv:
-        advective или flux-форма по self.advection_form)."""
-        u_z = self.diff.d_z(u)
-        v_z = self.diff.d_z(v)
+        advective или flux-форма по self.advection_form).
+
+        Опциональные члены эксперимента 14 (дефолт — выключены):
+
+        * ``metric_terms``: кривизна сферы +u·v·tanφ/a (u_t), −u²·tanφ/a (v_t)
+          — Holton & Hakim, ур. (2.19)–(2.20);
+        * ``rayleigh_friction``: −k_v(σ)·u, −k_v(σ)·v — линейное трение
+          пограничного слоя Held & Suarez (1994).
+        """
+        u_z = self._d_z(u)
+        v_z = self._d_z(v)
         f = self.f_field
         u_t = self._horiz_adv(u, u, v) - w * u_z + f * v - z_x
         v_t = self._horiz_adv(v, u, v) - w * v_z - f * u - z_y
+        if self.metric_terms:
+            u_t = u_t + self.tan_phi_over_a * u * v
+            v_t = v_t - self.tan_phi_over_a * u * u
+        if self.rayleigh_friction:
+            u_t = u_t - self.rayleigh_k * u
+            v_t = v_t - self.rayleigh_k * v
         return u_t, v_t
 
     def get_t_t(
@@ -812,7 +984,7 @@ class PurePDEKernel(nn.Module):
           ``(Q − z_z·w)/c_p`` с ``Q = −L·z_z·w``. Документально точная,
           но даёт overflow в первый substep на ERA5.
         """
-        t_z = self.diff.d_z(t)
+        t_z = self._d_z(t)
         adv = self._horiz_adv(t, u, v) - w * t_z
         if self.t_t_formulation == "adiabatic_omega":
             omega_pa = -100.0 * w  # w = −ω в hPa/s → ω в Pa/s
@@ -903,7 +1075,7 @@ class PurePDEKernel(nn.Module):
         Returns:
             ``torch.Tensor`` ``(B, P, H, W)`` — dq/dt, (кг/кг)/с.
         """
-        q_z = self.diff.d_z(q)
+        q_z = self._d_z(q)
 
         q_s = torch.maximum(self._get_qs(self.grid.pressure, t), torch.full_like(q, 1e-6))
         omega_pa = -100.0 * w
@@ -977,7 +1149,7 @@ class PurePDEKernel(nn.Module):
         w = self.get_w(u, v)
         z_x = self.diff.d_x(z)
         z_y = self.diff.d_y(z)
-        z_z = self.diff.d_z(z)
+        z_z = self._d_z(z)
         u_t, v_t = self.get_uv_dt(u, v, w, z_x, z_y)
         t_t = self.get_t_t(u, v, w, t, z_z)
         z_t = self.get_z_t(t_t)

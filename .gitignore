@@ -181,3 +181,4 @@ cython_debug/
 #.idea/
 # Fetched cluster run artifacts (manifests, logs, result dumps)
 cluster_results/
+.DS_Store
