@@ -108,14 +108,20 @@ is also the *cause* of the overflow that triggers defect A: **B → fp32 overflo
 → NaN activations → A (NaN grads) → silent branch death.** The guard makes
 training survive B; it does not make the features physical.
 
-### Proposal (needs owner decision — changes experiment semantics)
+### Fix — `stable_physical_v2` (shipped, `b9c6ed1`)
 
-Add an OCP `stable_physical_v2` hybrid mode, leaving the live `B0/B1/A1/A2` arms
-untouched (cross-fix incomparability is already tracked): (v2a) do not mix the
-conv into the physical path — integrate `zquvtw` directly; (v2b) build the
-corrector feature from `zquvtw` (the physics path) rather than the router-mixed
-`pred_phys`; (v2c) sanitize *within* the kernel stack, not only between hybrid
-steps.
+A new OCP hybrid mode `stable_physical_v2` runs the HybridBlock as a **pure
+primitive-equation integrator on the clean physical state**:
+`PDE_kernel._evolve_fields` extracts the frozen equation calls; the new
+`physics_only_forward` (on `PDE_kernel`/`PDE_block`/`HybridBlock`) integrates
+`zquvtw` directly — no `variable_norm` conv mix, no `norm_*`, no
+`variable_innorm`/`block_norm`, no router, no skip-doubling. The physical-unit
+plumbing (denormalize, r↔q, sanitize, tendency clip) is shared with
+`stable_physical`. Existing modes stay bit-exact (9-arm harness ALL OK). The
+weather-plus-physics arms **B1/A1/A2** (base residual, mass-consistent, diabatic)
+now use `stable_physical_v2` (experiment names suffixed `-purephys`); the
+`no_physics` control (**B0**) and the `fixedeq`/`legacy_hybrid` references are
+unchanged — they remain the contaminated/no-physics baselines for comparison.
 
 ---
 
@@ -173,14 +179,44 @@ hybrid params with a nonfinite entry; `tend_rms` = `physics_residual_tendency_rm
 
 ### 3.2 Results — real ERA5 (cluster, 1×GPU) — PENDING
 
-The sanity job (`4168882`, `tools/sanity_pi_iam4vp_gpu.py`) logs
-`forward_nonfinite_ratio` per arm on real staged ERA5; the real-data
-before/after ablation is queued behind it. The open quantitative question is the
-*frequency* of forward overflow on smooth real fields at fp32 (the adversarial
-fixture is white noise, an upper bound on roughness). Mechanism and fix behaviour
-are already settled by §3.1; §3.2 only calibrates how often A bites in normal
-production vs only under stress (AMP/bf16, distribution shift, longer rollout).
-Cluster is congested (jobs `PENDING (Priority)`); this section fills on landing.
+The sanity job (`tools/sanity_pi_iam4vp_gpu.py`) logs `forward_nonfinite_ratio`
+per arm on real staged ERA5; the real-data grad-guard ablation is queued behind
+it. The open quantitative question is the *frequency* of forward overflow on
+smooth real fields at fp32 (the adversarial fixture is white noise, an upper
+bound on roughness). Mechanism and fix behaviour are already settled by §3.1;
+§3.2 only calibrates how often A bites in normal production vs only under stress
+(AMP/bf16, distribution shift, longer rollout). (First cluster attempt
+`4168882`/`4169055` failed in 1 s — the sbatch wrappers sourced
+`_shell_contract.sh` by `BASH_SOURCE`, which points at the Slurm spool copy, not
+the repo; fixed in `a827d32` to resolve `REPO_ROOT` from `SLURM_SUBMIT_DIR`.
+Resubmitted.) This section fills on landing.
+
+### 3.3 Defect-B before/after — `stable_physical` vs `stable_physical_v2`
+
+Same `fixedeq` arm and seed, one code tree, differing only in the hybrid mode
+(`tools/exp_purephysics_ablation.py`, adversarial fixture, 12 steps). `nf` =
+forward nonfinite ratio; `clip` = fraction of the tendency saturating its ±8
+clip; `tend_rms` = physics tendency RMS (σ); `t` = physical temperature range of
+the prior (K):
+
+| step | `stable_physical` (nf/clip/tend_rms/t) | `stable_physical_v2` |
+| --- | --- | --- |
+| 0 | 0.94 / 0.03 / 1.66 / [150,350] | **0.00 / 0.00 / 0.19 / [176,311]** |
+| 6 | 0.44 / 0.31 / 5.01 / [150,350] | 0.00 / 0.00 / 0.14 / [169,314] |
+| 11 | 1.00 / 0.48 / 6.22 / [150,350] | 0.00 / 0.00 / 0.13 / [179,310] |
+
+- **v2 removes the overflow entirely** (`nf 0.94–1.0 → 0.00`), so defect A cannot
+  even arise in v2 — the guard is dormant (`hybrid_grad_guard_activations = 0`,
+  `hybrid_block_no_grad_v2` PASS: v2 has zero learnable physics params).
+- **v2 keeps the state physical**: the prior temperature stays in ~[170,314] K
+  instead of being pinned to the [150,350] K sanitize rails every step.
+- **The tendency becomes a real physical increment**: `tend_rms` drops
+  ~40× (6.2 → 0.13 σ) and the clip never fires (0.48 → 0.00). Under
+  `stable_physical` the corrector was fed clipped projection noise; under v2 it
+  is fed the primitive-equation evolution of the real fields.
+- Task loss is unchanged on this 12-step fixture (0.4012 vs 0.4014) — again the
+  loss carries no signal about physics quality; the difference is *what the
+  physics feature means*, which only a full training run can convert into skill.
 
 ---
 
@@ -200,14 +236,16 @@ Cluster is congested (jobs `PENDING (Priority)`); this section fills on landing.
    changes a forward output (state_dict/forward harness ALL OK). It is a correct
    defense-in-depth measure at the gradient boundary.
 
-3. **The guard is necessary but not sufficient — defect B is the real disease.**
-   Even post-fix, `tendency_rms ≈ 6σ` with `nf` up to 0.99 on rough fields: the
-   "physics tendency" is dominated by the `variable_norm` conv contamination
-   (§2: t integrated over −23700…+33954 K, `‖conv‖/‖phys‖ = 0.51` at kernel 0),
-   not physics. The guard stops the branch from *dying*; it does not make the
-   features *physical*. This aligns with the equation experiments' linear-residual
-   ceiling (R² ≤ 0.17). Closing B (`stable_physical_v2`) is the substantive next
-   step and needs an owner decision because it changes experiment semantics.
+3. **The guard was necessary but not sufficient — defect B was the real disease,
+   now fixed.** Under `stable_physical` the guard stopped the branch from *dying*
+   but did not make the features *physical*: `tendency_rms ≈ 6σ`, `nf` up to 1.0,
+   `t` integrated over −23700…+33954 K (§2), which aligns with the equation
+   experiments' linear-residual ceiling (R² ≤ 0.17). `stable_physical_v2` (§3.3)
+   removes the contamination at the source — the equations integrate the clean
+   physical state, `nf → 0.00`, the tendency becomes a real physical increment
+   (~40× smaller, clip never fires), and defect A can no longer arise because
+   there is no overflow to poison from. B1/A1/A2 now run this mode; `fixedeq`
+   stays `stable_physical` as the contaminated reference for comparison.
 
 4. **Why it lay dormant — a correct change unmasked a latent landmine.** The old
    `legacy_normalized` path ran train-mode BatchNorm, which renormalised
@@ -217,8 +255,18 @@ Cluster is congested (jobs `PENDING (Priority)`); this section fills on landing.
    shield and exposed A. The lesson is specific: the frozen-prior fix was right,
    and it needed the gradient guard shipped alongside it.
 
-5. **Causal chain.** B (conv contamination) → fp32 overflow in WENO/kernel →
-   NaN activations (values sanitized, loss finite) → **A** (NaN parameter grads)
-   → `optimizer.step()` poisons weights → permanent silent degradation to
-   `no_physics`. The guard breaks the chain at the A→poison link; `stable_physical_v2`
-   would break it at the B→overflow source.
+5. **Causal chain, broken at two points.** B (conv contamination) → fp32
+   overflow in WENO/kernel → NaN activations (values sanitized, loss finite) →
+   **A** (NaN parameter grads) → `optimizer.step()` poisons weights → permanent
+   silent degradation to `no_physics`. The guard (`4ec2317`) breaks the chain at
+   the A→poison link (defense in depth, kept for every mode);
+   `stable_physical_v2` (`b9c6ed1`) breaks it at the B→overflow source and is the
+   substantive fix.
+
+6. **The scientific reframing.** Under `stable_physical` the corrector was fed
+   clipped random-projection noise, so "does the physics feature help?" was really
+   "does contaminated noise help?" — and the honest answer was no (R² ≤ 0.17).
+   `stable_physical_v2` is the first version where the physics feature *is* the
+   primitive-equation evolution of the real fields, so B1/A1/A2 finally test the
+   intended hypothesis. Whether real physics improves skill is now an open
+   question a full training run can answer — which is the point of the arms.
