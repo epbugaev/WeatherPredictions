@@ -94,9 +94,13 @@ CBEST_KW = dict(
     rayleigh_friction=True,
     w_diagnostic="mass_consistent",
 )
-C15_KW = dict(
-    CBEST_KW, newtonian_relaxation=True, latent_heating_coupling=True, z_anchor="kinematic_ps"
-)
+# Комбинация эксперимента 15 по итогам USA-2000 (job 4169269): скрытое тепло
+# конденсации + исключение ω-членов из выходных тенденций T и q (кинематическая
+# ω поточечно бесполезна: r < 0.1 c implied-ω; z интегрирует ПОЛНЫЙ t_t).
+# Ньютоновская релаксация (T_hs, эффект +0.1%) и кинематический якорь
+# (Z_ps, z 3.05 → 40.7) в комбинацию не вошли — оставлены в матрице как
+# документированные отрицательные результаты.
+C15_KW = dict(CBEST_KW, latent_heating_coupling=True, omega_free=("t", "q"))
 # имя → (сетка, kwargs ядра). 'legacy' — linspace-широты exp 13; 'exact' —
 # реальные широты строк данных (принято в exp 14).
 VARIANTS: dict[str, tuple[str, dict]] = {
@@ -107,19 +111,21 @@ VARIANTS: dict[str, tuple[str, dict]] = {
     "T_hs": ("exact", dict(CBEST_KW, newtonian_relaxation=True)),
     "T_lh": ("exact", dict(CBEST_KW, latent_heating_coupling=True)),
     "Z_ps": ("exact", dict(CBEST_KW, z_anchor="kinematic_ps")),
-    "C15_phys": ("exact", C15_KW),
-    "C15_phys_ob": ("exact", dict(C15_KW, w_diagnostic="obrien")),
+    "NoW_t": ("exact", dict(CBEST_KW, omega_free=("t",))),
+    "NoW_tq": ("exact", dict(CBEST_KW, omega_free=("t", "q"))),
+    "NoW_all": ("exact", dict(CBEST_KW, omega_free=("t", "q", "u", "v"))),
+    "C15_now": ("exact", C15_KW),
 }
 # Клим-варианты (только при CLIM_IN): базовое ядро + внешние источники.
 SOURCE_VARIANTS = {
     "S1_zm": ("C_best", "zm"),
     "S2_map": ("C_best", "map"),
     "S12": ("C_best", "both"),
-    "C15_full": ("C15_phys", "both"),
+    "C15_full": ("C15_now", "both"),
 }
-FOCUS = ("base13", "C_best", "C15_phys")
-MAP_SET = ("base13", "C_best", "C15_phys", "C15_full", "S12")
-CLIM_REFS = ("C_best", "C15_phys")  # против каких ядер копится климатология
+FOCUS = ("base13", "C_best", "C15_now")
+MAP_SET = ("base13", "C_best", "C15_now", "C15_full", "S12")
+CLIM_REFS = ("C_best", "C15_now")  # против каких ядер копится климатология
 
 
 class RatioAccum:
@@ -352,12 +358,23 @@ def eq_terms(
         "cond": cond,
     }
     # z: вклад членов T-уравнения через гидростатический интеграл + якорь.
+    # ВСЕГДА от полного t_t (omega_free не трогает интегранд z).
     t_t_full = sum(terms_t.values())
     z_from_adv = k.get_z_t(terms_t["adv_h"] + terms_t["adv_v"])
     terms_z = {
         "from_adv": z_from_adv,
         "from_nonadv": k.get_z_t(t_t_full) - z_from_adv,
     }
+    # omega_free: ω-члены исключаются из ВЫХОДНЫХ тенденций соответствующих
+    # уравнений — декомпозиция обязана собирать те же члены, что и rhs.
+    if "t" in k.omega_free:
+        del terms_t["adv_v"], terms_t["adiabatic"]
+    if "q" in k.omega_free:
+        del terms_q["adv_v"]
+    if "u" in k.omega_free:
+        del terms_u["adv_v"]
+    if "v" in k.omega_free:
+        del terms_v["adv_v"]
     if k.z_anchor == "kinematic_ps":
         dps_dt = 100.0 * k._raw_column_w_top(u, v)
         terms_z["baro_anchor"] = (

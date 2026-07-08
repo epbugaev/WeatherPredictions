@@ -442,6 +442,46 @@ class Exp15EquationVariants(unittest.TestCase):
         # Баротропный член одинаков на всех уровнях.
         self.assertTrue(torch.allclose(diff[:, 0], diff[:, 12], atol=1e-10))
 
+    def test_omega_free_t_strips_omega_terms_but_keeps_z(self) -> None:
+        """omega_free=('t',): t_t — чистая гор. адвекция; z_t не меняется."""
+        base = self._kernel()
+        nf = self._kernel(omega_free=("t",))
+        gen = torch.Generator().manual_seed(151)
+        state = self._state(
+            u=10 + 5 * torch.randn(1, P, H, W, generator=gen),
+            v=5 * torch.randn(1, P, H, W, generator=gen),
+            t=T_STD.expand(1, P, H, W) + 2 * torch.randn(1, P, H, W, generator=gen),
+        )
+        rhs_b = base.rhs(**state)
+        rhs_n = nf.rhs(**state)
+        adv_h = base._horiz_adv(state["t"], state["u"], state["v"])
+        self.assertTrue(torch.allclose(rhs_n["t_t"], adv_h, atol=1e-5))
+        self.assertTrue(torch.allclose(rhs_n["z_t"], rhs_b["z_t"], atol=0.0))
+        self.assertFalse(torch.allclose(rhs_n["t_t"], rhs_b["t_t"], atol=1e-8))
+
+    def test_omega_free_q_uv_strip_vertical_advection(self) -> None:
+        """omega_free=('q','u','v'): верт. адвекция исключена, остальное на месте."""
+        base = self._kernel()
+        nf = self._kernel(omega_free=("q", "u", "v"))
+        gen = torch.Generator().manual_seed(152)
+        state = self._state(
+            u=10 + 5 * torch.randn(1, P, H, W, generator=gen),
+            v=5 * torch.randn(1, P, H, W, generator=gen),
+            q=(3e-3 * (1 + 0.3 * torch.randn(1, P, H, W, generator=gen))).clamp_min(1e-8),
+        )
+        rhs_b = base.rhs(**state)
+        rhs_n = nf.rhs(**state)
+        w = base.get_w(state["u"], state["v"])
+        for var, field in (("u", state["u"]), ("v", state["v"]), ("q", state["q"])):
+            expected = rhs_b[f"{var}_t"] + w * base._d_z(field)
+            self.assertTrue(torch.allclose(rhs_n[f"{var}_t"], expected, atol=1e-6))
+        self.assertTrue(torch.equal(rhs_n["t_t"], rhs_b["t_t"]))
+
+    def test_omega_free_rejects_unknown_keys(self) -> None:
+        """omega_free с 'z' или опечаткой — явная ошибка конфигурации."""
+        with self.assertRaises(ValueError):
+            self._kernel(omega_free=("z",))
+
     def test_rhs_external_sources_are_added_verbatim(self) -> None:
         """sources={'t': S} даёт t_t + S точно; остальные тенденции не тронуты."""
         kernel = self._kernel()

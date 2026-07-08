@@ -632,6 +632,16 @@ class PurePDEKernel(nn.Module):
             уровней получает добавку R_d·T(p_s)/p_s·∂p_s/∂t с кинематической
             ∂p_s/∂t = −∫∇·V dp по столбу (эксперимент 15: якорь Φ_t(p_s)=0
             выбрасывает прилив и барометрическую тенденцию).
+        omega_free: подмножество {'u','v','t','q'} — уравнения, из ВЫХОДНОЙ
+            тенденции которых исключаются ω-зависимые члены (вертикальная
+            адвекция −w·∂X/∂ζ; для T также адиабата κTω/p). Эмпирика
+            эксперимента 15 (ERA5-2000, USA): кинематическая ω поточечно не
+            коррелирует с требуемой (r < 0.1), её члены с амплитудой
+            1.4–2.7× наблюдаемой тенденции — почти чистый шум, и без них
+            невязка T падает 1.83 → 1.09, q — 1.11 → 0.98. Гидростатический
+            z_t ВСЕГДА интегрирует полный t_t (колоночный интеграл усредняет
+            ω-шум и выигрывает от адиабаты: 3.05 против 4.07 без неё).
+            Дефолт () — прежнее поведение бит-в-бит.
     """
 
     def __init__(
@@ -663,6 +673,7 @@ class PurePDEKernel(nn.Module):
         newtonian_relaxation: bool = False,
         latent_heating_coupling: bool = False,
         z_anchor: Literal["fixed", "kinematic_ps"] = "fixed",
+        omega_free: tuple[str, ...] = (),
     ):
         super().__init__()
         self.grid = grid
@@ -746,6 +757,9 @@ class PurePDEKernel(nn.Module):
         if z_anchor not in ("fixed", "kinematic_ps"):
             raise ValueError(f"Unknown z_anchor {z_anchor!r}")
         self.z_anchor = z_anchor
+        if not set(omega_free) <= {"u", "v", "t", "q"}:
+            raise ValueError(f"omega_free must be a subset of u,v,t,q; got {omega_free!r}")
+        self.omega_free = tuple(omega_free)
 
         # Вертикальная производная на НЕРАВНОМЕРНОЙ сетке уровней давления.
         # 'stencil' (дефолт) — легаси FD-4 с делением на локальный Δp (несёт
@@ -1033,11 +1047,15 @@ class PurePDEKernel(nn.Module):
         * ``rayleigh_friction``: −k_v(σ)·u, −k_v(σ)·v — линейное трение
           пограничного слоя Held & Suarez (1994).
         """
-        u_z = self._d_z(u)
-        v_z = self._d_z(v)
         f = self.f_field
-        u_t = self._horiz_adv(u, u, v) - w * u_z + f * v - z_x
-        v_t = self._horiz_adv(v, u, v) - w * v_z - f * u - z_y
+        if "u" in self.omega_free:
+            u_t = self._horiz_adv(u, u, v) + f * v - z_x
+        else:
+            u_t = self._horiz_adv(u, u, v) - w * self._d_z(u) + f * v - z_x
+        if "v" in self.omega_free:
+            v_t = self._horiz_adv(v, u, v) - f * u - z_y
+        else:
+            v_t = self._horiz_adv(v, u, v) - w * self._d_z(v) - f * u - z_y
         if self.metric_terms:
             u_t = u_t + self.tan_phi_over_a * u * v
             v_t = v_t - self.tan_phi_over_a * u * u
@@ -1173,9 +1191,10 @@ class PurePDEKernel(nn.Module):
         Returns:
             ``torch.Tensor`` ``(B, P, H, W)`` — dq/dt, (кг/кг)/с.
         """
-        q_z = self._d_z(q)
         cond = self._condensation_source(t, q, w)
-        return self._horiz_adv(q, u, v) - w * q_z + cond
+        if "q" in self.omega_free:
+            return self._horiz_adv(q, u, v) + cond
+        return self._horiz_adv(q, u, v) - w * self._d_z(q) + cond
 
     def _condensation_source(
         self, t: torch.Tensor, q: torch.Tensor, w: torch.Tensor
@@ -1286,7 +1305,14 @@ class PurePDEKernel(nn.Module):
             # w_top по построению); Φ_t(p_s) = R_d·T(p_s)/p_s·∂p_s/∂t.
             dps_dt = 100.0 * self._raw_column_w_top(u, v)
             baro = self.consts.R_d * t[:, -1:] / self.grid.pressure[:, -1:] * dps_dt
+        # z ВСЕГДА интегрирует полный t_t (адиабата в колоночном интеграле
+        # полезна: ω-шум усредняется); ω-члены убираются только из ВЫХОДНОЙ
+        # T-тенденции (omega_free).
         z_t = self.get_z_t(t_t, baro=baro)
+        if "t" in self.omega_free:
+            omega_pa = -100.0 * w
+            adia = self.consts.R_d * t * omega_pa / (self.consts.c_p * self.grid.pressure)
+            t_t = t_t - adia + w * self._d_z(t)
         q_t = self.get_q_dt(u, v, t, w, q)
         out = {"u_t": u_t, "v_t": v_t, "t_t": t_t, "q_t": q_t, "z_t": z_t, "w": w}
         if sources is not None:
