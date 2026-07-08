@@ -613,6 +613,25 @@ class PurePDEKernel(nn.Module):
         rayleigh_kf_per_day: k_f трения, 1/сутки. Дефолт 1.0 (Held & Suarez).
         rayleigh_sigma_b: σ_b — верхняя граница пограничного слоя в σ-коорд.
             Дефолт 0.7 (Held & Suarez).
+        newtonian_relaxation: ньютоновская релаксация температуры
+            −k_T(φ,σ)·(T − T_eq(φ,p)) по Held & Suarez (1994): k_a=1/40 сут,
+            k_s=1/4 сут, σ_b=0.7, T_eq = max(200 K, [315 − 60·sin²φ −
+            10·log(p/p₀)·cos²φ]·(p/p₀)^κ), κ=R_d/c_p. Приближение полного
+            диабатического источника Q₁ (эксперимент 15). Дефолт False.
+        latent_heating_coupling: энергетическая связка конденсации: скрытое
+            тепло +(L/c_p)·(−dq/dt|cond) добавляется в t_t там, где q-блок
+            конденсирует (Yanai et al. 1973: конденсация одновременно сушит
+            q и греет T). Дефолт False.
+        w_diagnostic: ``'plain'`` — кинематическая w; ``'mass_consistent'`` —
+            минус p-взвешенное колоночное среднее дивергенции;
+            ``'obrien'`` — поправка О'Брайена (1970): ошибка дивергенции
+            линейна по p ⇒ w(p_top) зануляется квадратичным по массе весом,
+            у поверхности поправка нулевая.
+        z_anchor: ``'fixed'`` (дефолт) — Φ_t(p_s)=0, как раньше;
+            ``'kinematic_ps'`` — баротропный член гидростатики: Φ_t всех
+            уровней получает добавку R_d·T(p_s)/p_s·∂p_s/∂t с кинематической
+            ∂p_s/∂t = −∫∇·V dp по столбу (эксперимент 15: якорь Φ_t(p_s)=0
+            выбрасывает прилив и барометрическую тенденцию).
     """
 
     def __init__(
@@ -633,7 +652,7 @@ class PurePDEKernel(nn.Module):
         polar_filter: bool = False,
         polar_filter_lat_deg: float = 60.0,
         advection_form: Literal["advective", "flux"] = "advective",
-        w_diagnostic: Literal["plain", "mass_consistent"] = "plain",
+        w_diagnostic: Literal["plain", "mass_consistent", "obrien"] = "plain",
         rows_south_to_north: bool | None = None,
         metric_terms: bool = False,
         spherical_divergence: bool = False,
@@ -641,6 +660,9 @@ class PurePDEKernel(nn.Module):
         rayleigh_friction: bool = False,
         rayleigh_kf_per_day: float = 1.0,
         rayleigh_sigma_b: float = 0.7,
+        newtonian_relaxation: bool = False,
+        latent_heating_coupling: bool = False,
+        z_anchor: Literal["fixed", "kinematic_ps"] = "fixed",
     ):
         super().__init__()
         self.grid = grid
@@ -696,6 +718,34 @@ class PurePDEKernel(nn.Module):
             self.register_buffer("rayleigh_k", k_v)  # (1, P, 1, 1), 1/с
         else:
             self.rayleigh_k = None
+
+        # Эксперимент 15: ньютоновская релаксация T к равновесию Held & Suarez
+        # (1994, BAMS 75): T_eq(φ,p) = max(200 К, [315 − ΔT_y·sin²φ −
+        # Δθ_z·log(p/p₀)·cos²φ]·(p/p₀)^κ), ΔT_y=60 К, Δθ_z=10 К, p₀=1000 гПа,
+        # κ=R_d/c_p; k_T(φ,σ) = k_a + (k_s−k_a)·cos⁴φ·max(0,(σ−σ_b)/(1−σ_b)),
+        # k_a=1/40 сут, k_s=1/4 сут, σ_b=0.7. Спецификация — по репродукции
+        # в документации MITgcm §4.7 (Held-Suarez Atmosphere).
+        self.newtonian_relaxation = newtonian_relaxation
+        if newtonian_relaxation:
+            consts_local = consts if consts is not None else PhysicsConstants()
+            kappa = consts_local.R_d / consts_local.c_p
+            sigma = grid.pressure / 1.0e5  # (1,P,1,1)
+            sin2 = torch.sin(grid.latitudes).reshape(1, 1, -1, 1) ** 2
+            cos2 = torch.cos(grid.latitudes).reshape(1, 1, -1, 1) ** 2
+            t_eq = (315.0 - 60.0 * sin2 - 10.0 * torch.log(sigma) * cos2) * sigma**kappa
+            t_eq = torch.clamp(t_eq, min=200.0)  # (1,P,H,1)
+            k_a = 1.0 / (40.0 * 86400.0)
+            k_s = 1.0 / (4.0 * 86400.0)
+            k_t = k_a + (k_s - k_a) * (cos2**2) * torch.clamp((sigma - 0.7) / (1.0 - 0.7), min=0.0)
+            self.register_buffer("hs_t_eq", t_eq)
+            self.register_buffer("hs_k_t", k_t)  # (1,P,H,1), 1/с
+        else:
+            self.hs_t_eq = None
+            self.hs_k_t = None
+        self.latent_heating_coupling = latent_heating_coupling
+        if z_anchor not in ("fixed", "kinematic_ps"):
+            raise ValueError(f"Unknown z_anchor {z_anchor!r}")
+        self.z_anchor = z_anchor
 
         # Вертикальная производная на НЕРАВНОМЕРНОЙ сетке уровней давления.
         # 'stencil' (дефолт) — легаси FD-4 с делением на локальный Δp (несёт
@@ -763,7 +813,7 @@ class PurePDEKernel(nn.Module):
         # E5: консервативная форма адвекции + mass-consistent диагностический w.
         if advection_form not in ("advective", "flux"):
             raise ValueError(f"Unknown advection_form {advection_form!r}")
-        if w_diagnostic not in ("plain", "mass_consistent"):
+        if w_diagnostic not in ("plain", "mass_consistent", "obrien"):
             raise ValueError(f"Unknown w_diagnostic {w_diagnostic!r}")
         self.advection_form = advection_form
         self.w_diagnostic = w_diagnostic
@@ -922,6 +972,13 @@ class PurePDEKernel(nn.Module):
         ``mass_consistent`` (E5): вычесть p-взвешенное колоночное среднее
         дивергенции, чтобы ∫(∂ₓu+∂_yv) dp ≈ 0 на каждый столб — нет
         накопления дрейфа массы по вертикали.
+
+        ``obrien`` (эксперимент 15): поправка О'Брайена (1970) — гипотеза
+        «ошибка дивергенции линейна по p» даёт квадратичный по массе вес:
+        w_adj(p) = w(p) − w(p_top)·((p_s − p)/(p_s − p_top))². Верхняя
+        граница w(p_top) зануляется точно, у поверхности поправка нулевая
+        (анкер w(p_s)=0 не трогается); в отличие от ``mass_consistent``
+        поправка сосредоточена наверху, а не размазана по столбу.
         """
         div = self.diff.d_x(u) + self.diff.d_y(v)
         if self.spherical_divergence:
@@ -930,7 +987,33 @@ class PurePDEKernel(nn.Module):
             pz = self.grid.pixel_z  # (1,P,1,1) hPa
             div_bar = (div * pz).sum(dim=1, keepdim=True) / pz.sum()
             div = div - div_bar
-        return integral_z(-div, self.grid.M_z)
+        w = integral_z(-div, self.grid.M_z)
+        if self.w_diagnostic == "obrien":
+            p_hpa = self.grid.pressure / 100.0  # (1,P,1,1)
+            p_s = p_hpa[:, -1:]
+            p_top = p_hpa[:, :1]
+            weight = ((p_s - p_hpa) / (p_s - p_top)) ** 2
+            w = w - w[:, :1] * weight
+        return w
+
+    def _raw_column_w_top(self, u: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        """Сырая кинематическая w на верхнем уровне: −∫_{p_top}^{p_s} div dp.
+
+        Используется якорем ``z_anchor='kinematic_ps'``: ∂p_s/∂t [Па/с] =
+        100·w_top (конвергенция массы в столбе повышает приземное давление).
+        Считается без mass_consistent/obrien-коррекций — они зануляют w_top
+        по построению, уничтожая сам сигнал тенденции давления.
+
+        Args:
+            u, v: горизонтальный ветер ``(B, P, H, W)``, м/с.
+
+        Returns:
+            torch.Tensor ``(B, 1, H, W)`` — w верхнего уровня, гПа/с.
+        """
+        div = self.diff.d_x(u) + self.diff.d_y(v)
+        if self.spherical_divergence:
+            div = div - v * self.tan_phi_over_a
+        return integral_z(-div, self.grid.M_z)[:, :1]
 
     def get_uv_dt(
         self,
@@ -989,12 +1072,15 @@ class PurePDEKernel(nn.Module):
         if self.t_t_formulation == "adiabatic_omega":
             omega_pa = -100.0 * w  # w = −ω в hPa/s → ω в Pa/s
             t_t_adia = self.consts.R_d * t * omega_pa / (self.consts.c_p * self.grid.pressure)
-            return t_t_adia + adv
+            t_t = t_t_adia + adv
+            if self.newtonian_relaxation:
+                t_t = t_t - self.hs_k_t * (t - self.hs_t_eq)
+            return t_t
         # legacy_paper:
         Q = -self.consts.L * z_z * w
         return (Q - z_z * w) / self.consts.c_p + adv
 
-    def get_z_t(self, t_t: torch.Tensor) -> torch.Tensor:
+    def get_z_t(self, t_t: torch.Tensor, baro: torch.Tensor | None = None) -> torch.Tensor:
         """Tendency геопотенциала через гидростатику.
 
         Φ_t(p) = Φ_t(p_s) + ∫_p^{p_s} (R_eff/p')·T_t dp' — `integral_z`/`M_z`
@@ -1005,10 +1091,22 @@ class PurePDEKernel(nn.Module):
         единицах: `M_z`/`pixel_z` в **hPa**, поэтому делитель тоже в hPa
         (`grid.pressure` зарегистрирован в Pa → /100); иначе z_t был бы
         ×100 меньше корректного.
+
+        Args:
+            t_t: температурная тенденция ``(B, P, H, W)``, К/с.
+            baro: опциональный баротропный член Φ_t(p_s) ``(B, 1, H, W)``,
+                м²/с³ — добавка ко всем уровням (z_anchor='kinematic_ps').
+                ``None`` — прежний якорь Φ_t(p_s)=0 бит-в-бит.
+
+        Returns:
+            torch.Tensor ``(B, P, H, W)`` — z_t, м²/с³.
         """
         pressure_hpa = self.grid.pressure / 100.0
         z_zt = self.R_eff / pressure_hpa * t_t
-        return integral_z(z_zt, self.grid.M_z)
+        z_t = integral_z(z_zt, self.grid.M_z)
+        if baro is not None:
+            z_t = z_t + baro
+        return z_t
 
     @staticmethod
     def _avoid_inf(tensor: torch.Tensor, threshold: float = 1.0) -> torch.Tensor:
@@ -1076,7 +1174,25 @@ class PurePDEKernel(nn.Module):
             ``torch.Tensor`` ``(B, P, H, W)`` — dq/dt, (кг/кг)/с.
         """
         q_z = self._d_z(q)
+        cond = self._condensation_source(t, q, w)
+        return self._horiz_adv(q, u, v) - w * q_z + cond
 
+    def _condensation_source(
+        self, t: torch.Tensor, q: torch.Tensor, w: torch.Tensor
+    ) -> torch.Tensor:
+        """Конденсационный сток q: δ·F(T,q_s)·ω/p ≤ 0 (насыщенный подъём).
+
+        Вынесен из :meth:`get_q_dt`, чтобы latent_heating_coupling мог
+        добавить согласованное скрытое тепло −(L/c_p)·(dq/dt|cond) в t_t
+        (Yanai et al. 1973: Q₂-сток обязан греть Q₁).
+
+        Args:
+            t: температура (B, P, H, W), K. q: влажность, кг/кг.
+            w: вертикальная скорость из ``get_w``, гПа/с.
+
+        Returns:
+            torch.Tensor (B, P, H, W) — dq/dt|cond, (кг/кг)/с.
+        """
         q_s = torch.maximum(self._get_qs(self.grid.pressure, t), torch.full_like(q, 1e-6))
         omega_pa = -100.0 * w
         delta = ((omega_pa < 0) & (q >= q_s)).to(q.dtype)
@@ -1087,7 +1203,7 @@ class PurePDEKernel(nn.Module):
             * q_s
             * t
         )
-        return self._horiz_adv(q, u, v) - w * q_z + delta * F_factor * omega_pa / self.grid.pressure
+        return delta * F_factor * omega_pa / self.grid.pressure
 
     # ----- Time stepping -----
 
@@ -1134,6 +1250,7 @@ class PurePDEKernel(nn.Module):
         t: torch.Tensor,
         q: torch.Tensor,
         z: torch.Tensor,
+        sources: dict[str, torch.Tensor] | None = None,
     ) -> dict[str, torch.Tensor]:
         """Полный RHS: словарь с tendency для всех 5 переменных + диагностика w.
 
@@ -1141,6 +1258,14 @@ class PurePDEKernel(nn.Module):
         безусловно-устойчивый НЕЯВНЫЙ спектральный фильтр в ``_finalize``
         (post-step), а не явный ``−K4·∇⁴`` в tendency (тот усиливал 2Δx
         на полюсе ×172/шаг — explicit-нестабильность).
+
+        Args:
+            u, v, t, q, z: состояние ``(B, P, H, W)``.
+            sources: опциональные внешние источники {'u'|'v'|'t'|'q'|'z':
+                тензор, броадкастится к (B, P, H, W)} — добавляются к
+                соответствующим тенденциям (эксперимент 15: климатологические
+                Q₁/Q₂-поля, построенные на обучающем годе). ``None`` (дефолт)
+                — прежний RHS бит-в-бит.
 
         Returns:
             dict с ключами ``u_t``, ``v_t``, ``t_t``, ``q_t``, ``z_t``, ``w``,
@@ -1152,9 +1277,22 @@ class PurePDEKernel(nn.Module):
         z_z = self._d_z(z)
         u_t, v_t = self.get_uv_dt(u, v, w, z_x, z_y)
         t_t = self.get_t_t(u, v, w, t, z_z)
-        z_t = self.get_z_t(t_t)
+        if self.latent_heating_coupling:
+            cond = self._condensation_source(t, q, w)
+            t_t = t_t - (self.consts.L / self.consts.c_p) * cond
+        baro = None
+        if self.z_anchor == "kinematic_ps":
+            # ∂p_s/∂t [Па/с] = 100·w_top (сырая кинематика: mc/obrien зануляют
+            # w_top по построению); Φ_t(p_s) = R_d·T(p_s)/p_s·∂p_s/∂t.
+            dps_dt = 100.0 * self._raw_column_w_top(u, v)
+            baro = self.consts.R_d * t[:, -1:] / self.grid.pressure[:, -1:] * dps_dt
+        z_t = self.get_z_t(t_t, baro=baro)
         q_t = self.get_q_dt(u, v, t, w, q)
-        return {"u_t": u_t, "v_t": v_t, "t_t": t_t, "q_t": q_t, "z_t": z_t, "w": w}
+        out = {"u_t": u_t, "v_t": v_t, "t_t": t_t, "q_t": q_t, "z_t": z_t, "w": w}
+        if sources is not None:
+            for key, src in sources.items():
+                out[f"{key}_t"] = out[f"{key}_t"] + src
+        return out
 
     def step(
         self,
