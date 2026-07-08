@@ -324,9 +324,7 @@ class PredRNNv2_Model(nn.Module):
             for i in range(self.num_layers):
                 decouple_loss.append(
                     torch.mean(
-                        torch.abs(
-                            torch.cosine_similarity(delta_c_list[i], delta_m_list[i], dim=2)
-                        )
+                        torch.abs(torch.cosine_similarity(delta_c_list[i], delta_m_list[i], dim=2))
                     )
                 )
 

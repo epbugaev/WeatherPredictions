@@ -57,7 +57,12 @@ class ChannelAggregationFFN(nn.Module):
 class MultiOrderDWConv(nn.Module):
     """Multi-order Features with Dilated DWConv Kernel in MogaNet."""
 
-    def __init__(self, embed_dims, dw_dilation=[1, 2, 3], channel_split=[1, 3, 4]):
+    def __init__(
+        self,
+        embed_dims,
+        dw_dilation: tuple[int, ...] = (1, 2, 3),
+        channel_split: tuple[int, ...] = (1, 3, 4),
+    ):
         super().__init__()
         self.split_ratio = [i / sum(channel_split) for i in channel_split]
         self.embed_dims_1 = int(self.split_ratio[1] * embed_dims)
@@ -116,8 +121,8 @@ class MultiOrderGatedAggregation(nn.Module):
     def __init__(
         self,
         embed_dims,
-        attn_dw_dilation=[1, 2, 3],
-        attn_channel_split=[1, 3, 4],
+        attn_dw_dilation: tuple[int, ...] = (1, 2, 3),
+        attn_channel_split: tuple[int, ...] = (1, 3, 4),
         attn_shortcut=True,
     ):
         super().__init__()

@@ -8,8 +8,8 @@ SimVP, and PredRNN-family architectures are registered for YAML training.
 """
 
 import ast
-from pathlib import Path
 import unittest
+from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MODELS_INIT = REPO_ROOT / "Models" / "__init__.py"
@@ -40,7 +40,7 @@ class ModelRegistryTest(unittest.TestCase):
         """The registry should expose IAM4VP, SimVP, and PredRNN-family models."""
         self.assertEqual(
             registered_model_names(),
-            ["PI-IAM4VP", "PredRNN", "PredRNNv2", "SimVP"],
+            ["IAM4VP", "PI-IAM4VP", "PredRNN", "PredRNNv2", "SimVP"],
         )
 
 

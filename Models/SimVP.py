@@ -155,7 +155,15 @@ class Decoder(nn.Module):
 class MidIncepNet(nn.Module):
     """The hidden Translator of IncepNet for SimVPv1"""
 
-    def __init__(self, channel_in, channel_hid, N2, incep_ker=[3, 5, 7, 11], groups=8, **kwargs):
+    def __init__(
+        self,
+        channel_in,
+        channel_hid,
+        N2,
+        incep_ker: tuple[int, ...] = (3, 5, 7, 11),
+        groups=8,
+        **kwargs,
+    ):
         super().__init__()
         assert N2 >= 2 and len(incep_ker) > 1
         self.N2 = N2
@@ -164,7 +172,7 @@ class MidIncepNet(nn.Module):
                 channel_in, channel_hid // 2, channel_hid, incep_ker=incep_ker, groups=groups
             )
         ]
-        for i in range(1, N2 - 1):
+        for _ in range(1, N2 - 1):
             enc_layers.append(
                 gInception_ST(
                     channel_hid, channel_hid // 2, channel_hid, incep_ker=incep_ker, groups=groups
@@ -180,7 +188,7 @@ class MidIncepNet(nn.Module):
                 channel_hid, channel_hid // 2, channel_hid, incep_ker=incep_ker, groups=groups
             )
         ]
-        for i in range(1, N2 - 1):
+        for _ in range(1, N2 - 1):
             dec_layers.append(
                 gInception_ST(
                     2 * channel_hid,
@@ -303,7 +311,7 @@ class MetaBlock(nn.Module):
                 act_layer=nn.GELU,
             )
         else:
-            assert False and "Invalid model_type in SimVP"
+            raise ValueError(f"Invalid model_type {model_type!r} in MetaBlock")
 
         if in_channels != out_channels:
             self.reduction = nn.Conv2d(

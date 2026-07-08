@@ -7,8 +7,14 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from .imvp_modules import Attention, CircularConvSC, ConvNeXt_block, ConvNeXt_bottle
-from .PredFormerGFT_HybridBlock import HybridBlock
+from utils.physics_hybrid import (
+    HybridBlock,
+    PhysicsTendencyResidualCorrector,
+    relative_to_specific_humidity,
+    specific_to_relative_humidity,
+)
+
+from .IAM4VP_utils import Attention, CircularConvSC, ConvNeXt_block, ConvNeXt_bottle
 
 PRESSURE_LEVELS_HPA: tuple[int, ...] = (
     50,
@@ -28,11 +34,26 @@ PRESSURE_LEVELS_HPA: tuple[int, ...] = (
 
 
 class SinusoidalPosEmb(nn.Module):
-    def __init__(self, dim):
+    """Sinusoidal position embedding for scalar timesteps.
+
+    Args:
+        dim: Width of the produced embedding (number of output channels);
+            must be even (the output concatenates ``dim // 2`` sin/cos pairs).
+    """
+
+    def __init__(self, dim: int):
         super().__init__()
         self.dim = dim
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Embed a batch of scalar timesteps.
+
+        Args:
+            x: ``torch.Tensor`` of shape ``(B,)`` with the timestep values.
+
+        Returns:
+            ``torch.Tensor`` of shape ``(B, dim)`` — concatenated sin/cos features.
+        """
         device = x.device
         half_dim = self.dim // 2
         emb = math.log(10000) / (half_dim - 1)
@@ -43,14 +64,28 @@ class SinusoidalPosEmb(nn.Module):
 
 
 class Time_MLP(nn.Module):
-    def __init__(self, dim):
+    """Timestep MLP: sinusoidal embedding followed by a GELU feed-forward block.
+
+    Args:
+        dim: Embedding width and output channel count.
+    """
+
+    def __init__(self, dim: int):
         super().__init__()
         self.sinusoidaposemb = SinusoidalPosEmb(dim)
         self.linear1 = nn.Linear(dim, dim * 4)
         self.gelu = nn.GELU()
         self.linear2 = nn.Linear(dim * 4, dim)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Project scalar timesteps to a learned embedding.
+
+        Args:
+            x: ``torch.Tensor`` of shape ``(B,)`` with the timestep values.
+
+        Returns:
+            ``torch.Tensor`` of shape ``(B, dim)``.
+        """
         x = self.sinusoidaposemb(x)
         x = self.linear1(x)
         x = self.gelu(x)
@@ -58,7 +93,16 @@ class Time_MLP(nn.Module):
         return x
 
 
-def stride_generator(N, reverse=False):
+def stride_generator(N: int, reverse: bool = False) -> list[int]:
+    """Build the alternating stride schedule for the conv encoder/decoder.
+
+    Args:
+        N: Number of conv layers (length of the returned schedule).
+        reverse: If True, return the reversed schedule (used by the decoder).
+
+    Returns:
+        ``list[int]`` of length ``N`` alternating ``1, 2, 1, 2, ...``.
+    """
     strides = [1, 2] * 10
     if reverse:
         return list(reversed(strides[:N]))
@@ -67,7 +111,15 @@ def stride_generator(N, reverse=False):
 
 
 class Encoder(nn.Module):
-    def __init__(self, C_in, C_hid, N_S):
+    """Convolutional encoder producing a bottleneck latent plus decoder skips.
+
+    Args:
+        C_in: Input channel count.
+        C_hid: Hidden channel count of every conv stage.
+        N_S: Number of conv stages (must be 4; ``forward`` indexes ``enc[0..3]``).
+    """
+
+    def __init__(self, C_in: int, C_hid: int, N_S: int):
         super().__init__()
         strides = stride_generator(N_S)
         self.enc = nn.Sequential(
@@ -75,27 +127,20 @@ class Encoder(nn.Module):
             *[CircularConvSC(C_hid, C_hid, stride=s) for s in strides[1:]],
         )
 
-    def forward(self, x):  # B*10, 2, 32, 64
-        enc1 = self.enc[0](x)
-        latent = enc1
+    def forward(
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Encode one flattened batch-time stack of frames.
 
-        latent_1 = self.enc[1](latent)
-        latent_2 = self.enc[2](latent_1)
-        latent_3 = self.enc[3](latent_2)
+        Args:
+            x: ``torch.Tensor`` of shape ``(B*T, C_in, H, W)``.
 
-        return latent_3, enc1, latent_1, latent_2
-
-
-class LP(nn.Module):
-    def __init__(self, C_in, C_hid, N_S):
-        super().__init__()
-        strides = stride_generator(N_S)
-        self.enc = nn.Sequential(
-            CircularConvSC(C_in, C_hid, stride=strides[0]),
-            *[CircularConvSC(C_hid, C_hid, stride=s) for s in strides[1:]],
-        )
-
-    def forward(self, x):  # B*10, 2, 32, 64
+        Returns:
+            Tuple ``(latent_3, enc1, latent_1, latent_2)`` of ``torch.Tensor``
+            for the ``N_S=4`` stride pattern ``[1, 2, 1, 2]``: ``enc1``
+            ``(B*T, C_hid, H, W)``, ``latent_1``/``latent_2``
+            ``(B*T, C_hid, H/2, W/2)``, ``latent_3`` ``(B*T, C_hid, H/4, W/4)``.
+        """
         enc1 = self.enc[0](x)
         latent = enc1
 
@@ -107,7 +152,15 @@ class LP(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, C_hid, C_out, N_S, T):
+    """Convolutional decoder fusing encoder skips back to frame resolution.
+
+    Args:
+        C_hid: Hidden channel count.
+        N_S: Number of transpose-conv stages (must be 4).
+        T: Clip length; sets the ``readout`` conv input width (``64 * T``).
+    """
+
+    def __init__(self, C_hid: int, N_S: int, T: int):
         super().__init__()
         strides = stride_generator(N_S, reverse=True)
         self.dec = nn.Sequential(
@@ -116,8 +169,38 @@ class Decoder(nn.Module):
         )
         self.readout = nn.Conv2d(64 * T, 64, 1)
 
-    def forward(self, hid, enc1, latent_1, latent_2, latent_3, T=10, H=8, W=16):
+    def forward(
+        self,
+        hid: torch.Tensor,
+        enc1: torch.Tensor,
+        latent_1: torch.Tensor,
+        latent_2: torch.Tensor,
+        latent_3: torch.Tensor,
+        T: int = 10,
+        H: int = 8,
+        W: int = 16,
+    ) -> torch.Tensor:
+        """Decode bottleneck features back to frame resolution using skips.
 
+        The ``T``/``H``/``W`` defaults are placeholders; callers pass the real
+        clip length and full frame size.
+
+        Args:
+            hid: bottleneck features ``(B*T, C_hid, H/4, W/4)``.
+            enc1: full-resolution encoder skip ``(B*T, C_hid, H, W)``.
+            latent_1: mid-resolution skip ``(B*T, C_hid, H/2, W/2)``.
+            latent_2: mid-resolution skip ``(B*T, C_hid, H/2, W/2)``.
+            latent_3: bottleneck skip ``(B*T, C_hid, H/4, W/4)``.
+            T: clip length; the ``B*T`` axis is folded so ``T`` frames become
+                channels before the readout conv.
+            H: full output height.
+            W: full output width.
+
+        Returns:
+            ``torch.Tensor`` of shape ``(B, 64, H, W)`` — decoded features
+            before the model's final readout. The ``readout`` conv hardcodes
+            64 output channels, so the architecture requires ``C_hid == 64``.
+        """
         hid = self.dec[0](hid + latent_3)
         hid = self.dec[1](hid + latent_2)
         hid = self.dec[2](hid + latent_1)
@@ -129,7 +212,14 @@ class Decoder(nn.Module):
 
 
 class Predictor(nn.Module):
-    def __init__(self, channel_in, channel_hid, N_T):
+    """Temporal predictor: a stack of time-conditioned ConvNeXt blocks.
+
+    Args:
+        channel_in: Input channel count (``T`` frames folded into channels).
+        N_T: Number of ConvNeXt blocks after the leading bottleneck block.
+    """
+
+    def __init__(self, channel_in: int, N_T: int):
         super().__init__()
 
         self.N_T = N_T
@@ -139,7 +229,18 @@ class Predictor(nn.Module):
 
         self.st_block = nn.Sequential(*st_block)
 
-    def forward(self, x, time_emb):
+    def forward(self, x: torch.Tensor, time_emb: torch.Tensor) -> torch.Tensor:
+        """Run the time-conditioned ConvNeXt stack over folded features.
+
+        Args:
+            x: ``torch.Tensor`` of shape ``(B, T, C, H, W)``; ``T`` and ``C``
+                are folded to ``T*C`` channels before the blocks and unfolded
+                afterwards.
+            time_emb: timestep embedding ``(B, D)`` injected into every block.
+
+        Returns:
+            ``torch.Tensor`` of shape ``(B, T // 2, C, H, W)``.
+        """
         B, T, C, H, W = x.shape
         x = x.reshape(B, T * C, H, W)
         z = self.st_block[0](x, time_emb)
@@ -150,41 +251,6 @@ class Predictor(nn.Module):
         return y
 
 
-class PhysicsTendencyResidualCorrector(nn.Module):
-    """Small zero-start residual head for physics-derived tendency features.
-
-    This module treats the WeatherGFT/HybridBlock branch as a feature generator,
-    not as a trusted forecast. With zero initialisation the final convolution
-    emits exactly zero at step 0, so enabling the experiment starts from the
-    plain IAM4VP prediction and learns only if the features help.
-    """
-
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        hidden_channels: int = 128,
-        zero_init: bool = True,
-    ) -> None:
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(in_channels, hidden_channels, kernel_size=3, padding=1),
-            nn.GELU(),
-            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1),
-            nn.GELU(),
-            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1),
-            nn.GELU(),
-            nn.Conv2d(hidden_channels, out_channels, kernel_size=1),
-        )
-        if zero_init:
-            final = self.net[-1]
-            nn.init.zeros_(final.weight)
-            nn.init.zeros_(final.bias)
-
-    def forward(self, features: torch.Tensor) -> torch.Tensor:
-        return self.net(features)
-
-
 class IAM4VP(nn.Module):
     """Iterative Auto-regressive Model for Video Prediction + опциональный physics-prior.
 
@@ -193,11 +259,12 @@ class IAM4VP(nn.Module):
     Backward сделан per-step снаружи (см. `IterativeManualStep` в стратегиях).
 
     При `use_physics=True` параллельный путь через `HybridBlock` добавляет
-    в выход physics-step из `Models.PredFormerGFT_HybridBlock`.
+    в выход physics-step из `utils.physics_hybrid`.
 
     Args:
         T_data, C_data, H_data, W_data: длина клипа и shape кадра.
-        hid_S, hid_T, N_S, N_T: размерности и глубины encoder/predictor/decoder.
+        hid_S, N_S, N_T: ширина скрытого слоя и глубины encoder/predictor/decoder
+            (ширина Predictor'а определяется ``T_data * hid_S``).
         use_physics: если True, выход — `AI + physics_correction`.
     """
 
@@ -208,7 +275,6 @@ class IAM4VP(nn.Module):
         H_data=32,
         W_data=64,
         hid_S=64,
-        hid_T=256,
         N_S=4,
         N_T=6,
         use_physics=True,
@@ -249,15 +315,15 @@ class IAM4VP(nn.Module):
         self.C_data = C_data
         self.time_mlp = Time_MLP(dim=hid_S)
         self.enc = Encoder(C_data, hid_S, N_S)
-        self.hid = Predictor(T_data * hid_S, hid_T, N_T)
-        self.dec = Decoder(hid_S, C_data, N_S, T_data)
+        self.hid = Predictor(T_data * hid_S, N_T)
+        self.dec = Decoder(hid_S, N_S, T_data)
         self.attn = Attention(hid_S)
         self.readout = nn.Conv2d(hid_S, C_data, 1)
         self.mask_token = nn.Parameter(
             torch.zeros(T_data, hid_S, H_data // 4, W_data // 4)
         )  # for 1_4 and 5_6
-        self.lp = LP(C_data, hid_S, N_S)
-        self.lp_phys = LP(C_data, hid_S, N_S)
+        self.lp = Encoder(C_data, hid_S, N_S)
+        self.lp_phys = Encoder(C_data, hid_S, N_S)
         if physics_w_diagnostic not in ("plain", "mass_consistent"):
             raise ValueError(
                 "physics_w_diagnostic must be 'plain' or 'mass_consistent', "
@@ -694,39 +760,6 @@ class IAM4VP(nn.Module):
             return torch.zeros((), device=self.hybrid_block.router_weight.device)
         return torch.stack(drifts).mean()
 
-    @staticmethod
-    def _avoid_small_abs(x: torch.Tensor, threshold: float = 1.0) -> torch.Tensor:
-        sign = torch.sign(x)
-        sign = torch.where(sign == 0.0, torch.ones_like(sign), sign)
-        return torch.where(torch.abs(x) < threshold, sign * threshold, x)
-
-    def _saturation_specific_humidity(self, t_kelvin: torch.Tensor) -> torch.Tensor:
-        """Magnus saturation specific humidity q_s(T, p) in kg/kg."""
-        pressure = self.physics_pressure_pa.to(device=t_kelvin.device, dtype=t_kelvin.dtype)
-        pressure = pressure.expand_as(t_kelvin)
-        t_c = t_kelvin - 273.15
-        exponent = 17.67 * t_c / self._avoid_small_abs(t_c + 243.5)
-        # Keeps pathological early predictions from producing inf before the
-        # residual head has learned; ERA5 temperatures sit comfortably inside.
-        exponent = torch.clamp(exponent, min=-20.0, max=20.0)
-        e_s = 611.2 * torch.exp(exponent)
-        denom = self._avoid_small_abs(pressure - 0.378 * e_s)
-        return torch.clamp(0.622 * e_s / denom, min=1e-8)
-
-    def _relative_to_specific_humidity(
-        self,
-        r_percent: torch.Tensor,
-        t_kelvin: torch.Tensor,
-    ) -> torch.Tensor:
-        return (r_percent / 100.0) * self._saturation_specific_humidity(t_kelvin)
-
-    def _specific_to_relative_humidity(
-        self,
-        q: torch.Tensor,
-        t_kelvin: torch.Tensor,
-    ) -> torch.Tensor:
-        return 100.0 * q / self._saturation_specific_humidity(t_kelvin)
-
     def x_to_zquvtw(self, x):
         """
         Преобразует входные данные x в формат zquvtw, пригодный для обработки через hybrid_block.
@@ -815,7 +848,7 @@ class IAM4VP(nn.Module):
             raise ValueError(
                 "PI-IAM4VP HybridBlock currently has hardcoded derivative "
                 f"geometry for an 8x16 latent grid, got {latent_h}x{latent_w}. "
-                "Pass 32x64 crops or update PredFormerGFT_HybridBlock geometry."
+                "Pass 32x64 crops or update utils.physics_hybrid geometry."
             )
 
         if self.physics_residual_hybrid_mode == "stable_physical":
@@ -836,7 +869,7 @@ class IAM4VP(nn.Module):
                 humidity_is_specific=False,
             )
             if self.physics_residual_humidity_mode == "relative_to_specific":
-                humidity = self._relative_to_specific_humidity(humidity, t)
+                humidity = relative_to_specific_humidity(humidity, t, self.physics_pressure_pa)
                 humidity = self._finite_clamp(humidity, 0.0, 0.08)
             hybrid_input = torch.cat([z, t, humidity, u, v], dim=1)
         else:
@@ -877,9 +910,10 @@ class IAM4VP(nn.Module):
                 prev_physical[:, 4:17],
                 prev_physical[:, 17:30],
                 (
-                    self._relative_to_specific_humidity(
+                    relative_to_specific_humidity(
                         prev_physical[:, 30:43],
                         prev_physical[:, 17:30],
+                        self.physics_pressure_pa,
                     )
                     if self.physics_residual_humidity_mode == "relative_to_specific"
                     else prev_physical[:, 30:43]
@@ -899,7 +933,9 @@ class IAM4VP(nn.Module):
                 fallback_parts=fallback_parts,
             )
             if self.physics_residual_humidity_mode == "relative_to_specific":
-                humidity_new = self._specific_to_relative_humidity(humidity_new, t_new)
+                humidity_new = specific_to_relative_humidity(
+                    humidity_new, t_new, self.physics_pressure_pa
+                )
                 humidity_new = self._finite_clamp(
                     humidity_new,
                     0.0,

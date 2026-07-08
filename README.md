@@ -3,12 +3,17 @@
 Code for HSE VKR weather-forecasting experiments on WeatherBench. The repository
 is now trimmed to the active model families used for training:
 
-- `PI-IAM4VP` / IAM4VP, implemented in `Models/PI_IAM4VP.py`.
-- `SimVP`, implemented in `Models/SimVP.py`.
-- `PredRNN` and `PredRNNv2`, implemented in `Models/PredRNN.py`.
+- `IAM4VP` / `PI-IAM4VP` (registry aliases of one class; physics is enabled by
+  config params), implemented in `Models/IAM4VP.py` + `Models/IAM4VP_utils.py`.
+- `SimVP`, implemented in `Models/SimVP.py` + `Models/SimVP_utils.py` +
+  `Models/SimVP_blocks/`.
+- `PredRNN` and `PredRNNv2`, implemented in `Models/PredRNN.py` +
+  `Models/PredRNN_utils.py`.
 
-`Models/PredFormerGFT_HybridBlock.py` is kept as an internal PI-IAM4VP physics
-dependency. It is not registered as a standalone training architecture.
+The trainable physics core (HybridBlock, PDE kernels, the residual-corrector
+head, and humidity conversions) lives in `utils/physics_hybrid.py`; it is a
+model-independent dependency of the PI-model family, not a standalone
+training architecture.
 
 ## Repository Layout
 
@@ -18,8 +23,10 @@ dependency. It is not registered as a standalone training architecture.
 - `Data/` — WeatherBench datasets (`v1`, `v3`, `v3_memmap`, `v4`).
 - `Models/` — active architectures and the model registry.
 - `training_strategies/` — training-step strategies for the active models.
-- `utils/` — metrics, normalization, registries, distributed helpers and
-  checkpoint utilities.
+- `utils/` — metrics, normalization, registries, distributed helpers,
+  checkpoint utilities, and physics: `utils/physics.py` (non-trainable
+  diagnostics library) and `utils/physics_hybrid.py` (trainable hybrid
+  physics core for PI-models).
 - `train/` — small per-model wrappers for IAM4VP, SimVP and PredRNN.
 - `sh_files/` — Slurm launchers and remote-submit helpers.
 - `docs/` — retained PI-IAM4VP notes and current idea sketches.
@@ -107,8 +114,7 @@ Important details:
   frames `t..t+11h`, and `start_time_y: 12`, `end_time_y: 23` means hourly
   targets `t+12h..t+23h`.
 - `v3_memmap` and `v4` require an explicit packed memmap path. Pass
-  `MEMMAP_PATH_OVERRIDE`, or set `WEATHERPRED_USA_MEMMAP` /
-  `WEATHERPRED_GLOBE_MEMMAP` in `.env`.
+  `MEMMAP_PATH_OVERRIDE`, or set `WEATHERPRED_USA_MEMMAP` in `.env`.
 - `v1`, `v3` and `v3_memmap` datasets return normalized tensors. `v4` returns
   raw memmap tensors; `trainer.py` applies `WeatherNormalize` on the batch.
 
@@ -117,7 +123,7 @@ Important details:
 | Model key | Typical strategy (`training.litmodel`) |
 | --- | --- |
 | `SimVP` | `mutiout_f` |
-| `PI-IAM4VP` | `mutiout_imvp_small_world` |
+| `IAM4VP` / `PI-IAM4VP` | `mutiout_imvp_small_world` |
 | `PredRNN` | `mutiout_predrnn` |
 | `PredRNNv2` | `mutiout_predrnn` |
 

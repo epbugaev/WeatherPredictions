@@ -1,11 +1,23 @@
-import numpy as np
+"""Обучаемая физика для PI-моделей: ядро ``HybridBlock`` и residual-head.
+
+Модуль реализует примитивные уравнения на латент-сетке: WENO-5 производные
+(``weno5_flux``/``weno_derivative``/``d_x_weno``/``d_y_weno``), вертикальную
+производную и интегрирование по давлению (``d_z``/``integral_z``), ядро явного
+шага ``PDE_kernel`` и его стек ``PDE_block``. ``HybridBlock`` — адаптивный
+роутер между физической PDE-эволюцией и conv-путём. Дополнительно здесь живут
+модель-независимые компоненты physics-informed надстройки: residual-head
+``PhysicsTendencyResidualCorrector`` и термодинамические хелперы конверсии
+влажности (Magnus, ``saturation_specific_humidity`` и парные r<->q функции).
+
+Отличие от ``utils/physics.py``: тот модуль — необучаемая диагностическая
+библиотека (FD/WENO-анализ, PDE-невязки, check-physics); здесь — обучаемые
+``nn.Module`` и хелперы, встраиваемые в PI-модели (сейчас ``Models/IAM4VP.py``,
+далее PI-PredRNN/PI-SimVP).
+"""
+
 import torch
 import torch.nn.functional as F
-import xarray as xr
-from einops import rearrange
-from einops.layers.torch import Rearrange
-from timm.layers import DropPath, to_2tuple, trunc_normal_
-from torch import einsum, nn
+from torch import nn
 
 # ===== Исходные расчёты параметров дискретизации =====
 # USA-crop: вход 32×64 → patch=4 → latents 8×16.
@@ -560,8 +572,20 @@ class PDE_kernel(nn.Module):
 
     ################################################################
 
-    def forward(self, x, zquvtw):
-        # x [B, D, H, W]
+    def forward(self, x: torch.Tensor, zquvtw: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Один явный PDE-шаг поверх латента x-пути и физического состояния.
+
+        Args:
+            x: ``torch.Tensor`` формы ``(B, D, H, W)`` — латент x-пути
+                (channels-first, ``D = 5 * zquvtw_channel``).
+            zquvtw: ``torch.Tensor`` той же формы — физическое состояние в
+                layout'е ``[z, t, q, u, v]`` по ``zquvtw_channel`` уровней
+                на переменную.
+
+        Returns:
+            Кортеж ``(x, zquvtw_new)`` тех же форм: латент с residual-skip
+            после обратной нормировки и новое нормированное состояние.
+        """
         skip = x
 
         ################################################################
@@ -658,431 +682,24 @@ class PDE_block(nn.Module):
                 )
             )
 
-    def forward(self, x, zquvtw):
-        # x [B, H, W, D]
+    def forward(self, x: torch.Tensor, zquvtw: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Стек ``PDE_kernel``-шагов с residual-skip по обоим путям.
+
+        Args:
+            x: ``torch.Tensor`` формы ``(B, H, W, D)`` — латент x-пути
+                (channels-last).
+            zquvtw: ``torch.Tensor`` той же формы — физическое состояние
+                ``[z, t, q, u, v]`` (channels-last).
+
+        Returns:
+            Кортеж ``(x + skip_x, zquvtw + skip_zquvtw)`` форм ``(B, H, W, D)``.
+        """
         skip_x, skip_zquvtw = x, zquvtw
         x, zquvtw = x.permute(0, 3, 1, 2), zquvtw.permute(0, 3, 1, 2)  # [B, D, H, W]
         for PDE_kernel in self.PDE_kernels:
             x, zquvtw = PDE_kernel(x, zquvtw)
         x, zquvtw = x.permute(0, 2, 3, 1), zquvtw.permute(0, 2, 3, 1)
         return x + skip_x, zquvtw + skip_zquvtw  # x [B, H, W, D]
-
-
-class PreNorm(nn.Module):
-    def __init__(self, dim, fn):
-        super().__init__()
-        self.norm = nn.LayerNorm(dim)
-        self.fn = fn
-
-    def forward(self, x, **kwargs):
-        return self.fn(self.norm(x), **kwargs)
-
-
-class FeedForward(nn.Module):
-    def __init__(self, dim, hidden_dim, dropout=0.0):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(dim, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, dim),
-            nn.Dropout(dropout),
-        )
-
-    def forward(self, x):
-        return self.net(x)
-
-
-class Attention(nn.Module):
-    def __init__(self, dim, heads=8, dim_head=64, dropout=0.0):
-        super().__init__()
-        inner_dim = dim_head * heads
-        project_out = not (heads == 1 and dim_head == dim)
-
-        self.heads = heads
-        self.scale = dim_head**-0.5
-
-        self.to_qkv = nn.Linear(dim, inner_dim * 3, bias=False)
-
-        self.to_out = (
-            nn.Sequential(nn.Linear(inner_dim, dim), nn.Dropout(dropout))
-            if project_out
-            else nn.Identity()
-        )
-
-    def forward(self, x):
-        h = self.heads
-        qkv = self.to_qkv(x).chunk(3, dim=-1)
-        q, k, v = map(lambda t: rearrange(t, "b n (h d) -> b h n d", h=h), qkv)
-        dots = einsum("b h i d, b h j d -> b h i j", q, k) * self.scale
-
-        attn = dots.softmax(dim=-1)
-
-        out = einsum("b h i j, b h j d -> b h i d", attn, v)
-        out = rearrange(out, "b h n d -> b n (h d)")
-        out = self.to_out(out)
-        return out
-
-
-class SwiGLU(nn.Module):
-    def __init__(
-        self,
-        in_features,
-        hidden_features=None,
-        out_features=None,
-        act_layer=nn.SiLU,
-        norm_layer=None,
-        bias=True,
-        drop=0.0,
-    ):
-        super().__init__()
-        out_features = out_features or in_features
-        hidden_features = hidden_features or in_features
-        bias = to_2tuple(bias)
-        drop_probs = to_2tuple(drop)
-
-        self.fc1_g = nn.Linear(in_features, hidden_features, bias=bias[0])
-        self.fc1_x = nn.Linear(in_features, hidden_features, bias=bias[0])
-        self.act = act_layer()
-        self.drop1 = nn.Dropout(drop_probs[0])
-        self.norm = norm_layer(hidden_features) if norm_layer is not None else nn.Identity()
-        self.fc2 = nn.Linear(hidden_features, out_features, bias=bias[1])
-        self.drop2 = nn.Dropout(drop_probs[1])
-
-    def init_weights(self):
-        nn.init.ones_(self.fc1_g.bias)
-        nn.init.normal_(self.fc1_g.weight, std=1e-6)
-
-    def forward(self, x):
-        x_gate = self.fc1_g(x)
-        x = self.fc1_x(x)
-        x = self.act(x_gate) * x
-        x = self.drop1(x)
-        x = self.norm(x)
-        x = self.fc2(x)
-        x = self.drop2(x)
-        return x
-
-
-class GatedTransformer(nn.Module):
-    def __init__(
-        self, dim, depth, heads, dim_head, mlp_dim, dropout=0.0, attn_dropout=0.0, drop_path=0.1
-    ):
-        super().__init__()
-        self.layers = nn.ModuleList([])
-        self.norm = nn.LayerNorm(dim)
-        for _ in range(depth):
-            self.layers.append(
-                nn.ModuleList(
-                    [
-                        PreNorm(
-                            dim,
-                            Attention(dim, heads=heads, dim_head=dim_head, dropout=attn_dropout),
-                        ),
-                        PreNorm(dim, SwiGLU(dim, mlp_dim, drop=dropout)),
-                        DropPath(drop_path) if drop_path > 0.0 else nn.Identity(),
-                        DropPath(drop_path) if drop_path > 0.0 else nn.Identity(),
-                    ]
-                )
-            )
-        self.apply(self._init_weights)
-
-    def _init_weights(self, m):
-        if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight, std=0.02)
-            if isinstance(m, nn.Linear) and m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.LayerNorm):
-            nn.init.constant_(m.bias, 0)
-            nn.init.constant_(m.weight, 1.0)
-
-    def forward(self, x):
-        for attn, ff, drop_path1, drop_path2 in self.layers:
-            x = x + drop_path1(attn(x))
-            x = x + drop_path2(ff(x))
-        return self.norm(x)
-
-
-class PredFormerLayer(nn.Module):
-    def __init__(
-        self, dim, depth, heads, dim_head, mlp_dim, dropout=0.0, attn_dropout=0.0, drop_path=0.1
-    ):
-        super().__init__()
-
-        self.temporal_transformer_first = GatedTransformer(
-            dim, depth, heads, dim_head, mlp_dim, dropout, attn_dropout, drop_path
-        )
-        self.space_transformer = GatedTransformer(
-            dim, depth, heads, dim_head, mlp_dim, dropout, attn_dropout, drop_path
-        )
-        self.temporal_transformer_second = GatedTransformer(
-            dim, depth, heads, dim_head, mlp_dim, dropout, attn_dropout, drop_path
-        )
-
-    def forward(self, x):
-        b, t, n, _ = x.shape
-        x_t = x
-
-        # t branch (first temporal)
-        x_t = rearrange(x_t, "b t n d -> b n t d")
-        x_t = rearrange(x_t, "b n t d -> (b n) t d")
-        x_t = self.temporal_transformer_first(x_t)
-
-        # s branch (space)
-        x_ts = rearrange(x_t, "(b n) t d -> b n t d", b=b)
-        x_ts = rearrange(x_ts, "b n t d -> b t n d")
-        x_ts = rearrange(x_ts, "b t n d -> (b t) n d")
-        x_ts = self.space_transformer(x_ts)
-
-        # t branch (second temporal)
-        x_tst = rearrange(x_ts, "(b t) n d -> b t n d", b=b)
-        x_tst = rearrange(x_tst, "b t n d -> b n t d")
-        x_tst = rearrange(x_tst, "b n t d -> (b n) t d")
-        x_tst = self.temporal_transformer_second(x_tst)
-
-        # ts output branch
-        x_tst = rearrange(x_tst, "(b n) t d -> b n t d", b=b)
-        x_tst = rearrange(x_tst, "b n t d -> b t n d", b=b)
-
-        # add residual connection, we only add this for human3.6m
-        # x_tst += x_ori
-
-        return x_tst
-
-
-def sinusoidal_embedding(n_channels, dim):
-    pe = torch.FloatTensor(
-        [[p / (10000 ** (2 * (i // 2) / dim)) for i in range(dim)] for p in range(n_channels)]
-    )
-    pe[:, 0::2] = torch.sin(pe[:, 0::2])
-    pe[:, 1::2] = torch.cos(pe[:, 1::2])
-    return rearrange(pe, "... -> 1 ...")
-
-
-class PredFormer_Model(nn.Module):
-    def __init__(self, model_config, **kwargs):
-        super().__init__()
-        self.image_height = model_config["height"]
-        self.image_width = model_config["width"]
-        self.patch_size = model_config["patch_size"]
-        self.num_patches_h = self.image_height // self.patch_size
-        self.num_patches_w = self.image_width // self.patch_size
-        self.num_patches = self.num_patches_h * self.num_patches_w
-        self.num_frames_in = model_config["pre_seq"]
-        self.dim = model_config["dim"]
-        self.num_channels = model_config["num_channels"]
-        self.num_classes = self.num_channels
-        self.heads = model_config["heads"]
-        self.dim_head = model_config["dim_head"]
-        self.dropout = model_config["dropout"]
-        self.attn_dropout = model_config["attn_dropout"]
-        self.drop_path = model_config["drop_path"]
-        self.scale_dim = model_config["scale_dim"]
-        self.Ndepth = model_config["Ndepth"]  # Ensure this is defined
-        self.depth = model_config["depth"]  # Ensure this is defined
-        self.path_to_constants = model_config["path_to_constants"]
-        self.ds = xr.open_dataset(self.path_to_constants)
-        self.orography_mask = torch.Tensor(np.array(self.ds.orography))  # shape = [H, W]
-        self.soil_mask = torch.Tensor(np.array(self.ds.slt))  # shape = [H, W]
-        self.lsm_mask = torch.Tensor(np.array(self.ds.lsm))  # shape = [H, W]
-        self.static_masks = torch.stack(
-            [self.orography_mask, self.soil_mask, self.lsm_mask], dim=0
-        ).unsqueeze(0)  # [1, 3, H, W]
-        self.num_masks = 3  # Определяем количество масок
-        self.downscaling_factor_all = 4  # Default downscaling factor for GFT
-        self.gft_weight = 0.1  # Вес физических эмбеддингов при добавлении к основным данным
-
-        cut = model_config.get("cut")
-        if cut is not None:
-            (lat0, lat1), (lon0, lon1) = cut
-            self.static_masks = self.static_masks[..., lat0:lat1, lon0:lon1]
-        if self.static_masks.shape[-2:] != (self.image_height, self.image_width):
-            raise ValueError(
-                f"Static mask shape {tuple(self.static_masks.shape[-2:])} does not match "
-                f"configured image shape {(self.image_height, self.image_width)}. "
-                "Set model.params.cut to the same spatial window as data.cut."
-            )
-
-        assert self.image_height % self.patch_size == 0, (
-            "Image height must be divisible by the patch size."
-        )
-        assert self.image_width % self.patch_size == 0, (
-            "Image width must be divisible by the patch size."
-        )
-        self.patch_dim = self.num_channels * self.patch_size**2
-
-        self.to_patch_embedding = nn.Sequential(
-            Rearrange(
-                "b t c (h p1) (w p2) -> b t (h w) (p1 p2 c)", p1=self.patch_size, p2=self.patch_size
-            ),
-            nn.Linear(self.patch_dim, self.dim),
-        )
-
-        self.mask_patch_dim = self.num_masks * self.patch_size**2
-        self.rearrange_masks = Rearrange(
-            "b c (h p1) (w p2) -> b (h w) (p1 p2 c)", p1=self.patch_size, p2=self.patch_size
-        )
-        self.mask_embedding = nn.Linear(self.mask_patch_dim, self.dim)
-
-        self.pos_embedding = nn.Parameter(
-            sinusoidal_embedding(self.num_frames_in * self.num_patches, self.dim),
-            requires_grad=False,
-        ).view(1, self.num_frames_in, self.num_patches, self.dim)
-
-        self.blocks = nn.ModuleList(
-            [
-                PredFormerLayer(
-                    self.dim,
-                    self.depth,
-                    self.heads,
-                    self.dim_head,
-                    self.dim * self.scale_dim,
-                    self.dropout,
-                    self.attn_dropout,
-                    self.drop_path,
-                )
-                for i in range(self.Ndepth)
-            ]
-        )
-
-        self.mlp_head = nn.Sequential(
-            nn.LayerNorm(self.dim), nn.Linear(self.dim, self.num_channels * self.patch_size**2)
-        )
-
-        # Создаем HybridBlock для GFT
-        self._init_gft_block()
-
-    def _init_gft_block(self):
-        """Инициализирует HybridBlock для GFT с оптимальными параметрами"""
-        # Размерность входных данных (без первых 4 каналов)
-        input_dim = 65  # Обычно 65 каналов для физических переменных
-
-        self.hybrid_block = HybridBlock(
-            dim=input_dim,  # Размерность входного канала
-            zquvtw_channel=13,  # 13 вертикальных уровней
-            depth=3,  # Глубина блока PDE
-            block_dt=300,  # Временной шаг для PDE в секундах
-            inverse_time=False,  # Не инвертировать временную эволюцию
-            physics_part_coef=0.5,  # Равный вес для AI и физики
-        )
-
-    def x_to_zquvtw(self, x):
-        """
-        Преобразует входные данные x в формат zquvtw, пригодный для обработки через hybrid_block.
-
-        Args:
-            x: Входной тензор формы [B, C, H, W], где C - число каналов (обычно 65)
-
-        Returns:
-            zquvtw: Тензор формы [B, H//4, W//4, C] — пространственное понижение
-                и перестановка осей.
-        """
-        # x имеет форму [B, C, H, W]
-        B, C, H, W = x.shape
-
-        # Понижающая дискретизация для уменьшения размера пространственных координат
-        zquvtw = torch.nn.functional.interpolate(
-            x,
-            size=(H // self.downscaling_factor_all, W // self.downscaling_factor_all),
-            mode="bilinear",
-        )
-
-        # Перестановка осей для формата [B, H, W, C], который ожидает HybridBlock
-        zquvtw = zquvtw.permute(0, 2, 3, 1)  # [B, H//4, W//4, C]
-
-        return zquvtw
-
-    def forward(self, x):
-        B, T, C, H, W = x.shape
-        assert self.num_channels == C
-
-        x_gft_list = []
-        for i in range(T - 1):
-            # Применяем GFT с помощью hybrid_block
-            x_patch = x[:, i, 4:, :, :]  # Берем только каналы с индекса 4, получая Z, Q, U, V, T
-
-            # Получаем входные данные для hybrid_block.
-            # x_to_zquvtw возвращает [B, H//4, W//4, C]; HybridBlock/PDE_block
-            # ожидают оба входа в одном [B, H, W, C] формате (внутри пермутится
-            # на [B, C, H, W] под Conv2d). До переноса этого варианта на USA
-            # x_patch шёл сюда как [B, C, H, W] — в результате первый permute
-            # внутри PDE_block ломал каналы. Приводим обе ветки к одному
-            # downscale+layout, как в PredFormerGFT.py.
-            zquvtw = self.x_to_zquvtw(x_patch)
-            x_patch = zquvtw.clone()
-
-            for _ in range(12):
-                # Получаем физические эмбеддинги через hybrid_block
-                x_patch, zquvtw = self.hybrid_block(
-                    x_patch, zquvtw
-                )  # Используем одинаковые данные для обоих входов
-
-            x_gft = x_patch
-            # Возвращаем к исходному формату
-            x_gft = x_gft.permute(0, 3, 1, 2)  # [B, C, H//4, W//4]
-
-            # Масштабируем обратно до исходного размера
-            x_gft = torch.nn.functional.interpolate(x_gft, size=(H, W), mode="bilinear")
-
-            x_gft_list.append(x_gft)
-
-        # Новый список: нулевой тензор в начале + элементы прежнего без последнего
-        zero_tensor = torch.zeros_like(x[:, 0, 4:, :, :], device=x.device)
-        x_gft_list = [zero_tensor] + x_gft_list  # [B, 0, C-4, H, W] + [B, T-1, C-4, H, W]
-        # Объединяем результаты в один тензор
-        x_gft = torch.stack(x_gft_list, dim=1)  # [B, T, C-4, H, W]
-
-        # Добавляем физические эмбеддинги к исходным данным
-        x_with_physics = x.clone()
-
-        # Проверяем соответствие размерностей
-        channels_physics = x[:, :, 4:, :, :].shape[2]
-
-        if x_gft.shape[2] == channels_physics:
-            x_with_physics[:, :, 4:, :, :] = x[:, :, 4:, :, :] + self.gft_weight * x_gft
-        else:
-            # Если размерности не совпадают, выполняем дополнительное преобразование
-
-            if x_gft.shape[2] < channels_physics:
-                # Дополняем нулями
-                padding = torch.zeros(
-                    B, T, channels_physics - x_gft.shape[2], H, W, device=x.device
-                )
-                x_gft = torch.cat([x_gft, padding], dim=2)
-            else:
-                # Обрезаем лишние каналы
-                x_gft = x_gft[:, :, :channels_physics, :, :]
-
-            x_with_physics[:, :, 4:, :, :] = x[:, :, 4:, :, :] + self.gft_weight * x_gft
-
-        x = x_with_physics
-
-        mask_patches = self.rearrange_masks(
-            self.static_masks.to(x.device)
-        )  # [1, num_patches, 3*ps*ps]
-        mask_embed = self.mask_embedding(mask_patches)  # [1, num_patches, dim]
-        mask_embed = mask_embed.unsqueeze(1)  # [1, 1, num_patches, dim]
-        mask_embed = mask_embed.to(x.device)
-
-        # Patch Embedding для входа x
-        x_embed = self.to_patch_embedding(x)  # [B, T, num_patches, dim]
-
-        x_combined = x_embed + mask_embed
-
-        # Position Embedding
-        x_combined += self.pos_embedding.to(x.device)
-
-        # PredFormer Encoder
-        for blk in self.blocks:
-            x_combined = blk(x_combined)
-        # MLP head
-        x = self.mlp_head(x_combined.reshape(-1, self.dim))
-        x = x.view(
-            B, T, self.num_patches_h, self.num_patches_w, C, self.patch_size, self.patch_size
-        )
-        x = x.permute(0, 1, 4, 2, 5, 3, 6).reshape(B, T, C, H, W)
-
-        return x
 
 
 class HybridBlock(nn.Module):
@@ -1158,3 +775,130 @@ class HybridBlock(nn.Module):
         weight_ai = 0.5 * torch.ones_like(x) - self.router_weight
         x = weight_physics * zquvtw + weight_ai * feat_pde
         return x, zquvtw
+
+
+# ===== Термодинамика и residual-head для PI-моделей =====
+
+
+def avoid_small_abs(x: torch.Tensor, threshold: float = 1.0) -> torch.Tensor:
+    """Отводит |x| от нуля с сохранением знака (sign(0) трактуется как +1).
+
+    Args:
+        x: произвольный ``torch.Tensor``.
+        threshold: минимально допустимый модуль значения.
+
+    Returns:
+        ``torch.Tensor`` той же формы: ``x`` там, где ``|x| >= threshold``,
+        иначе ``sign(x) * threshold``.
+    """
+    sign = torch.sign(x)
+    sign = torch.where(sign == 0.0, torch.ones_like(sign), sign)
+    return torch.where(torch.abs(x) < threshold, sign * threshold, x)
+
+
+def saturation_specific_humidity(
+    t_kelvin: torch.Tensor,
+    pressure_pa: torch.Tensor,
+) -> torch.Tensor:
+    """Насыщенная удельная влажность q_s(T, p) по формуле Магнуса, кг/кг.
+
+    Args:
+        t_kelvin: температура в Кельвинах, форма ``(B, L, H, W)``.
+        pressure_pa: давление уровней в Па, broadcast-совместимо с ``t_kelvin``
+            (обычно ``(1, L, 1, 1)``).
+
+    Returns:
+        ``torch.Tensor`` формы ``t_kelvin`` со значениями ``>= 1e-8``.
+    """
+    pressure = pressure_pa.to(device=t_kelvin.device, dtype=t_kelvin.dtype)
+    pressure = pressure.expand_as(t_kelvin)
+    t_c = t_kelvin - 273.15
+    exponent = 17.67 * t_c / avoid_small_abs(t_c + 243.5)
+    # Keeps pathological early predictions from producing inf before the
+    # residual head has learned; ERA5 temperatures sit comfortably inside.
+    exponent = torch.clamp(exponent, min=-20.0, max=20.0)
+    e_s = 611.2 * torch.exp(exponent)
+    denom = avoid_small_abs(pressure - 0.378 * e_s)
+    return torch.clamp(0.622 * e_s / denom, min=1e-8)
+
+
+def relative_to_specific_humidity(
+    r_percent: torch.Tensor,
+    t_kelvin: torch.Tensor,
+    pressure_pa: torch.Tensor,
+) -> torch.Tensor:
+    """Конверсия относительной влажности (%) в удельную (кг/кг).
+
+    Args:
+        r_percent: относительная влажность в процентах, ``(B, L, H, W)``.
+        t_kelvin: температура в Кельвинах той же формы.
+        pressure_pa: давление уровней в Па, broadcast-совместимо.
+
+    Returns:
+        Удельная влажность q, ``torch.Tensor`` формы ``r_percent``.
+    """
+    return (r_percent / 100.0) * saturation_specific_humidity(t_kelvin, pressure_pa)
+
+
+def specific_to_relative_humidity(
+    q: torch.Tensor,
+    t_kelvin: torch.Tensor,
+    pressure_pa: torch.Tensor,
+) -> torch.Tensor:
+    """Конверсия удельной влажности (кг/кг) в относительную (%).
+
+    Args:
+        q: удельная влажность, ``(B, L, H, W)``.
+        t_kelvin: температура в Кельвинах той же формы.
+        pressure_pa: давление уровней в Па, broadcast-совместимо.
+
+    Returns:
+        Относительная влажность в процентах, ``torch.Tensor`` формы ``q``.
+    """
+    return 100.0 * q / saturation_specific_humidity(t_kelvin, pressure_pa)
+
+
+class PhysicsTendencyResidualCorrector(nn.Module):
+    """Small zero-start residual head for physics-derived tendency features.
+
+    This module treats the ``HybridBlock`` branch as a feature generator, not
+    as a trusted forecast. With zero initialisation the final convolution
+    emits exactly zero at step 0, so enabling the experiment starts from the
+    plain backbone prediction and learns only if the features help. Shared by
+    the PI-model family (currently PI-IAM4VP).
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        hidden_channels: int = 128,
+        zero_init: bool = True,
+    ) -> None:
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(in_channels, hidden_channels, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(hidden_channels, out_channels, kernel_size=1),
+        )
+        if zero_init:
+            final = self.net[-1]
+            nn.init.zeros_(final.weight)
+            nn.init.zeros_(final.bias)
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        """Map stacked physics/prediction features to an additive correction.
+
+        Args:
+            features: ``torch.Tensor`` of shape ``(B, in_channels, H, W)`` — the
+                concatenated prediction/prior/tendency feature blocks.
+
+        Returns:
+            ``torch.Tensor`` of shape ``(B, out_channels, H, W)``. With
+            ``zero_init=True`` this is exactly zero until the head is trained.
+        """
+        return self.net(features)

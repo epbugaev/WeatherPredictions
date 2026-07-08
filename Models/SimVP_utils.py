@@ -10,10 +10,9 @@ from timm.models.mlp_mixer import MixerBlock
 from timm.models.swin_transformer import SwinTransformerBlock
 from timm.models.vision_transformer import Block as ViTBlock
 
-from Models.blocks import (
+from Models.SimVP_blocks import (
     CBlock,
     ChannelAggregationFFN,
-    HorBlock,
     MixMlp,
     MultiOrderGatedAggregation,
     PoolFormerBlock,
@@ -254,7 +253,7 @@ class GroupConv2d(nn.Module):
 class gInception_ST(nn.Module):
     """A IncepU block for SimVP"""
 
-    def __init__(self, C_in, C_hid, C_out, incep_ker=[3, 5, 7, 11], groups=8):
+    def __init__(self, C_in, C_hid, C_out, incep_ker: tuple[int, ...] = (3, 5, 7, 11), groups=8):
         super().__init__()
         self.conv1 = nn.Conv2d(C_in, C_hid, kernel_size=1, stride=1, padding=0)
 
@@ -525,8 +524,8 @@ class MogaSubBlock(nn.Module):
         drop_rate=0.0,
         drop_path_rate=0.0,
         init_value=1e-5,
-        attn_dw_dilation=[1, 2, 3],
-        attn_channel_split=[1, 3, 4],
+        attn_dw_dilation: tuple[int, ...] = (1, 2, 3),
+        attn_channel_split: tuple[int, ...] = (1, 3, 4),
     ):
         super().__init__()
         self.out_channels = embed_dims
