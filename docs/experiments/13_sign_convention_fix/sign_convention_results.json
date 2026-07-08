@@ -1,0 +1,25 @@
+{
+  "d_z_of_p_interior_mean": -0.9833332896232605,
+  "integral_z_orientation": {
+    "top_50hpa": 1012.0,
+    "bottom_1000hpa": 75.0
+  },
+  "divergence_probe": {
+    "w_400hpa_interior": -0.0068699996918439865,
+    "t_t_400hpa_interior": 0.001226175343617797
+  },
+  "hydrostatic_probe": {
+    "z_t_50hpa": 0.10379116982221603,
+    "z_t_500hpa": 0.02390950731933117,
+    "z_t_1000hpa": 0.0021524999756366014
+  },
+  "condensation_probe": {
+    "saturated_ascent_q_t_1000hpa": -1.3634540607654344e-08,
+    "saturated_descent_q_t_max_abs": 3.1044087859719537e-15,
+    "subsaturated_ascent_q_t_max_abs": 7.761021964929884e-16
+  },
+  "pure_kernel_qs_probe": {
+    "qs_500hpa_253K": 0.0015455629909411073,
+    "qs_batch_dependence_abs": 0.0
+  }
+}
