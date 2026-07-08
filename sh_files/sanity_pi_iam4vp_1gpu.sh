@@ -17,9 +17,12 @@ set -euo pipefail
 export OMP_NUM_THREADS=4
 export PYTHONUNBUFFERED=1
 
-_sc_here="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# sbatch copies this script to a spool dir, so BASH_SOURCE is not the repo path;
+# resolve REPO_ROOT from the submit dir and source the contract by absolute path.
+REPO_ROOT="${REPO_ROOT:-${SLURM_SUBMIT_DIR:-${HOME}/WeatherPredictions}}"
+export REPO_ROOT
 # shellcheck source=sh_files/_shell_contract.sh
-source "${_sc_here}/_shell_contract.sh" "${_sc_here}"
+source "${REPO_ROOT}/sh_files/_shell_contract.sh" "${REPO_ROOT}/sh_files"
 
 ORIG_MEMMAP="${ORIG_MEMMAP:-${WEATHERPRED_USA_MEMMAP:-}}"
 : "${ORIG_MEMMAP:?Set ORIG_MEMMAP or WEATHERPRED_USA_MEMMAP to the packed USA memmap .dat for v4.}"

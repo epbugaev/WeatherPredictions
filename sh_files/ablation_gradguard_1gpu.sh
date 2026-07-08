@@ -17,9 +17,12 @@ set -euo pipefail
 export OMP_NUM_THREADS=4
 export PYTHONUNBUFFERED=1
 
-_sc_here="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# sbatch copies this script to a spool dir, so BASH_SOURCE is not the repo path;
+# resolve REPO_ROOT from the submit dir and source the contract by absolute path.
+REPO_ROOT="${REPO_ROOT:-${SLURM_SUBMIT_DIR:-${HOME}/WeatherPredictions}}"
+export REPO_ROOT
 # shellcheck source=sh_files/_shell_contract.sh
-source "${_sc_here}/_shell_contract.sh" "${_sc_here}"
+source "${REPO_ROOT}/sh_files/_shell_contract.sh" "${REPO_ROOT}/sh_files"
 
 BEFORE_COMMIT="${BEFORE_COMMIT:-4d2dea8}"
 BEFORE_WT="${BEFORE_WT:-${HOME}/wt_gg_before_${BEFORE_COMMIT}}"
@@ -46,11 +49,11 @@ JOB="${SLURM_JOB_ID:-local}"
 echo "[ablation] === AFTER (post-fix, ${REPO_ROOT}) ==="
 python "${REPO_ROOT}/tools/exp_gradguard_ablation.py" \
   --repo "${REPO_ROOT}" --label after --memmap "${STAGED_MEMMAP}" \
-  --arms fixedeq massconsistent legacy_hybrid --steps 12 \
+  --arms fixedeq legacy_hybrid --steps 12 \
   --out "${REPO_ROOT}/logs/gg_after_${JOB}.json"
 echo "[ablation] === BEFORE (pre-fix, ${BEFORE_WT} @ ${BEFORE_COMMIT}) ==="
 python "${REPO_ROOT}/tools/exp_gradguard_ablation.py" \
   --repo "${BEFORE_WT}" --label before --memmap "${STAGED_MEMMAP}" \
-  --arms fixedeq massconsistent legacy_hybrid --steps 12 \
+  --arms fixedeq legacy_hybrid --steps 12 \
   --out "${REPO_ROOT}/logs/gg_before_${JOB}.json"
 echo "[ablation] done: logs/gg_{before,after}_${JOB}.json"

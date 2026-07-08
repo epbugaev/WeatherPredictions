@@ -244,7 +244,11 @@ def expected_none_grad_prefixes(model: nn.Module) -> set[str]:
     runs_hybrid = uses_legacy_latent or (
         model.use_physics_residual_corrector and model.physics_feature_mode != "no_physics"
     )
-    if not runs_hybrid:
+    # stable_physical_v2 runs the HybridBlock as a pure primitive-equation
+    # integrator (physics_only_forward), which touches only geometry buffers, so
+    # every hybrid_block *parameter* is unused even though the block runs.
+    is_v2 = getattr(model, "_hybrid_physical_passthrough", False)
+    if not runs_hybrid or is_v2:
         expected.add("hybrid_block")
     return expected
 
@@ -323,7 +327,13 @@ def check_train_rollout(
                     hidden_grad > 0.0,
                     f"|g|={hidden_grad:.3e}",
                 )
-            if uses_physics_features and not model.physics_prior_detach:
+            is_v2 = getattr(model, "_hybrid_physical_passthrough", False)
+            if is_v2:
+                # v2 is a pure frozen-physics integrator: hybrid_block params must
+                # get NO gradient (defect-B fix bypasses conv/norm/router entirely).
+                hybrid_grad = grad_norm_for_prefix(model, "hybrid_block")
+                log.ok(arm, "hybrid_block_no_grad_v2", hybrid_grad == 0.0, f"|g|={hybrid_grad:.3e}")
+            elif uses_physics_features and not model.physics_prior_detach:
                 hybrid_grad = grad_norm_for_prefix(model, "hybrid_block")
                 log.ok(
                     arm, "hybrid_block_grad_nonzero_b1", hybrid_grad > 0.0, f"|g|={hybrid_grad:.3e}"

@@ -169,7 +169,12 @@ def main() -> None:
     )
     parser.add_argument("--label", required=True, help="Condition label (e.g. before / after)")
     parser.add_argument("--memmap", default=None, help="Packed USA memmap .dat path")
-    parser.add_argument("--arms", nargs="*", default=["fixedeq", "massconsistent", "legacy_hybrid"])
+    # Default arms are unchanged across the guard-fix boundary (fixedeq =
+    # stable_physical overflows and poisons pre-fix; legacy_hybrid = train-mode
+    # BN never overflows = negative control). massconsistent is excluded because
+    # it switched to stable_physical_v2 (defect-B fix), which would confound a
+    # pure grad-guard ablation.
+    parser.add_argument("--arms", nargs="*", default=["fixedeq", "legacy_hybrid"])
     parser.add_argument("--steps", type=int, default=12)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--num-batches", type=int, default=4)
