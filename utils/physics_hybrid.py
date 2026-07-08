@@ -260,6 +260,7 @@ class PDE_kernel(nn.Module):
         use_universal_R: bool = False,
         tendency_limiter: str = "physical_clip",
         tendency_caps: dict[str, float] | None = None,
+        physical_passthrough: bool = False,
     ):
         """Инициализирует ядро с crop-aware геометрией и переключателями физики.
 
@@ -289,6 +290,11 @@ class PDE_kernel(nn.Module):
             tendency_caps: поэлементные капы приращения на вызов ядра по переменной;
                 ``None`` → ``{'z':500,'t':5,'q':5,'u':10,'v':10}`` (единицы:
                 м²/с², K, ед. влажности, м/с, м/с).
+            physical_passthrough: если True, ``physics_only_forward`` интегрирует
+                ЧИСТОЕ физическое состояние примитивными уравнениями, минуя
+                conv-микс (``variable_norm``), ``norm_*``, ``variable_innorm`` и
+                роутер (fix дефекта B, режим ``stable_physical_v2`` модели). На
+                стандартный ``forward`` не влияет; существующие армы бит-в-бит.
 
         Raises:
             ValueError: при недопустимом значении любого строкового флага
@@ -323,6 +329,7 @@ class PDE_kernel(nn.Module):
         self.t_t_formulation = t_t_formulation
         self.use_universal_R = use_universal_R
         self.tendency_limiter = tendency_limiter
+        self.physical_passthrough = physical_passthrough
         self.tendency_caps = (
             {"z": 500.0, "t": 5.0, "q": 5.0, "u": 10.0, "v": 10.0}
             if tendency_caps is None
@@ -572,6 +579,36 @@ class PDE_kernel(nn.Module):
 
     ################################################################
 
+    def _evolve_fields(
+        self,
+        z_old: torch.Tensor,
+        t_old: torch.Tensor,
+        q_old: torch.Tensor,
+        u_old: torch.Tensor,
+        v_old: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Один шаг примитивных уравнений над (z, t, q, u, v); без norm/conv/router.
+
+        Разделяемое ядро физики: диагностирует ω, кэширует производные z и
+        интегрирует u, v, t, z, q на ``block_dt``. Одинаково вызывается штатным
+        ``forward`` (после conv-микса, с последующим ``norm_*``) и
+        ``physics_only_forward`` (над чистым состоянием, без ``norm_*``).
+
+        Args:
+            z_old, t_old, q_old, u_old, v_old: поля ``(B, variable_dim, H, W)``.
+
+        Returns:
+            Кортеж ``(z_new, t_new, q_new, u_new, v_new)`` тех же форм.
+        """
+        w_old = self.get_w(u_old, v_old)
+        self.share_z_dxyz(z_old)
+
+        u_new, v_new = self.uv_evolution(u_old, v_old, w_old)
+        t_new = self.t_evolution(u_old, v_old, w_old, t_old)
+        z_new = self.z_evolution(z_old)
+        q_new = self.q_evolution(u_old, v_old, t_old, w_old, q_old)
+        return z_new, t_new, q_new, u_new, v_new
+
     def forward(self, x: torch.Tensor, zquvtw: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Один явный PDE-шаг поверх латента x-пути и физического состояния.
 
@@ -594,13 +631,7 @@ class PDE_kernel(nn.Module):
         ) + self.physics_part_coef * zquvtw
         z_old, t_old, q_old, u_old, v_old = zquvtw_old.chunk(5, dim=1)
 
-        w_old = self.get_w(u_old, v_old)
-        self.share_z_dxyz(z_old)
-
-        u_new, v_new = self.uv_evolution(u_old, v_old, w_old)
-        t_new = self.t_evolution(u_old, v_old, w_old, t_old)
-        z_new = self.z_evolution(z_old)
-        q_new = self.q_evolution(u_old, v_old, t_old, w_old, q_old)
+        z_new, t_new, q_new, u_new, v_new = self._evolve_fields(z_old, t_old, q_old, u_old, v_old)
 
         z_new = self.norm_z(z_new)
         q_new = self.norm_q(q_new)
@@ -615,6 +646,26 @@ class PDE_kernel(nn.Module):
 
         x = self.block_norm(x)
         return x, zquvtw_new
+
+    def physics_only_forward(self, zquvtw: torch.Tensor) -> torch.Tensor:
+        """Чистый шаг примитивных уравнений над физическим состоянием (fix дефекта B).
+
+        В отличие от ``forward``: НЕ подмешивает ``variable_norm(x)`` (случайный
+        Conv2d, контаминировавший состояние z-масштабом), НЕ применяет ``norm_*``,
+        ``variable_innorm``, ``block_norm`` и роутер. Интегрирует ровно то чистое
+        физическое состояние, что подано. Используется режимом
+        ``stable_physical_v2`` модели.
+
+        Args:
+            zquvtw: ``torch.Tensor`` формы ``(B, D, H, W)`` — физическое состояние
+                ``[z, t, q, u, v]`` (channels-first, ``D = 5 * variable_dim``).
+
+        Returns:
+            ``torch.Tensor`` той же формы — эволюционированное физическое состояние.
+        """
+        z_old, t_old, q_old, u_old, v_old = zquvtw.chunk(5, dim=1)
+        z_new, t_new, q_new, u_new, v_new = self._evolve_fields(z_old, t_old, q_old, u_old, v_old)
+        return torch.cat([z_new, t_new, q_new, u_new, v_new], dim=1)
 
 
 class PDE_block(nn.Module):
@@ -638,6 +689,7 @@ class PDE_block(nn.Module):
         use_universal_R: bool = False,
         tendency_limiter: str = "physical_clip",
         tendency_caps: dict[str, float] | None = None,
+        physical_passthrough: bool = False,
     ):
         """Собирает стек ядер, прокидывая геометрию и флаги физики в каждое.
 
@@ -658,8 +710,11 @@ class PDE_block(nn.Module):
             use_universal_R: R=8.314 вместо R_d в гидростатике.
             tendency_limiter: ``'physical_clip'``/``'scale_diff'``.
             tendency_caps: поэлементные капы приращения по переменной.
+            physical_passthrough: прокидывается в каждое ядро; включает
+                ``physics_only_forward`` (чистая физика, fix дефекта B).
         """
         super().__init__()
+        self.physical_passthrough = physical_passthrough
         self.PDE_kernels = nn.ModuleList([])
         for _ in range(depth):
             self.PDE_kernels.append(
@@ -679,6 +734,7 @@ class PDE_block(nn.Module):
                     use_universal_R=use_universal_R,
                     tendency_limiter=tendency_limiter,
                     tendency_caps=tendency_caps,
+                    physical_passthrough=physical_passthrough,
                 )
             )
 
@@ -700,6 +756,25 @@ class PDE_block(nn.Module):
             x, zquvtw = PDE_kernel(x, zquvtw)
         x, zquvtw = x.permute(0, 2, 3, 1), zquvtw.permute(0, 2, 3, 1)
         return x + skip_x, zquvtw + skip_zquvtw  # x [B, H, W, D]
+
+    def physics_only_forward(self, zquvtw: torch.Tensor) -> torch.Tensor:
+        """Чистая цепочка физ-шагов над состоянием; без residual-skip (fix дефекта B).
+
+        В отличие от ``forward``: НЕ добавляет skip-удвоение входа к выходу
+        (``zquvtw + skip_zquvtw`` буквально удваивало физическое состояние по
+        глубине блока). Возвращает эволюционированное состояние как есть.
+
+        Args:
+            zquvtw: ``torch.Tensor`` формы ``(B, H, W, D)`` — физическое состояние
+                ``[z, t, q, u, v]`` (channels-last).
+
+        Returns:
+            ``torch.Tensor`` формы ``(B, H, W, D)`` — эволюционированное состояние.
+        """
+        zquvtw = zquvtw.permute(0, 3, 1, 2)  # [B, D, H, W]
+        for pde_kernel in self.PDE_kernels:
+            zquvtw = pde_kernel.physics_only_forward(zquvtw)
+        return zquvtw.permute(0, 2, 3, 1)  # [B, H, W, D]
 
 
 class HybridBlock(nn.Module):
@@ -723,6 +798,7 @@ class HybridBlock(nn.Module):
         use_universal_R: bool = False,
         tendency_limiter: str = "physical_clip",
         tendency_caps: dict[str, float] | None = None,
+        physical_passthrough: bool = False,
     ):
         """Строит стек ``PDE_block`` и обучаемый роутер-вес.
 
@@ -743,9 +819,13 @@ class HybridBlock(nn.Module):
             use_universal_R: R=8.314 вместо R_d в гидростатике.
             tendency_limiter: ``'physical_clip'``/``'scale_diff'``.
             tendency_caps: поэлементные капы приращения по переменной.
+            physical_passthrough: если True, ``physics_only_forward`` даёт чистую
+                физику без роутера/conv-контаминации (fix дефекта B, режим
+                ``stable_physical_v2`` модели). Штатный ``forward`` бит-в-бит.
         """
         super().__init__()
 
+        self.physical_passthrough = physical_passthrough
         self.pde_block = PDE_block(
             dim,
             zquvtw_channel,
@@ -763,6 +843,7 @@ class HybridBlock(nn.Module):
             use_universal_R=use_universal_R,
             tendency_limiter=tendency_limiter,
             tendency_caps=tendency_caps,
+            physical_passthrough=physical_passthrough,
         )
         self.router_weight = nn.Parameter(torch.zeros(1, 1, 1, dim), requires_grad=True)
 
@@ -775,6 +856,19 @@ class HybridBlock(nn.Module):
         weight_ai = 0.5 * torch.ones_like(x) - self.router_weight
         x = weight_physics * zquvtw + weight_ai * feat_pde
         return x, zquvtw
+
+    def physics_only_forward(self, zquvtw: torch.Tensor) -> torch.Tensor:
+        """Чистый физический путь для ``stable_physical_v2``: без роутера и conv.
+
+        Args:
+            zquvtw: ``torch.Tensor`` формы ``(B, H, W, D)`` — чистое физическое
+                состояние ``[z, t, q, u, v]`` (channels-last).
+
+        Returns:
+            ``torch.Tensor`` формы ``(B, H, W, D)`` — эволюционированное состояние
+                (``router_weight`` не участвует).
+        """
+        return self.pde_block.physics_only_forward(zquvtw)
 
 
 # ===== Термодинамика и residual-head для PI-моделей =====

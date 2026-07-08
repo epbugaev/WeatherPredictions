@@ -408,16 +408,25 @@ class IAM4VP(nn.Module):
                 "physics_residual_shuffle must be one of "
                 f"{sorted(valid_shuffle_modes)}, got {self.physics_residual_shuffle!r}"
             )
-        valid_hybrid_modes = {"legacy_normalized", "stable_physical"}
+        valid_hybrid_modes = {"legacy_normalized", "stable_physical", "stable_physical_v2"}
         if self.physics_residual_hybrid_mode not in valid_hybrid_modes:
             raise ValueError(
                 "physics_residual_hybrid_mode must be one of "
                 f"{sorted(valid_hybrid_modes)}, got {self.physics_residual_hybrid_mode!r}"
             )
+        # stable_physical_v2 (defect-B fix): same physical-unit plumbing as
+        # stable_physical (denormalize, r<->q, sanitize, tendency clip), but the
+        # HybridBlock runs as a pure primitive-equation integrator on the clean
+        # physical state — no variable_norm conv contamination, no norm_*, no
+        # router. Set the passthrough flag consumed by _hybrid_block_forward and
+        # the HybridBlock construction below.
+        self._hybrid_physical_passthrough = (
+            self.physics_residual_hybrid_mode == "stable_physical_v2"
+        )
         if self.physics_residual_hybrid_mode == "legacy_normalized":
             self.physics_residual_input_space = "normalized"
             self.physics_residual_humidity_mode = "as_is"
-        elif self.physics_residual_hybrid_mode == "stable_physical":
+        elif self.physics_residual_hybrid_mode in ("stable_physical", "stable_physical_v2"):
             self.physics_residual_input_space = "physical"
         valid_input_spaces = {"normalized", "physical"}
         if self.physics_residual_input_space not in valid_input_spaces:
@@ -473,6 +482,7 @@ class IAM4VP(nn.Module):
             use_universal_R=self.physics_use_universal_R,
             tendency_limiter=self.physics_tendency_limiter,
             tendency_caps=self.physics_tendency_caps,
+            physical_passthrough=self._hybrid_physical_passthrough,
         )
         # Optimizer-poisoning guard. When the hybrid forward produces масked
         # nonfinite values (physics_residual_nonfinite_ratio > 0), the raw
@@ -760,6 +770,11 @@ class IAM4VP(nn.Module):
         stats adapt to physical-unit activations and silently change the semantics
         of the physics prior.
 
+        In ``stable_physical_v2`` (defect-B fix) the block runs as a pure
+        primitive-equation integrator via ``physics_only_forward``: no
+        BatchNorm, conv or router touches the state, so no eval-forcing is
+        needed and both returned tensors are the clean physics-evolved state.
+
         Args:
             pred_phys: x-path latent ``(B, h, w, C)`` on the coarse grid.
             zquvtw: physics-path latent ``(B, h, w, C)`` on the coarse grid.
@@ -767,6 +782,9 @@ class IAM4VP(nn.Module):
         Returns:
             Tuple ``(x, zquvtw)``, each ``torch.Tensor`` of shape ``(B, h, w, C)``.
         """
+        if self._hybrid_physical_passthrough:
+            evolved = self.hybrid_block.physics_only_forward(zquvtw)
+            return evolved, evolved
         if self.physics_residual_hybrid_mode != "stable_physical":
             return self.hybrid_block(pred_phys, zquvtw)
 
@@ -892,7 +910,7 @@ class IAM4VP(nn.Module):
                 "Pass 32x64 crops or update utils.physics_hybrid geometry."
             )
 
-        if self.physics_residual_hybrid_mode == "stable_physical":
+        if self.physics_residual_hybrid_mode in ("stable_physical", "stable_physical_v2"):
             prev_physical = self._denormalize_state(prev_state)
             mean = self.physics_data_mean.to(device=prev_state.device, dtype=prev_state.dtype)
             prev_physical = self._finite_or_fallback(prev_physical, mean)
@@ -927,7 +945,7 @@ class IAM4VP(nn.Module):
                 self._last_physics_nonfinite_ratio,
                 self._nonfinite_ratio(pred_phys).detach(),
             )
-            if self.physics_residual_hybrid_mode == "stable_physical":
+            if self.physics_residual_hybrid_mode in ("stable_physical", "stable_physical_v2"):
                 # F14: reuse the once-computed coarse state as the sanitize fallback.
                 pred_phys = self._sanitize_hybrid_latent_physical(pred_phys, state_coarse)
                 zquvtw = self._sanitize_hybrid_latent_physical(zquvtw, state_coarse)
@@ -945,7 +963,7 @@ class IAM4VP(nn.Module):
         else:
             evolved_upper = pred_phys.permute(0, 3, 1, 2)
             evolved_upper = F.interpolate(evolved_upper, size=(H, W), mode="bilinear")
-        if self.physics_residual_hybrid_mode == "stable_physical":
+        if self.physics_residual_hybrid_mode in ("stable_physical", "stable_physical_v2"):
             z_new, t_new, humidity_new, u_new, v_new = evolved_upper.chunk(5, dim=1)
             fallback_parts = (
                 prev_physical[:, 4:17],

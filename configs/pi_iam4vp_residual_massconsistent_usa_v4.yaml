@@ -2,7 +2,7 @@
 # This treats WeatherGFT/HybridBlock as a tendency feature generator, not as a
 # trusted forecast or fixed alpha/router blend.
 experiment:
-  name: PI-IAM4VP-Residual-MassConsistentW-USA-v4-fixv2
+  name: PI-IAM4VP-Residual-MassConsistentW-USA-v4-fixv2-purephys
 model:
   type: PI-IAM4VP
   params:
@@ -17,7 +17,10 @@ model:
     physics_feature_mode: tendency
     physics_residual_shuffle: none
     physics_residual_hybrid_steps: 3
-    physics_residual_hybrid_mode: stable_physical
+    # Defect-B fix (2026-07-08): pure primitive-equation integration of the clean
+    # physical state — no variable_norm conv contamination, no router mix. See
+    # docs/experiments/EXP-GG-hybrid-gradguard.
+    physics_residual_hybrid_mode: stable_physical_v2
     physics_residual_input_space: physical
     physics_residual_humidity_mode: relative_to_specific
     physics_residual_tendency_clip: 8.0
