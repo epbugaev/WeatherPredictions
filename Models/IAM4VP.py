@@ -474,6 +474,23 @@ class IAM4VP(nn.Module):
             tendency_limiter=self.physics_tendency_limiter,
             tendency_caps=self.physics_tendency_caps,
         )
+        # Optimizer-poisoning guard. When the hybrid forward produces масked
+        # nonfinite values (physics_residual_nonfinite_ratio > 0), the raw
+        # NaN/inf activations still reach the BatchNorm/Conv backward inside
+        # HybridBlock, so those parameters receive NaN gradients even though
+        # the loss itself is finite; one optimizer.step() then poisons the
+        # weights permanently and the physics branch silently degrades to its
+        # sanitize fallback. Sanitizing parameter gradients at the boundary
+        # keeps healthy steps bit-identical (nan_to_num of a finite tensor is
+        # the identity) and only zeroes the poisoned entries. The hook runs
+        # before DDP gradient accumulation, so all ranks reduce sanitized
+        # gradients. ``_hybrid_nonfinite_grad_count`` counts affected
+        # parameters since the last diagnostics read (observability; the
+        # count of backward N surfaces in the diagnostics of forward N+1).
+        self._hybrid_nonfinite_grad_count: torch.Tensor | float = 0.0
+        for hybrid_param in self.hybrid_block.parameters():
+            hybrid_param.register_hook(self._sanitize_hybrid_param_grad)
+
         legacy_grid = (
             self.physics_lat_start_deg == -70.0
             and self.physics_dlat_deg == 20.0
@@ -636,6 +653,30 @@ class IAM4VP(nn.Module):
             fallback = torch.zeros_like(x)
         x = torch.where(torch.isfinite(x), x, fallback.expand_as(x))
         return torch.clamp(x, min=min_value, max=max_value)
+
+    def _sanitize_hybrid_param_grad(self, grad: torch.Tensor) -> torch.Tensor:
+        """Zero nonfinite entries of a HybridBlock parameter gradient.
+
+        Registered as a ``Tensor.register_hook`` on every ``hybrid_block``
+        parameter (see ``__init__``). Finite gradients pass through unchanged;
+        nonfinite entries are zeroed so one poisoned backward cannot turn the
+        physics-branch weights into NaN via ``optimizer.step()``. Counts
+        affected parameters into ``_hybrid_nonfinite_grad_count`` (a lazily
+        created on-device scalar, read and reset by
+        ``_apply_physics_residual`` diagnostics) without a host sync.
+
+        Args:
+            grad: raw gradient of one hybrid parameter, any shape.
+
+        Returns:
+            torch.Tensor of the same shape with nonfinite entries replaced by 0.
+        """
+        nonfinite_any = (~torch.isfinite(grad)).any()
+        count = self._hybrid_nonfinite_grad_count
+        if not isinstance(count, torch.Tensor) or count.device != grad.device:
+            count = torch.zeros((), device=grad.device)
+        self._hybrid_nonfinite_grad_count = count + nonfinite_any.float()
+        return torch.nan_to_num(grad, nan=0.0, posinf=0.0, neginf=0.0)
 
     def _sanitize_physical_parts(
         self,
@@ -1106,6 +1147,10 @@ class IAM4VP(nn.Module):
             if self._last_physics_tendency_clip_ratio is not None
             else torch.zeros((), device=y_nn.device)
         )
+        nonfinite_grad_count = self._hybrid_nonfinite_grad_count
+        if not isinstance(nonfinite_grad_count, torch.Tensor):
+            nonfinite_grad_count = torch.zeros((), device=y_nn.device)
+        self._hybrid_nonfinite_grad_count = 0.0
         self._last_residual_diagnostics = {
             "physics_residual_correction_rms": correction_rms,
             "physics_residual_correction_to_prediction_ratio": correction_rms / (y_nn_rms + 1e-8),
@@ -1114,6 +1159,7 @@ class IAM4VP(nn.Module):
             "physics_residual_pi_minus_iam4vp_rms": self._rms((y_hat - y_nn).detach()),
             "physics_residual_nonfinite_ratio": nonfinite_ratio.detach(),
             "physics_residual_tendency_clip_ratio": tendency_clip_ratio.detach(),
+            "physics_hybrid_nonfinite_grad_params": nonfinite_grad_count.detach(),
             "physics_diabatic_rms": (
                 self._rms(diabatic_term.detach())
                 if diabatic_term is not None
