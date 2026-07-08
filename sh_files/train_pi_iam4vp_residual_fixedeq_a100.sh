@@ -29,8 +29,12 @@ cd "${REPO_ROOT}"
 _sha="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 _branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
 echo "[fixedeq] repo=${REPO_ROOT} branch=${_branch} sha=${_sha} host=$(hostname)"
-if ! grep -q "f_field = (2 \* 7.2921e-5" Models/WeatherGFT.py; then
-  echo "[fixedeq] ERROR: patched Coriolis f_field not found in Models/WeatherGFT.py — wrong checkout?" >&2
+# PI-IAM4VP uses Models/PredFormerGFT_HybridBlock.py (not WeatherGFT.py) —
+# guard the file that actually feeds the residual physics branch. Since
+# fix_inline_v2 the equation variant is an explicit constructor flag; the
+# marker below asserts the fixed default is present in the checkout.
+if ! grep -q 't_t_formulation: str = "adiabatic_omega"' Models/PredFormerGFT_HybridBlock.py; then
+  echo "[fixedeq] ERROR: fixed-equation default (t_t_formulation=adiabatic_omega) not found in Models/PredFormerGFT_HybridBlock.py — wrong checkout?" >&2
   exit 3
 fi
 

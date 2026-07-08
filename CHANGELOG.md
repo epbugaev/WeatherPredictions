@@ -16,6 +16,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   behaviour stays reachable by flag (see the `legacy_hybrid` arm).
 - **Hybrid drift diagnostics** logged by the residual corrector:
   `physics_router_weight_abs` and `physics_hybrid_bn_gamma_drift`.
+- **`diabatic_apply_to` flag** on `IAM4VP` (`all_upper_air` default /
+  `t_and_q`): restricts the Q_theta head output to the T and humidity blocks
+  per E9'/exp 10 (the physics deficit is diabatic heating/moistening); the A2
+  config uses `t_and_q`. Per-block diagnostics `physics_diabatic_rms_{z,t,r,u,v}`.
+- **Edge-contamination diagnostic** `physics_residual_delta_edge_interior_ratio`
+  (RMS of `delta_phys` on the one-latent-cell border ring vs interior) —
+  observability for boundary artefacts of the 8x16 WENO stencil on the crop.
+- **Legacy-grid warning**: constructing the residual corrector with the
+  default fake-global latent geometry now emits a `UserWarning` (expected only
+  for the `legacy_hybrid` regression arm).
+- Sanity checks for the mass-consistent column-divergence invariant and the
+  diabatic channel mask in `Models/dev/sanity_hybridblock_fixes.py`.
+- **fixedeq sbatch guard** now checks `Models/PredFormerGFT_HybridBlock.py`
+  (the file PI-IAM4VP actually uses) instead of `Models/WeatherGFT.py`.
 - **DDP guard for residual warmup** (`IterativeManualStep._set_residual_warmup`):
   raises `ValueError` when `freeze_iam4vp_for_residual_warmup` is requested with a
   positive warmup under `DistributedDataParallel`, because toggling `requires_grad`

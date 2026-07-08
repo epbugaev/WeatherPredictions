@@ -21,6 +21,10 @@ Verifies, on CPU in well under two minutes, the working-tree fixes to
        identity prediction at step 0 with zeroed physics diagnostics.
     8. check_block_dt_accounting (F3b)   — block_dt splits the physics horizon
        across depth*hybrid_steps kernel calls.
+    9. check_mass_consistent_invariant   — column-integrated corrected
+       divergence vanishes and get_w matches integral_z(-div_corr) (E-omega).
+    10. check_diabatic_mask              — diabatic_apply_to='t_and_q' masks
+        exactly the T and humidity blocks of the Q_theta head output.
 
 The script prints ``[PASS]``/``[FAIL] <name>: <detail>`` per assertion, a
 ``N passed, M failed`` summary, and exits with code 1 if any assertion failed.
@@ -47,7 +51,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from Models.PI_IAM4VP import IAM4VP
-from Models.PredFormerGFT_HybridBlock import HybridBlock, PDE_kernel
+from Models.PredFormerGFT_HybridBlock import HybridBlock, PDE_kernel, integral_z, pixel_z
 
 EARTH_RADIUS_M = 6371.0 * 1000.0
 DEG2RAD = math.pi / 180.0
@@ -642,11 +646,111 @@ def check_zero_init_identity(device: torch.device, results: list[tuple[str, bool
     has_gamma = "physics_hybrid_bn_gamma_drift" in diagnostics
     router_zero = has_router and diagnostics["physics_router_weight_abs"].item() == 0.0
     gamma_zero = has_gamma and diagnostics["physics_hybrid_bn_gamma_drift"].item() == 0.0
+    edge_key = "physics_residual_delta_edge_interior_ratio"
+    edge_finite = edge_key in diagnostics and bool(torch.isfinite(diagnostics[edge_key]).item())
+    edge_value = diagnostics[edge_key].item() if edge_key in diagnostics else float("nan")
     report(
         results,
         "check_zero_init_identity.zero_correction_and_diagnostics",
-        correction_rms == 0.0 and router_zero and gamma_zero,
-        f"correction_rms={correction_rms:g}, router_weight_abs=0, bn_gamma_drift=0 at init",
+        correction_rms == 0.0 and router_zero and gamma_zero and edge_finite,
+        f"correction_rms={correction_rms:g}, router_weight_abs=0, bn_gamma_drift=0, "
+        f"edge/interior ratio finite ({edge_value:.3f}) at init",
+    )
+
+
+def check_mass_consistent_invariant(device: torch.device, results: list[tuple[str, bool]]) -> None:
+    """mass_consistent w: column-integrated corrected divergence vanishes.
+
+    Verifies the algebraic invariant behind exp 12 / E-omega on the USA-crop
+    grid: after subtracting the pixel_z-weighted column mean, the
+    pixel_z-weighted column sum of the divergence is ~0 for every column, and
+    ``get_w`` equals ``integral_z(-div_corrected)``.
+
+    Args:
+        device: compute device.
+        results: outcome accumulator (mutated).
+
+    Side effects:
+        Appends two ``report`` outcomes.
+    """
+    torch.manual_seed(0)
+    _, _, _, u, v = build_physical_fields(batch_size=2, grid_h=8, grid_w=16, device=device)
+    kernel = PDE_kernel(
+        in_dim=65,
+        physics_part_coef=0.5,
+        block_dt=400,
+        grid_h=8,
+        lat_start_deg=18.28125,
+        dlat_deg=5.625,
+        dlon_deg=5.625,
+        w_diagnostic="mass_consistent",
+    ).to(device)
+    kernel.eval()
+    div = kernel._d_x(u) + kernel._d_y(v)
+    pz = pixel_z.reshape(1, -1, 1, 1).to(dtype=div.dtype, device=div.device)
+    div_corrected = div - (div * pz).sum(dim=1, keepdim=True) / pz.sum()
+    column_residual = (div_corrected * pz).sum(dim=1).abs().max().item()
+    column_scale = (div.abs() * pz).sum(dim=1).max().item()
+    report(
+        results,
+        "check_mass_consistent_invariant.column_divergence_zero",
+        column_residual < 1e-6 * max(column_scale, 1e-30),
+        f"max |sum(div_corr*pz)|={column_residual:.3e} vs scale {column_scale:.3e}",
+    )
+    w_kernel = kernel.get_w(u, v)
+    w_manual = integral_z(-div_corrected)
+    w_match = torch.allclose(w_kernel, w_manual, atol=1e-6, rtol=1e-5)
+    report(
+        results,
+        "check_mass_consistent_invariant.get_w_matches_integral",
+        w_match,
+        f"get_w == integral_z(-div_corr): {w_match}",
+    )
+
+
+def check_diabatic_mask(device: torch.device, results: list[tuple[str, bool]]) -> None:
+    """diabatic_apply_to: t_and_q masks exactly the T and humidity blocks.
+
+    Args:
+        device: compute device (mask logic is device-free; kept for symmetry).
+        results: outcome accumulator (mutated).
+
+    Side effects:
+        Appends two ``report`` outcomes.
+    """
+    mask_all = IAM4VP._build_diabatic_mask("all_upper_air", 65, 0)
+    mask_tq = IAM4VP._build_diabatic_mask("t_and_q", 65, 0)
+    mask_tq_surface = IAM4VP._build_diabatic_mask("t_and_q", 69, 4)
+    all_ones = bool((mask_all == 1.0).all().item())
+    flat_tq = mask_tq.flatten()
+    tq_correct = bool(
+        (flat_tq[13:39] == 1.0).all().item()
+        and (flat_tq[:13] == 0.0).all().item()
+        and (flat_tq[39:] == 0.0).all().item()
+    )
+    flat_tq_s = mask_tq_surface.flatten()
+    tq_surface_correct = bool(
+        (flat_tq_s[17:43] == 1.0).all().item()
+        and (flat_tq_s[:17] == 0.0).all().item()
+        and (flat_tq_s[43:] == 0.0).all().item()
+    )
+    report(
+        results,
+        "check_diabatic_mask.blocks",
+        all_ones and tq_correct and tq_surface_correct,
+        "all_upper_air=ones; t_and_q selects [13:39) (upper-air) / [17:43) (with surface)",
+    )
+    model = IAM4VP(
+        use_physics=False,
+        use_physics_residual_corrector=True,
+        physics_feature_mode="no_physics",
+        diabatic_apply_to="t_and_q",
+    )
+    report(
+        results,
+        "check_diabatic_mask.flag_stored",
+        model.diabatic_apply_to == "t_and_q",
+        f"diabatic_apply_to stored: {model.diabatic_apply_to}",
     )
 
 
@@ -694,6 +798,8 @@ def main() -> None:
     check_latent_tendency(device, results)
     check_prior_detach(device, results)
     check_zero_init_identity(device, results)
+    check_mass_consistent_invariant(device, results)
+    check_diabatic_mask(device, results)
     check_block_dt_accounting(device, results)
 
     failures = [name for name, passed in results if not passed]

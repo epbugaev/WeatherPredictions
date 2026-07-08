@@ -241,6 +241,7 @@ class IAM4VP(nn.Module):
         diabatic_lambda_l1=0.0,
         diabatic_constants_path=None,
         diabatic_cut=None,
+        diabatic_apply_to: str = "all_upper_air",
         freeze_iam4vp_for_residual_warmup=False,
         residual_warmup_epochs=0,
     ):
@@ -407,10 +408,32 @@ class IAM4VP(nn.Module):
             tendency_limiter=self.physics_tendency_limiter,
             tendency_caps=self.physics_tendency_caps,
         )
+        legacy_grid = (
+            self.physics_lat_start_deg == -70.0
+            and self.physics_dlat_deg == 20.0
+            and self.physics_dlon_deg == 22.5
+        )
+        if use_physics_residual_corrector and physics_feature_mode != "no_physics" and legacy_grid:
+            warnings.warn(
+                "Residual physics runs on the legacy fake-global latent grid "
+                "(lat -70..70, dlon 22.5): Coriolis and pixel spacing will not "
+                "match a regional crop. Pass physics_lat_start_deg / "
+                "physics_dlat_deg / physics_dlon_deg for the data cut "
+                "(expected only for the legacy_hybrid regression arm).",
+                UserWarning,
+                stacklevel=2,
+            )
 
         self.use_diabatic_term = bool(use_diabatic_term)
         self.diabatic_lambda_l1 = float(diabatic_lambda_l1)
         self.diabatic_head = None
+        valid_diabatic_apply_to = {"all_upper_air", "t_and_q"}
+        if diabatic_apply_to not in valid_diabatic_apply_to:
+            raise ValueError(
+                "diabatic_apply_to must be one of "
+                f"{sorted(valid_diabatic_apply_to)}, got {diabatic_apply_to!r}"
+            )
+        self.diabatic_apply_to = diabatic_apply_to
         if self.use_diabatic_term and not self.use_physics_residual_corrector:
             raise ValueError("use_diabatic_term=True requires use_physics_residual_corrector=True")
         if self.use_physics_residual_corrector:
@@ -438,6 +461,17 @@ class IAM4VP(nn.Module):
                     out_channels=corrected_channels,
                     hidden_channels=diabatic_hidden_channels,
                     zero_init=True,
+                )
+                surface_offset = (
+                    0
+                    if self.physics_residual_apply_to == "upper_air_only"
+                    else self.surface_channels
+                )
+                self.register_buffer(
+                    "diabatic_channel_mask",
+                    self._build_diabatic_mask(
+                        self.diabatic_apply_to, corrected_channels, surface_offset
+                    ),
                 )
             if self.physics_residual_humidity_mode == "relative_to_specific":
                 warnings.warn(
@@ -889,6 +923,34 @@ class IAM4VP(nn.Module):
         prior = torch.cat([prev_state[:, : self.surface_channels, :, :], evolved_upper], dim=1)
         return self._finite_or_fallback(prior, prev_state)
 
+    @staticmethod
+    def _build_diabatic_mask(
+        apply_to: str,
+        corrected_channels: int,
+        surface_offset: int,
+    ) -> torch.Tensor:
+        """Channel mask restricting the diabatic head output (E9'/exp 10).
+
+        Args:
+            apply_to: ``'all_upper_air'`` (mask of ones) or ``'t_and_q'``
+                (nonzero only on the T block and the humidity block; the data
+                humidity channel is relative humidity r, which the inherited
+                HybridBlock equations name q).
+            corrected_channels: number of channels the residual heads emit
+                (65 for ``upper_air_only``, 69 for ``all_channels``).
+            surface_offset: 0 when the corrected slice starts at upper-air
+                channels, 4 when surface channels are included.
+
+        Returns:
+            torch.Tensor of shape ``(1, corrected_channels, 1, 1)`` with
+            values in {0.0, 1.0}.
+        """
+        mask = torch.ones(1, corrected_channels, 1, 1, dtype=torch.float32)
+        if apply_to == "t_and_q":
+            mask = torch.zeros(1, corrected_channels, 1, 1, dtype=torch.float32)
+            mask[:, surface_offset + 13 : surface_offset + 39] = 1.0
+        return mask
+
     def _residual_slice(self, x: torch.Tensor) -> torch.Tensor:
         if self.physics_residual_apply_to == "upper_air_only":
             return x[:, self.surface_channels :, :, :]
@@ -899,6 +961,25 @@ class IAM4VP(nn.Module):
         y_nn: torch.Tensor,
         prev_state: torch.Tensor,
     ) -> torch.Tensor:
+        """Add the learned physics-feature correction (and Q_theta) to y_nn.
+
+        Semantics note: ``delta_phys = y_phys - prev_state`` is a **per-step
+        state delta in normalized units** (sigma_x over the 1-hour
+        autoregression step), not an SI tendency d/dt — no /dt factor is ever
+        applied on the NN side, and the corrector output lives in the same
+        units, so the additive convention is closed. Diagnostic keys keep the
+        historical "tendency" naming for Comet panel continuity.
+
+        Args:
+            y_nn: raw network prediction ``(B, C, H, W)`` (normalized).
+            prev_state: previous state ``(B, C, H, W)`` (normalized, detached
+                upstream by the rollout strategy).
+
+        Returns:
+            torch.Tensor ``(B, C, H, W)`` — corrected prediction. Side
+            effects: sets ``_last_residual_aux_loss`` and
+            ``_last_residual_diagnostics``.
+        """
         if self.physics_residual_corrector is None:
             self._last_residual_aux_loss = None
             self._last_residual_diagnostics = {}
@@ -940,6 +1021,9 @@ class IAM4VP(nn.Module):
             geo = geo.expand(st.shape[0], -1, -1, -1)
             diabatic_term = self.diabatic_head(torch.cat([st, geo], dim=1))
             diabatic_term = self._finite_or_fallback(diabatic_term, torch.zeros_like(diabatic_term))
+            diabatic_term = diabatic_term * self.diabatic_channel_mask.to(
+                dtype=diabatic_term.dtype, device=diabatic_term.device
+            )
             correction = correction + diabatic_term
 
         if self.physics_residual_apply_to == "upper_air_only":
@@ -1000,6 +1084,33 @@ class IAM4VP(nn.Module):
                 else torch.zeros((), device=y_nn.device)
             ),
         }
+        # Edge-contamination observability (audit claim on 8x16 WENO stencil
+        # coverage): RMS of delta_phys on the one-latent-cell border ring vs
+        # the interior. Ratio >> 1 flags boundary artefacts leaking into the
+        # physics features on the crop.
+        _, _, delta_h, delta_w = delta_phys.shape
+        ring = self.downscaling_factor_all
+        if delta_h > 2 * ring and delta_w > 2 * ring:
+            delta_det = delta_phys.detach().float()
+            total_sq = delta_det.square().sum()
+            interior = delta_det[..., ring:-ring, ring:-ring]
+            interior_sq = interior.square().sum()
+            edge_count = delta_det.numel() - interior.numel()
+            edge_rms = torch.sqrt((total_sq - interior_sq) / max(edge_count, 1))
+            interior_rms = torch.sqrt(interior_sq / interior.numel())
+            self._last_residual_diagnostics["physics_residual_delta_edge_interior_ratio"] = (
+                edge_rms / (interior_rms + 1e-8)
+            )
+        if diabatic_term is not None:
+            diabatic_det = diabatic_term.detach()
+            block_offset = (
+                0 if self.physics_residual_apply_to == "upper_air_only" else self.surface_channels
+            )
+            for block_name, block_index in (("z", 0), ("t", 1), ("r", 2), ("u", 3), ("v", 4)):
+                start = block_offset + 13 * block_index
+                self._last_residual_diagnostics[f"physics_diabatic_rms_{block_name}"] = self._rms(
+                    diabatic_det[:, start : start + 13]
+                )
         if self.physics_feature_mode != "no_physics":
             self._last_residual_diagnostics["physics_router_weight_abs"] = (
                 self.hybrid_block.router_weight.detach().abs().mean()

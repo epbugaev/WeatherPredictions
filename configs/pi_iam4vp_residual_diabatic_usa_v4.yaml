@@ -29,6 +29,9 @@ model:
     diabatic_lambda_l1: 0.0001
     diabatic_constants_path: /home/fratnikov/weather_bench/1.40625deg/constants/constants_1.40625deg.nc
     diabatic_cut: [75, 107, 164, 228]
+    # E9'/exp10: Q_theta acts on T and humidity blocks only (the physics deficit
+    # is diabatic heating/moistening); momentum/z stay with the main corrector.
+    diabatic_apply_to: t_and_q
     # True USA-crop latent geometry (grid S->N, crop rows 75..106 = 16.17..59.77N).
     physics_lat_start_deg: 18.28125
     physics_dlat_deg: 5.625
