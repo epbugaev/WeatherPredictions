@@ -254,5 +254,245 @@ class PureKernelSignFixes(unittest.TestCase):
         self.assertLess(float(rhs["q_t"][:, 7].abs().max()), 1e-12)  # 500 гПа не насыщен
 
 
+class Exp14MomentumVariants(unittest.TestCase):
+    """Знаки, размерности и бит-стабильность членов эксперимента 14.
+
+    Все новые члены уравнений движения — opt-in параметры
+    :class:`PurePDEKernel`; дефолтный путь запинен голdenами
+    (``test_default_rhs_is_byte_stable``).
+    """
+
+    @staticmethod
+    def _kernel(**kwargs) -> PurePDEKernel:
+        grid = Grid(GridConfig(H=H, W=W, lat_range_deg=(16.17, 59.77)))
+        return PurePDEKernel(grid, boundary_x="replicate", coriolis="spherical", **kwargs)
+
+    @staticmethod
+    def _pinned_state() -> dict[str, torch.Tensor]:
+        gen = torch.Generator().manual_seed(14)
+        phi = PHI_STD.expand(1, P, H, W).clone()
+        return {
+            "u": 10 + 5 * torch.randn(1, P, H, W, generator=gen),
+            "v": 5 * torch.randn(1, P, H, W, generator=gen),
+            "t": 250 + 10 * torch.randn(1, P, H, W, generator=gen),
+            "q": (3e-3 * (1 + 0.3 * torch.randn(1, P, H, W, generator=gen))).clamp_min(1e-8),
+            "z": phi + 300 * torch.randn(1, P, H, W, generator=gen),
+        }
+
+    def test_default_rhs_is_byte_stable(self) -> None:
+        """Дефолтный rhs PurePDEKernel не меняется от opt-in параметров exp 14."""
+        kernel = self._kernel()
+        rhs = kernel.rhs(**self._pinned_state())
+        golden = {
+            "u_t": -0.009438502850116492,
+            "v_t": -1.4592431275868876,
+            "t_t": -0.014798275890939294,
+            "q_t": -1.227921801313231e-05,
+            "z_t": -5.975435962147742,
+            "w": 0.06491834346371661,
+        }
+        for key, value in golden.items():
+            self.assertAlmostEqual(float(rhs[key].double().sum()), value, delta=1e-9)
+        self.assertAlmostEqual(float(rhs["u_t"][0, 6, 3, 7]), 0.0004705985775217414, delta=1e-12)
+        self.assertAlmostEqual(float(rhs["v_t"][0, 6, 3, 7]), -0.0010004773503169417, delta=1e-12)
+
+    def test_d_y_orientation_on_ascending_rows(self) -> None:
+        """rows_south_to_north=True: d_y(f=j) = +1/Δy; легаси даёт −1/Δy."""
+        legacy = self._kernel()
+        s2n = self._kernel(rows_south_to_north=True)
+        field = torch.arange(H, dtype=torch.float32).reshape(1, 1, H, 1).expand(1, 1, H, W).clone()
+        dy = float(legacy.grid.pixel_y)
+        self.assertAlmostEqual(float(legacy.diff.d_y(field)[0, 0, 4, 8]) * dy, -1.0, delta=1e-4)
+        self.assertAlmostEqual(float(s2n.diff.d_y(field)[0, 0, 4, 8]) * dy, 1.0, delta=1e-4)
+
+    def test_metric_terms_sign_and_magnitude(self) -> None:
+        """Кривизна: u_t += u·v·tanφ/a, v_t −= u²·tanφ/a (Holton 2.19–2.20)."""
+        base = self._kernel()
+        metric = self._kernel(metric_terms=True)
+        u = torch.full((1, P, H, W), 20.0)
+        v = torch.full((1, P, H, W), 5.0)
+        zeros = torch.zeros_like(u)
+        u_t0, v_t0 = base.get_uv_dt(u, v, zeros, zeros, zeros)
+        u_t1, v_t1 = metric.get_uv_dt(u, v, zeros, zeros, zeros)
+        tan_over_a = float(torch.tan(base.grid.latitudes[4]) / base.grid.config.radius)
+        self.assertAlmostEqual(float((u_t1 - u_t0)[0, 6, 4, 8]), 100.0 * tan_over_a, delta=1e-9)
+        self.assertAlmostEqual(float((v_t1 - v_t0)[0, 6, 4, 8]), -400.0 * tan_over_a, delta=1e-9)
+
+    def test_rayleigh_friction_only_in_boundary_layer(self) -> None:
+        """Трение Held–Suarez: нуль выше σ_b=0.7, −k_f·u на 1000 гПа."""
+        base = self._kernel()
+        frict = self._kernel(rayleigh_friction=True)
+        u = torch.full((1, P, H, W), 20.0)
+        zeros = torch.zeros_like(u)
+        u_t0, _ = base.get_uv_dt(u, zeros, zeros, zeros, zeros)
+        u_t1, _ = frict.get_uv_dt(u, zeros, zeros, zeros, zeros)
+        diff = (u_t1 - u_t0)[0, :, 4, 8]
+        self.assertEqual(float(diff[:10].abs().max()), 0.0)  # до 700 гПа включительно
+        self.assertAlmostEqual(float(diff[12]), -20.0 / 86400.0, delta=1e-10)  # 1000 гПа
+
+    def test_lagrange3_vertical_derivative_is_exact_on_linear_profile(self) -> None:
+        """lagrange3: d_z(2p) = −2 на всех уровнях нерегулярной сетки."""
+        kernel = self._kernel(vertical_scheme="lagrange3")
+        p_hpa = kernel.grid.pressure.reshape(-1) / 100.0
+        profile = (2.0 * p_hpa).reshape(1, P, 1, 1).expand(1, P, H, W).clone()
+        d_z = kernel._d_z(profile)
+        self.assertTrue(torch.allclose(d_z, torch.full_like(d_z, -2.0), atol=1e-4))
+
+    def test_spherical_divergence_reduces_divergence_for_northward_wind(self) -> None:
+        """Континуити на сфере: однородный v>0 в СП даёт div = −v·tanφ/a < 0."""
+        base = self._kernel()
+        sph = self._kernel(spherical_divergence=True)
+        v = torch.full((1, P, H, W), 10.0)
+        zeros = torch.zeros_like(v)
+        w_diff = sph.get_w(zeros, v) - base.get_w(zeros, v)
+        # div уменьшился → w = ∫(−div) больше у поверхности (СП: tanφ > 0).
+        self.assertGreater(float(w_diff[0, 12, 4, 8]), 0.0)
+
+    def test_grid_explicit_latitudes(self) -> None:
+        """GridConfig.latitudes_deg: точные широты строк и pixel_y из шага."""
+        lats = tuple(16.171875 + 1.40625 * i for i in range(H))
+        grid = Grid(GridConfig(H=H, W=W, latitudes_deg=lats))
+        got = grid.latitudes * 180.0 / torch.pi
+        self.assertAlmostEqual(float(got[0]), 16.171875, delta=1e-4)
+        self.assertAlmostEqual(float(got[-1]), lats[-1], delta=1e-4)
+        expected_dy = 1.40625 / 180.0 * torch.pi * grid.config.radius
+        self.assertAlmostEqual(float(grid.pixel_y), expected_dy, delta=0.5)
+
+
+class Exp15EquationVariants(unittest.TestCase):
+    """Знаки и размерности членов эксперимента 15 (все — opt-in параметры).
+
+    Дефолтный путь по-прежнему запинен голденами
+    ``Exp14MomentumVariants.test_default_rhs_is_byte_stable``.
+    """
+
+    @staticmethod
+    def _kernel(**kwargs) -> PurePDEKernel:
+        grid = Grid(GridConfig(H=H, W=W, lat_range_deg=(16.17, 59.77)))
+        return PurePDEKernel(grid, boundary_x="replicate", coriolis="spherical", **kwargs)
+
+    @staticmethod
+    def _state(**overrides) -> dict[str, torch.Tensor]:
+        base = {
+            "u": torch.zeros(1, P, H, W),
+            "v": torch.zeros(1, P, H, W),
+            "t": T_STD.expand(1, P, H, W).clone(),
+            "q": torch.full((1, P, H, W), 1e-4),
+            "z": PHI_STD.expand(1, P, H, W).clone(),
+        }
+        base.update(overrides)
+        return base
+
+    def test_newtonian_relaxation_cools_warm_anomaly(self) -> None:
+        """T > T_eq у поверхности → релаксация даёт отрицательную добавку t_t."""
+        base = self._kernel()
+        relax = self._kernel(newtonian_relaxation=True)
+        hot = self._state(t=torch.full((1, P, H, W), 330.0))
+        diff = relax.rhs(**hot)["t_t"] - base.rhs(**hot)["t_t"]
+        self.assertLess(float(diff[0, 12, 4, 8]), 0.0)  # 1000 гПа: k_s-зона
+        # Величина ~k_s·ΔT: ΔT ≈ 330−T_eq(≈300) ≈ 30 К, k_T ≤ 1/4 сут.
+        self.assertLess(abs(float(diff[0, 12, 4, 8])), 40.0 / (4 * 86400.0) * 2)
+
+    def test_newtonian_relaxation_teq_range_is_physical(self) -> None:
+        """T_eq ограничена снизу 200 К и не превышает 315 К."""
+        relax = self._kernel(newtonian_relaxation=True)
+        self.assertGreaterEqual(float(relax.hs_t_eq.min()), 200.0 - 1e-4)
+        self.assertLessEqual(float(relax.hs_t_eq.max()), 315.0 + 1e-4)
+
+    def test_latent_heating_warms_where_condensation_dries(self) -> None:
+        """Конденсация (q_t|cond < 0) обязана греть: Δt_t = −(L/c_p)·cond > 0."""
+        base = self._kernel()
+        coupled = self._kernel(latent_heating_coupling=True)
+        x_idx = torch.arange(W, dtype=torch.float32).reshape(1, 1, 1, W)
+        u_conv = (-1e-5 * base.grid.pixel_x * x_idx).expand(1, P, H, W).clone()
+        state = self._state(
+            u=u_conv, t=torch.full((1, P, H, W), 280.0), q=torch.full((1, P, H, W), 6.5e-3)
+        )
+        rhs_b = base.rhs(**state)
+        rhs_c = coupled.rhs(**state)
+        cond_bottom = interior((rhs_b["q_t"])[:, 12])  # адвекция q тут нулевая
+        dt_bottom = interior((rhs_c["t_t"] - rhs_b["t_t"])[:, 12])
+        self.assertLess(float(cond_bottom.mean()), 0.0)
+        self.assertGreater(float(dt_bottom.mean()), 0.0)
+        ratio = float(dt_bottom.mean()) / float(cond_bottom.mean())
+        self.assertAlmostEqual(ratio, -2.5e6 / 1005.0, delta=1.0)
+
+    def test_obrien_zeroes_top_w_and_keeps_surface(self) -> None:
+        """О'Брайен: w(50 гПа) = 0 точно, w(1000 гПа) не изменяется."""
+        plain = self._kernel()
+        obrien = self._kernel(w_diagnostic="obrien")
+        gen = torch.Generator().manual_seed(15)
+        u = 10 + 5 * torch.randn(1, P, H, W, generator=gen)
+        v = 5 * torch.randn(1, P, H, W, generator=gen)
+        w_plain = plain.get_w(u, v)
+        w_ob = obrien.get_w(u, v)
+        self.assertLess(float(w_ob[:, 0].abs().max()), 1e-12)
+        self.assertGreater(float(w_plain[:, 0].abs().max()), 0.0)
+        self.assertTrue(torch.allclose(w_ob[:, 12], w_plain[:, 12], atol=1e-12))
+
+    def test_kinematic_ps_anchor_raises_z_on_convergence(self) -> None:
+        """Конвергенция в столбе → ∂p_s/∂t > 0 → z_t выше fixed-якоря на всех уровнях."""
+        fixed = self._kernel()
+        anchored = self._kernel(z_anchor="kinematic_ps")
+        x_idx = torch.arange(W, dtype=torch.float32).reshape(1, 1, 1, W)
+        u_conv = (-1e-5 * fixed.grid.pixel_x * x_idx).expand(1, P, H, W).clone()
+        state = self._state(u=u_conv)
+        diff = anchored.rhs(**state)["z_t"] - fixed.rhs(**state)["z_t"]
+        self.assertGreater(float(interior(diff[:, 0]).min()), 0.0)
+        # Баротропный член одинаков на всех уровнях.
+        self.assertTrue(torch.allclose(diff[:, 0], diff[:, 12], atol=1e-10))
+
+    def test_omega_free_t_strips_omega_terms_but_keeps_z(self) -> None:
+        """omega_free=('t',): t_t — чистая гор. адвекция; z_t не меняется."""
+        base = self._kernel()
+        nf = self._kernel(omega_free=("t",))
+        gen = torch.Generator().manual_seed(151)
+        state = self._state(
+            u=10 + 5 * torch.randn(1, P, H, W, generator=gen),
+            v=5 * torch.randn(1, P, H, W, generator=gen),
+            t=T_STD.expand(1, P, H, W) + 2 * torch.randn(1, P, H, W, generator=gen),
+        )
+        rhs_b = base.rhs(**state)
+        rhs_n = nf.rhs(**state)
+        adv_h = base._horiz_adv(state["t"], state["u"], state["v"])
+        self.assertTrue(torch.allclose(rhs_n["t_t"], adv_h, atol=1e-5))
+        self.assertTrue(torch.allclose(rhs_n["z_t"], rhs_b["z_t"], atol=0.0))
+        self.assertFalse(torch.allclose(rhs_n["t_t"], rhs_b["t_t"], atol=1e-8))
+
+    def test_omega_free_q_uv_strip_vertical_advection(self) -> None:
+        """omega_free=('q','u','v'): верт. адвекция исключена, остальное на месте."""
+        base = self._kernel()
+        nf = self._kernel(omega_free=("q", "u", "v"))
+        gen = torch.Generator().manual_seed(152)
+        state = self._state(
+            u=10 + 5 * torch.randn(1, P, H, W, generator=gen),
+            v=5 * torch.randn(1, P, H, W, generator=gen),
+            q=(3e-3 * (1 + 0.3 * torch.randn(1, P, H, W, generator=gen))).clamp_min(1e-8),
+        )
+        rhs_b = base.rhs(**state)
+        rhs_n = nf.rhs(**state)
+        w = base.get_w(state["u"], state["v"])
+        for var, field in (("u", state["u"]), ("v", state["v"]), ("q", state["q"])):
+            expected = rhs_b[f"{var}_t"] + w * base._d_z(field)
+            self.assertTrue(torch.allclose(rhs_n[f"{var}_t"], expected, atol=1e-6))
+        self.assertTrue(torch.equal(rhs_n["t_t"], rhs_b["t_t"]))
+
+    def test_omega_free_rejects_unknown_keys(self) -> None:
+        """omega_free с 'z' или опечаткой — явная ошибка конфигурации."""
+        with self.assertRaises(ValueError):
+            self._kernel(omega_free=("z",))
+
+    def test_rhs_external_sources_are_added_verbatim(self) -> None:
+        """sources={'t': S} даёт t_t + S точно; остальные тенденции не тронуты."""
+        kernel = self._kernel()
+        state = self._state()
+        src = torch.full((1, P, H, W), 3.14e-5)
+        rhs0 = kernel.rhs(**state)
+        rhs1 = kernel.rhs(**state, sources={"t": src})
+        self.assertTrue(torch.allclose(rhs1["t_t"], rhs0["t_t"] + src, atol=0.0))
+        self.assertTrue(torch.equal(rhs1["q_t"], rhs0["q_t"]))
+        self.assertTrue(torch.equal(rhs1["z_t"], rhs0["z_t"]))
+
+
 if __name__ == "__main__":
     unittest.main()
