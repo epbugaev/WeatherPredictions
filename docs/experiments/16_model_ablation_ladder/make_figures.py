@@ -101,32 +101,61 @@ def map_points_to_epochs(
     return [(val_every_n_epochs * (i + 1), value) for i, (_step, value) in enumerate(ordered)]
 
 
+def base_variable(channel: str) -> str:
+    """Свести имя канала к базовой переменной, отбросив уровень/высоту.
+
+    ``z500``/``z850`` → ``z``; ``t2`` → ``t``; ``u10`` → ``u``; ``tp`` → ``tp``.
+    Так по-уровневые каналы WeatherBench-69 сворачиваются в 5-6 переменных.
+
+    Args:
+        channel: имя канала (буквенный префикс + опциональный числовой уровень).
+
+    Returns:
+        Базовая переменная (буквенный префикс; для чисто-буквенных — сам канал).
+    """
+    return channel.rstrip("0123456789") or channel
+
+
 def select_rmse_series(
     run_metrics: dict[str, list[list[float]]], val_every_n_epochs: int
 ) -> dict[str, list[tuple[int, float]]]:
-    """Для каждой переменной выбрать один RMSE-стат (mean ≻ last ≻ first).
+    """Свести per-level RMSE к кривой на базовую переменную (среднее по уровням).
+
+    Для каждого канала берётся один стат (mean ≻ last ≻ first), точки
+    привязываются к эпохам, затем каналы одной базовой переменной усредняются
+    поэпохно.
 
     Args:
         run_metrics: ``{metric_name: [[step, value], ...]}`` одного рана.
         val_every_n_epochs: период валидации.
 
     Returns:
-        ``{var: [(epoch, value), ...]}`` — по одной кривой на переменную.
+        ``{base_var: [(epoch, mean_over_levels), ...]}`` — по кривой на переменную.
     """
-    by_var_stat: dict[str, dict[str, list[list[float]]]] = {}
+    stats_by_channel: dict[str, dict[str, list[list[float]]]] = {}
     for name, points in run_metrics.items():
         parsed = parse_var_stat(name)
         if parsed is None:
             continue
-        var, stat = parsed
-        by_var_stat.setdefault(var, {})[stat or "mean"] = points
-    series: dict[str, list[tuple[int, float]]] = {}
-    for var, stats in by_var_stat.items():
+        channel, stat = parsed
+        stats_by_channel.setdefault(channel, {})[stat or "mean"] = points
+    # выбранный стат каждого канала → кривая (epoch, value)
+    per_channel: dict[str, list[tuple[int, float]]] = {}
+    for channel, stats in stats_by_channel.items():
         chosen = next((s for s in STAT_PREFERENCE if s in stats), None)
         if chosen is None:
             chosen = next(iter(stats))
-        series[var] = map_points_to_epochs(stats[chosen], val_every_n_epochs)
-    return series
+        per_channel[channel] = map_points_to_epochs(stats[chosen], val_every_n_epochs)
+    # усреднить каналы одной базовой переменной поэпохно
+    grouped: dict[str, dict[int, list[float]]] = {}
+    for channel, series in per_channel.items():
+        by_epoch = grouped.setdefault(base_variable(channel), {})
+        for epoch, value in series:
+            by_epoch.setdefault(epoch, []).append(value)
+    return {
+        var: [(epoch, sum(vals) / len(vals)) for epoch, vals in sorted(by_epoch.items())]
+        for var, by_epoch in grouped.items()
+    }
 
 
 def build_final_table(

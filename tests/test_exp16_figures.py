@@ -44,6 +44,23 @@ def test_select_rmse_series_prefers_mean_over_last() -> None:
     assert "val_loss" not in series
 
 
+def test_base_variable_strips_level() -> None:
+    assert mf.base_variable("z500") == "z"
+    assert mf.base_variable("t2") == "t"
+    assert mf.base_variable("u10") == "u"
+    assert mf.base_variable("tp") == "tp"
+
+
+def test_select_rmse_series_averages_levels() -> None:
+    # два уровня одной переменной → одна кривая = среднее по уровням поэпохно
+    run_metrics = {
+        "RMSE_z500_mean": [[183, 1.0], [366, 0.6]],
+        "RMSE_z850_mean": [[183, 3.0], [366, 1.4]],
+    }
+    series = mf.select_rmse_series(run_metrics, val_every_n_epochs=3)
+    assert series["z"] == [(3, 2.0), (6, 1.0)]
+
+
 def test_build_final_table_bolds_column_min_and_labels_arms() -> None:
     parsed = {
         "abl16-r0-no-physics-s0": {"z": [(3, 5.0), (6, 4.0)], "t": [(3, 2.0), (6, 1.8)]},
