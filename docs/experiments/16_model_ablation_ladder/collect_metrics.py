@@ -85,35 +85,34 @@ def resolve_comet_credentials() -> tuple[str, str, str]:
     return api_key, workspace, project
 
 
-def extract_series(experiment, metric_name: str) -> list[list[float]]:
-    """Вытащить историю метрики как отсортированный список ``[step, value]``.
+def collect_run(experiment) -> dict[str, list[list[float]]]:
+    """Собрать все val/rmse-метрики одного эксперимента одним bulk-запросом.
+
+    ``experiment.get_metrics()`` без имени отдаёт все точки всех метрик за один
+    вызов (на порядок быстрее, чем per-metric); группируем по ``metricName`` и
+    оставляем только val/rmse (namespace без legacy-префикса, фикс 576983d).
 
     Args:
         experiment: Comet ``APIExperiment``.
-        metric_name: имя метрики.
 
     Returns:
-        Список ``[step, value]``, отсортированный по step.
+        ``{metric_name: [[step, value], ...]}`` — точки отсортированы по step.
     """
-    points: list[list[float]] = []
-    for point in experiment.get_metrics(metric_name):
+    series: dict[str, list[list[float]]] = {}
+    for point in experiment.get_metrics():
+        name = point.get("metricName")
+        if name is None:
+            continue
+        lowered = name.lower()
+        if "rmse" not in lowered and "val" not in lowered:
+            continue
         step = point.get("step")
         value = point.get("metricValue")
         if step is None or value is None:
             continue
-        points.append([int(step), float(value)])
-    points.sort(key=lambda sv: sv[0])
-    return points
-
-
-def collect_run(experiment) -> dict[str, list[list[float]]]:
-    """Собрать все val/rmse-метрики одного эксперимента."""
-    series: dict[str, list[list[float]]] = {}
-    for summary in experiment.get_metrics_summary():
-        name = summary["name"]
-        lowered = name.lower()
-        if "rmse" in lowered or "val" in lowered:
-            series[name] = extract_series(experiment, name)
+        series.setdefault(name, []).append([int(step), float(value)])
+    for points in series.values():
+        points.sort(key=lambda sv: sv[0])
     return series
 
 
