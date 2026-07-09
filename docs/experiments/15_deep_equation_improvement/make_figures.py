@@ -37,7 +37,7 @@ AFTER = "C15_full"  # лучший принятый вариант (см. отч
 COLORS = {
     "base13": "#8a8a8a",
     "C_best": "#0072B2",
-    "C15_phys": "#CC79A7",
+    "C15_now": "#CC79A7",
     "S12": "#009E73",
     "C15_full": "#D55E00",
 }
@@ -50,7 +50,9 @@ RESULTS = {
     for year in YEARS
 }
 MAPS = {dom: np.load(HERE / "results" / f"eq15_maps_{dom}_2002.npz") for dom in DOMS}
-CLIM = {dom: np.load(HERE / "results" / f"eq15_clim_{dom}_2000.npz") for dom in DOMS}
+# Суммарные климатологии (zm/annual; полные, с суточными картами — в logs/
+# на кластере: eq15_clim_{domain}_2000.npz, см. журнал отчёта).
+CLIM = {dom: np.load(HERE / "results" / f"eq15_clim_summary_{dom}_2000.npz") for dom in DOMS}
 P_LEVELS = [50, 100, 150, 200, 250, 300, 400, 500, 600, 700, 850, 925, 1000]
 
 plt.rcParams.update(
@@ -147,7 +149,7 @@ def fig1_residual_maps() -> None:
             "Что показано: в каждой ячейке — сумма |ошибка тенденции| за все часы 2002 года\n"
             "(вне выборки: климатологии построены на 2000), делённая на сумму |наблюдённая\n"
             f"тенденция|. Слева {BEFORE} (конфигурация эксперимента 13), справа {AFTER}\n"
-            "(геометрия exp 14 + диабатика, скрытое тепло, баротропный якорь z и климатологии\n"
+            "(геометрия exp 14 + dx-фикс, ω-free T/q, скрытое тепло конденсации и климатологии\n"
             "Q₁/Q₂ эксперимента 15). Красное — уравнение хуже нулевого прогноза (отношение > 1),\n"
             "синее — лучше, белое — 1. Чёрные линии — берега. В заголовках — медиана по ячейкам.",
         )
@@ -163,7 +165,7 @@ def fig2_lat_profiles() -> None:
         lat = prof["lat_deg"]
         for row, var in enumerate(ALL_VARS):
             ax = axes[row, col]
-            for name in (BEFORE, BASE, "C15_phys"):
+            for name in (BEFORE, BASE, "C15_now"):
                 ax.plot(lat, prof[name][var], color=COLORS[name], lw=1.6, label=name)
             ax.axhline(1.0, color=MUTED, lw=0.8, ls="--")
             ax.set_yscale("log")
@@ -182,8 +184,8 @@ def fig2_lat_profiles() -> None:
         fig,
         "Что показано: относительная невязка каждого уравнения по строкам широты; слева США,\n"
         "справа глобус. Ось Y логарифмическая; пунктир на 1 — граница «хуже нулевого прогноза».\n"
-        f"Серый — {BEFORE} (exp 13), синий — {BASE} (геометрия exp 14), розовый — C15_phys\n"
-        "(+ диабатика Хелда–Суареса, скрытое тепло конденсации, баротропный якорь z).",
+        f"Серый — {BEFORE} (exp 13), синий — {BASE} (геометрия exp 14 + dx-фикс), розовый —\n"
+        "C15_now (+ скрытое тепло конденсации и исключение ω-членов из выходных T и q).",
         y=-0.02,
     )
     fig.savefig(HERE / "fig2_lat_profiles.png", bbox_inches="tight")
@@ -197,7 +199,7 @@ def fig3_term_decomposition() -> None:
         for col, dom in enumerate(DOMS):
             td = RESULTS[(dom, 2000)]["term_decomposition"]
             ax = axes[col]
-            names = [BEFORE, BASE, "C15_phys"]
+            names = [BEFORE, BASE, "C15_now"]
             n_groups = max(len(td[n][var]["cumulative"]) for n in names)
             width = 0.8 / len(names)
             for k, name in enumerate(names):
@@ -358,7 +360,7 @@ def fig6_temporal_and_levels() -> None:
     for ax, dom in zip(axes[2:], DOMS):
         bl = RESULTS[(dom, 2000)]["by_level"]
         for var, ls in (("t", "-"), ("z", "--"), ("q", ":")):
-            for name in (BASE, "C15_phys"):
+            for name in (BASE, "C15_now"):
                 ax.plot(
                     bl[name][var],
                     P_LEVELS,
@@ -386,7 +388,7 @@ def fig6_temporal_and_levels() -> None:
         "разность за час против мгновенного RHS, центрированная разность за 2 ч, трапеция.\n"
         "Если бы рассогласование «мгновенная тенденция vs часовая разность» доминировало,\n"
         "центрированные столбцы были бы кратно ниже. Справа: невязка T (сплошная), z (штрих),\n"
-        "q (точки) по уровням давления для C_best (синий) и C15_phys (розовый).",
+        "q (точки) по уровням давления для C_best (синий) и C15_now (розовый).",
         y=-0.12,
     )
     fig.savefig(HERE / "fig6_temporal_levels.png", bbox_inches="tight")
