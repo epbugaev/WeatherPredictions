@@ -914,6 +914,10 @@ class PDE_block(nn.Module):
                     spherical_divergence=spherical_divergence,
                     rayleigh_friction=rayleigh_friction,
                     vertical_scheme=vertical_scheme,
+                    omega_free=omega_free,
+                    latent_heating_coupling=latent_heating_coupling,
+                    clim_sources_path=clim_sources_path,
+                    clim_sources_prefix=clim_sources_prefix,
                 )
             )
 

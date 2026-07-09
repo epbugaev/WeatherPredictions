@@ -1,0 +1,112 @@
+# PI-IAM4VP residual-corrector experiment.
+# This treats WeatherGFT/HybridBlock as a tendency feature generator, not as a
+# trusted forecast or fixed alpha/router blend.
+experiment:
+  name: abl16-r5-exp15-s0
+model:
+  type: PI-IAM4VP
+  params:
+    # Disable the legacy latent physics injection; the residual corrector below
+    # still runs the HybridBlock and applies a learned output-space correction.
+    use_physics: false
+    use_physics_residual_corrector: true
+    physics_residual_hidden_channels: 128
+    physics_residual_apply_to: upper_air_only
+    physics_residual_zero_init: true
+    physics_residual_lambda_l1: 0.0001
+    physics_feature_mode: tendency
+    physics_residual_shuffle: none
+    physics_residual_hybrid_steps: 3
+    # Defect-B fix (2026-07-08): pure primitive-equation integration of the clean
+    # physical state — no variable_norm conv contamination, no router mix. See
+    # docs/experiments/EXP-GG-hybrid-gradguard.
+    physics_residual_hybrid_mode: stable_physical_v2
+    physics_residual_input_space: physical
+    physics_residual_humidity_mode: relative_to_specific
+    physics_residual_tendency_clip: 8.0
+    physics_w_diagnostic: mass_consistent
+    # exp 16 R4: принятые термы exp 14 (порт в hybrid-ядро)
+    physics_advection_form: advective
+    physics_metric_terms: true
+    physics_spherical_divergence: true
+    physics_rayleigh_friction: true
+    physics_vertical_scheme: lagrange3
+    # exp 16 R5: принятые термы exp 15 (omega_free: z интегрирует полный t_t;
+    # клим-источники — annual-приближение S2_map, построены на 2000)
+    physics_omega_free: [t, q, u, v]
+    physics_latent_heating_coupling: true
+    physics_clim_sources_path: /home/fa.buzaev/abl16_data/eq15_clim_summary_usa_2000.npz
+    use_diabatic_term: true
+    diabatic_hidden_channels: 64
+    # Match physics_residual_lambda_l1 (removes the 10x incentive for Q_theta to
+    # absorb non-diabatic correction mass) — audit F7b.
+    diabatic_lambda_l1: 0.0001
+    diabatic_constants_path: /home/fratnikov/weather_bench/1.40625deg/constants/constants_1.40625deg.nc
+    diabatic_cut: [75, 107, 164, 228]
+    # E9'/exp10: Q_theta acts on T and humidity blocks only (the physics deficit
+    # is diabatic heating/moistening); momentum/z stay with the main corrector.
+    diabatic_apply_to: t_and_q
+    # True USA-crop latent geometry (grid S->N, crop rows 75..106 = 16.17..59.77N).
+    physics_lat_start_deg: 18.28125
+    physics_dlat_deg: 5.625
+    physics_dlon_deg: 5.625
+    # Keep off for from-scratch runs. Turn on only for fine-tuning from a
+    # pretrained IAM4VP checkpoint.
+    freeze_iam4vp_for_residual_warmup: false
+    residual_warmup_epochs: 0
+data:
+  dataset_version: v4
+  cut:
+  - - 75
+    - 107
+  - - 164
+    - 228
+  include_target: false
+  lead_time: 0
+  sample_stride: 12
+  frame_interval: 1
+  muti_target_steps: 1
+  start_time_x: 0
+  end_time_x: 5
+  start_time_y: 6
+  end_time_y: 11
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: false
+  prefetch_factor: 4
+  train:
+    start_time: '2000-01-01 00:00:00'
+    end_time: '2003-12-30 00:00:00'
+    batch_size: 16
+    shuffle: true
+  val:
+    start_time: '2004-01-01 00:00:00'
+    end_time: '2004-12-30 00:00:00'
+    batch_size: 16
+    shuffle: false
+  memmap_path: null
+training:
+  seed: 0
+  litmodel: mutiout_imvp_small_world
+  lr: 0.0005
+  eta_min: 0.0
+  max_epoch: 30
+  loss_type: MAE
+  early_stopping_patience: 34
+  extra_kwargs:
+    muti_out_nums: 6
+    time_prediction: 6
+  warmup_ratio: 0.05
+  warmup_start_factor: 0.001
+trainer:
+  precision: 32
+  log_every_n_steps: 50
+  static_graph: false
+  find_unused_parameters: true
+  num_sanity_val_steps: 0
+  float32_matmul_precision: high
+  val_every_n_epochs: 3
+logging:
+  checkpoint_base: "${WEATHERPRED_CHECKPOINT_BASE:-./checkpoints}"
+  comet_project: "${COMET_PROJECT_NAME:-weather-plus-physics}"
+  log_code_file: null

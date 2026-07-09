@@ -8,7 +8,7 @@
 
 import torch
 
-from utils.physics_hybrid import PDE_kernel
+from utils.physics_hybrid import HybridBlock, PDE_kernel
 
 
 def _state(seed: int = 0) -> torch.Tensor:
@@ -135,6 +135,41 @@ def test_latent_heating_warms_saturated_column() -> None:
     tt_lat = lat.get_t_t(u, v, w, t)
     assert (tt_lat - tt_base).min() >= 0
     assert (tt_lat - tt_base).max() > 0
+
+
+def test_kwargs_reach_kernel_through_hybrid_block() -> None:
+    """Сквозной проброс exp14/15-kwargs: HybridBlock → PDE_block → PDE_kernel.
+
+    Регрессия на потерю kwargs в промежуточной обёртке (юнит-тесты ядра
+    такой разрыв не ловят).
+    """
+    torch.manual_seed(0)
+    block = HybridBlock(
+        dim=65,
+        zquvtw_channel=13,
+        depth=2,
+        block_dt=300.0,
+        inverse_time=False,
+        physics_part_coef=0.5,
+        w_diagnostic="mass_consistent",
+        lat_start_deg=18.28125,
+        dlat_deg=5.625,
+        dlon_deg=5.625,
+        grid_h=8,
+        physical_passthrough=True,
+        advection_form="advective",
+        metric_terms=True,
+        rayleigh_friction=True,
+        vertical_scheme="lagrange3",
+        omega_free=("t", "q"),
+        latent_heating_coupling=True,
+    )
+    for kernel in block.pde_block.PDE_kernels:
+        assert kernel.advection_form == "advective"
+        assert kernel.metric_terms and kernel.rayleigh_friction
+        assert kernel.vertical_scheme == "lagrange3"
+        assert kernel.omega_free == ("t", "q")
+        assert kernel.latent_heating_coupling
 
 
 def test_clim_sources_pooled_buffer() -> None:

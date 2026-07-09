@@ -302,6 +302,14 @@ class IAM4VP(nn.Module):
         physics_tendency_caps: dict[str, float] | None = None,
         physics_tendency_on_latent: bool = True,
         physics_prior_detach: bool = False,
+        physics_advection_form: str = "flux",
+        physics_metric_terms: bool = False,
+        physics_spherical_divergence: bool = False,
+        physics_rayleigh_friction: bool = False,
+        physics_vertical_scheme: str = "stencil",
+        physics_omega_free: tuple[str, ...] | list[str] = (),
+        physics_latent_heating_coupling: bool = False,
+        physics_clim_sources_path: str | None = None,
         use_diabatic_term=False,
         diabatic_hidden_channels=64,
         diabatic_lambda_l1=0.0,
@@ -330,6 +338,16 @@ class IAM4VP(nn.Module):
                 f"got {physics_w_diagnostic!r}"
             )
         self.physics_w_diagnostic = physics_w_diagnostic
+        # exp 16 (порт exp 14/15): opt-in термы hybrid-ядра; валидация значений —
+        # в PDE_kernel (fail-fast на конструкторе ниже). Дефолты бит-в-бит.
+        self.physics_advection_form = physics_advection_form
+        self.physics_metric_terms = physics_metric_terms
+        self.physics_spherical_divergence = physics_spherical_divergence
+        self.physics_rayleigh_friction = physics_rayleigh_friction
+        self.physics_vertical_scheme = physics_vertical_scheme
+        self.physics_omega_free = tuple(physics_omega_free)
+        self.physics_latent_heating_coupling = physics_latent_heating_coupling
+        self.physics_clim_sources_path = physics_clim_sources_path
 
         self.skip_mask_token = nn.Parameter(torch.zeros(T_data, hid_S, H_data, W_data))
         self.embed_1_mask_token = nn.Parameter(torch.zeros(T_data, hid_S, H_data // 2, W_data // 2))
@@ -483,6 +501,14 @@ class IAM4VP(nn.Module):
             tendency_limiter=self.physics_tendency_limiter,
             tendency_caps=self.physics_tendency_caps,
             physical_passthrough=self._hybrid_physical_passthrough,
+            advection_form=self.physics_advection_form,
+            metric_terms=self.physics_metric_terms,
+            spherical_divergence=self.physics_spherical_divergence,
+            rayleigh_friction=self.physics_rayleigh_friction,
+            vertical_scheme=self.physics_vertical_scheme,
+            omega_free=self.physics_omega_free,
+            latent_heating_coupling=self.physics_latent_heating_coupling,
+            clim_sources_path=self.physics_clim_sources_path,
         )
         # Optimizer-poisoning guard. When the hybrid forward produces масked
         # nonfinite values (physics_residual_nonfinite_ratio > 0), the raw
