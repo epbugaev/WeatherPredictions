@@ -182,3 +182,4 @@ cython_debug/
 # Fetched cluster run artifacts (manifests, logs, result dumps)
 cluster_results/
 .DS_Store
+tests/goldens/exp16_clim_stub.npz

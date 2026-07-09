@@ -15,6 +15,7 @@
 далее PI-PredRNN/PI-SimVP).
 """
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -272,6 +273,10 @@ class PDE_kernel(nn.Module):
         spherical_divergence: bool = False,
         rayleigh_friction: bool = False,
         vertical_scheme: str = "stencil",
+        omega_free: tuple[str, ...] = (),
+        latent_heating_coupling: bool = False,
+        clim_sources_path: str | None = None,
+        clim_sources_prefix: str = "C15_now__",
     ):
         """Инициализирует ядро с crop-aware геометрией и переключателями физики.
 
@@ -350,6 +355,10 @@ class PDE_kernel(nn.Module):
         self.spherical_divergence = spherical_divergence
         self.rayleigh_friction = rayleigh_friction
         self.vertical_scheme = vertical_scheme
+        if not set(omega_free) <= {"u", "v", "t", "q"}:
+            raise ValueError(f"omega_free must be a subset of u,v,t,q; got {omega_free!r}")
+        self.omega_free = tuple(omega_free)
+        self.latent_heating_coupling = latent_heating_coupling
         self.tendency_caps = (
             {"z": 500.0, "t": 5.0, "q": 5.0, "u": 10.0, "v": 10.0}
             if tendency_caps is None
@@ -398,6 +407,24 @@ class PDE_kernel(nn.Module):
             )
         else:
             self.dz_lagrange = None
+
+        # ===== exp 15: климатологические Q₁/Q₂-источники (annual-приближение
+        # S2_map: месячный индекс в модельном forward недоступен — календаря в
+        # API нет; ограничение фиксируется в отчёте exp 16). Буферы
+        # ``<prefix>annual_{t,q,z}`` (P, H_data) → усреднение широтных строк
+        # до grid_h → (1, P, grid_h, 1), тенденции [ед./с]. =====
+        if clim_sources_path is not None:
+            clim_arrays = dict(np.load(clim_sources_path))
+            for clim_var in ("t", "q", "z"):
+                annual = torch.from_numpy(clim_arrays[f"{clim_sources_prefix}annual_{clim_var}"])
+                pooled = F.adaptive_avg_pool1d(annual.unsqueeze(0), grid_h).squeeze(0)
+                self.register_buffer(
+                    f"clim_src_{clim_var}", pooled.reshape(1, -1, grid_h, 1).to(torch.float32)
+                )
+        else:
+            self.clim_src_t = None
+            self.clim_src_q = None
+            self.clim_src_z = None
 
         self.variable_norm = nn.Conv2d(
             in_channels=in_dim, out_channels=variable_dim * 5, kernel_size=3, stride=1, padding=1
@@ -502,22 +529,27 @@ class PDE_kernel(nn.Module):
 
     ############################# u, v #############################
     def get_uv_dt(self, u, v, w):
+        # omega_free (exp 15): исключить ω-зависимый вертикальный член из
+        # выбранных уравнений движения; при выключенном флаге w_u/w_v — тот же
+        # объект w (дефолт бит-в-бит).
+        w_u = torch.zeros_like(w) if "u" in self.omega_free else w
+        w_v = torch.zeros_like(w) if "v" in self.omega_free else w
         if self.advection_form == "advective":
             # Адвективная форма (exp 14, C_best): −(u·∂ₓ + v·∂ᵧ + w·∂_z);
             # flux-форма X·∇·V контаминирует перенос (измерено хуже, exp 14 §3.4).
-            adv_u = u * self._d_x(u) + v * self._d_y(u) + w * self._d_z(u)
-            adv_v = u * self._d_x(v) + v * self._d_y(v) + w * self._d_z(v)
+            adv_u = u * self._d_x(u) + v * self._d_y(u) + w_u * self._d_z(u)
+            adv_v = u * self._d_x(v) + v * self._d_y(v) + w_v * self._d_z(v)
         else:
             # Консервативное представление нелинейных членов (легаси, байт-в-байт)
             adv_u = (
                 compute_spatial_derivative(u * u, self._d_x)
                 + compute_spatial_derivative(u * v, self._d_y)
-                + self._d_z(u * w)
+                + self._d_z(u * w_u)
             )
             adv_v = (
                 compute_spatial_derivative(u * v, self._d_x)
                 + compute_spatial_derivative(v * v, self._d_y)
-                + self._d_z(v * w)
+                + self._d_z(v * w_v)
             )
 
         # Используем f_field (вариация по широте)
@@ -566,10 +598,25 @@ class PDE_kernel(nn.Module):
         else:  # legacy_paper: старая формула Q=−L·z_z·w (байт-в-байт)
             Q = -self.L * self.z_z * w
             self.t_t = (Q - self.z_z * w) / self.c_p - u * t_x - v * t_y - w * t_z
+        if self.latent_heating_coupling:
+            # Энергетическая связка Q₁/Q₂ (Yanai et al. 1973): скрытое тепло
+            # конденсации −(L/c_p)·(dq/dt|cond) входит в ПОЛНЫЙ t_t (и в
+            # столбовой z-интеграл через кэш self.t_t).
+            cond = self._condensation_source(t, self._q_for_latent, w)
+            self.t_t = self.t_t - (self.L / self.c_p) * cond
         return self.t_t
 
     def t_evolution(self, u, v, w, t):
-        t_t = self.get_t_t(u, v, w, t)
+        t_t = self.get_t_t(u, v, w, t)  # полный (+latent): кэш self.t_t идёт в z-интеграл
+        if "t" in self.omega_free:
+            # Зеркало physics.py rhs (exp 15): убрать адиабату и вернуть w·t_z
+            # из ВЫХОДНОЙ тенденции; self.t_t (для z) остаётся полным.
+            omega_pa = -100.0 * w
+            pressure_pa = pressure.to(t.dtype).to(t.device) * 100.0
+            adia = self.R_d * t * omega_pa / (self.c_p * pressure_pa)
+            t_t = t_t - adia + w * self._d_z(t)
+        if self.clim_src_t is not None:
+            t_t = t_t + self.clim_src_t
         return t + self._limit_increment(t_t * self.block_dt, t, "t")
 
     ################################################################
@@ -591,6 +638,8 @@ class PDE_kernel(nn.Module):
 
     def z_evolution(self, z):
         z_t = self.get_z_t()
+        if self.clim_src_z is not None:
+            z_t = z_t + self.clim_src_z
         return z + self._limit_increment(z_t * self.block_dt, z, "z")
 
     ################################################################
@@ -639,37 +688,53 @@ class PDE_kernel(nn.Module):
             ``torch.Tensor`` ``(B, P, H, W)`` — dq/dt, (кг/кг)/с.
         """
 
-        def get_qs(p, T):
-            # Magnus в СИ (e_s и p в Па). Поэлементный clamp ±20 — числовой
-            # guard как в saturation_specific_humidity; прежний диапазон
-            # [-3.47, 3.01] (наследие batch-remap) занижал/завышал e_s
-            # вне -35..+24 C.
-            t_c = T - 273.15
-            exponent = torch.clamp(17.67 * t_c / self.avoid_inf(t_c + 243.5), min=-20.0, max=20.0)
-            e_s = 6.112 * torch.exp(exponent) * 100
-            return 0.622 * e_s / self.avoid_inf(p - 0.378 * e_s)
-
-        def get_F(T, q, q_s):
-            R_ = (1 + 0.608 * q) * self.R_d
-            F_ = (self.L * R_ - self.c_p * self.R_v * T) / self.avoid_inf(
-                self.c_p * self.R_v * T * T + self.L * self.L * q_s
-            )
-            return F_ * q_s * T
-
         q_x = self._d_x(q)
         q_y = self._d_y(q)
         q_z = self._d_z(q)
 
+        cond = self._condensation_source(t, q, w)
+        if "q" in self.omega_free:
+            # omega_free('q') (exp 15): убрать вертикальную ω-адвекцию, но
+            # конденсация остаётся (зеркало physics.py get_q_dt).
+            q_t = -(u * q_x + v * q_y) + cond
+        else:
+            q_t = -(u * q_x + v * q_y + w * q_z) + cond
+        if self.clim_src_q is not None:
+            q_t = q_t + self.clim_src_q
+        return q_t
+
+    def _condensation_source(self, t, q, w):
+        """Конденсационный сток q: δ·F(T,q_s)·ω/p ≤ 0 (насыщенный подъём).
+
+        Вынесен из :meth:`get_q_dt`, чтобы ``latent_heating_coupling`` мог
+        добавить согласованное скрытое тепло −(L/c_p)·(dq/dt|cond) в t_t
+        (Yanai et al. 1973: Q₂-сток обязан греть Q₁). Арифметика — бит-в-бит
+        прежний хвост get_q_dt.
+
+        Args:
+            t: температура ``(B, P, H, W)``, K. q: влажность, кг/кг.
+            w: вертикальная скорость из ``get_w``, гПа/с.
+
+        Returns:
+            ``torch.Tensor`` ``(B, P, H, W)`` — dq/dt|cond, (кг/кг)/с.
+        """
         pressure_pa = pressure.to(t.dtype).to(t.device) * 100.0
         omega_pa = -100.0 * w
-
-        q_s = get_qs(pressure_pa, t).detach()
+        # Magnus в СИ (e_s и p в Па). Поэлементный clamp ±20 — числовой guard
+        # как в saturation_specific_humidity; прежний диапазон [-3.47, 3.01]
+        # (наследие batch-remap) занижал/завышал e_s вне -35..+24 C.
+        t_c = t - 273.15
+        exponent = torch.clamp(17.67 * t_c / self.avoid_inf(t_c + 243.5), min=-20.0, max=20.0)
+        e_s = 6.112 * torch.exp(exponent) * 100
+        q_s = (0.622 * e_s / self.avoid_inf(pressure_pa - 0.378 * e_s)).detach()
         q_s = torch.maximum(q_s, torch.ones_like(q_s) * 1e-6)
         delta = torch.logical_and(omega_pa < 0, torch.ge(q, q_s)).to(q.dtype).detach()
-        F_ = get_F(t, q, q_s).detach()
-
-        q_t = -(u * q_x + v * q_y + w * q_z) + delta * F_ * omega_pa / pressure_pa
-        return q_t
+        R_ = (1 + 0.608 * q) * self.R_d
+        F_ = (self.L * R_ - self.c_p * self.R_v * t) / self.avoid_inf(
+            self.c_p * self.R_v * t * t + self.L * self.L * q_s
+        )
+        F_ = (F_ * q_s * t).detach()
+        return delta * F_ * omega_pa / pressure_pa
 
     def q_evolution(self, u, v, t, w, q):
         q_t = self.get_q_dt(u, v, t, w, q)
@@ -700,6 +765,8 @@ class PDE_kernel(nn.Module):
         """
         w_old = self.get_w(u_old, v_old)
         self.share_z_dxyz(z_old)
+        # Кэш q для согласованного скрытого тепла в t_t (latent_heating_coupling).
+        self._q_for_latent = q_old
 
         u_new, v_new = self.uv_evolution(u_old, v_old, w_old)
         t_new = self.t_evolution(u_old, v_old, w_old, t_old)
@@ -793,6 +860,10 @@ class PDE_block(nn.Module):
         spherical_divergence: bool = False,
         rayleigh_friction: bool = False,
         vertical_scheme: str = "stencil",
+        omega_free: tuple[str, ...] = (),
+        latent_heating_coupling: bool = False,
+        clim_sources_path: str | None = None,
+        clim_sources_prefix: str = "C15_now__",
     ):
         """Собирает стек ядер, прокидывая геометрию и флаги физики в каждое.
 
@@ -912,6 +983,10 @@ class HybridBlock(nn.Module):
         spherical_divergence: bool = False,
         rayleigh_friction: bool = False,
         vertical_scheme: str = "stencil",
+        omega_free: tuple[str, ...] = (),
+        latent_heating_coupling: bool = False,
+        clim_sources_path: str | None = None,
+        clim_sources_prefix: str = "C15_now__",
     ):
         """Строит стек ``PDE_block`` и обучаемый роутер-вес.
 
@@ -962,6 +1037,10 @@ class HybridBlock(nn.Module):
             spherical_divergence=spherical_divergence,
             rayleigh_friction=rayleigh_friction,
             vertical_scheme=vertical_scheme,
+            omega_free=omega_free,
+            latent_heating_coupling=latent_heating_coupling,
+            clim_sources_path=clim_sources_path,
+            clim_sources_prefix=clim_sources_prefix,
         )
         self.router_weight = nn.Parameter(torch.zeros(1, 1, 1, dim), requires_grad=True)
 

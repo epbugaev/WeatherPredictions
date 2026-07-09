@@ -93,3 +93,64 @@ def test_advective_form_changes_output() -> None:
         out_base = base.physics_only_forward(state)
         out_adv = adv.physics_only_forward(state)
     assert not torch.equal(out_base, out_adv)
+
+
+def test_omega_free_t_keeps_full_tt_for_z() -> None:
+    """omega_free('t'): тенденция t усечена, но z интегрирует ПОЛНЫЙ t_t."""
+    base, ofree = _kernel(), _kernel(omega_free=("t",))
+    state = _state()
+    with torch.no_grad():
+        out_base = base.physics_only_forward(state)
+        out_free = ofree.physics_only_forward(state)
+    z_base, t_base = out_base.chunk(5, dim=1)[:2]
+    z_free, t_free = out_free.chunk(5, dim=1)[:2]
+    assert torch.equal(z_base, z_free)  # z не изменился (полный t_t в интеграле)
+    assert not torch.equal(t_base, t_free)  # выходная t-тенденция усечена
+
+
+def test_omega_free_q_keeps_condensation() -> None:
+    """omega_free('q') убирает w·q_z, но конденсация остаётся (зеркало physics.py)."""
+    base, ofree = _kernel(), _kernel(omega_free=("q",))
+    state = _state()
+    z, t, q, u, v = state.chunk(5, dim=1)
+    w = base.get_w(u, v)
+    q_t_base = base.get_q_dt(u, v, t, w, q)
+    q_t_free = ofree.get_q_dt(u, v, t, w, q)
+    assert torch.isfinite(q_t_free).all()
+    assert not torch.equal(q_t_base, q_t_free)
+
+
+def test_latent_heating_warms_saturated_column() -> None:
+    """Скрытое тепло: t_t(latent) − t_t(base) = −(L/c_p)·cond ≥ 0 (cond ≤ 0)."""
+    base, lat = _kernel(), _kernel(latent_heating_coupling=True)
+    state = _state()
+    z, t, q, u, v = state.chunk(5, dim=1)
+    q = torch.full_like(q, 0.02)  # форсируем насыщение
+    w = base.get_w(u, v)
+    base.share_z_dxyz(z)
+    lat.share_z_dxyz(z)
+    base._q_for_latent = q
+    lat._q_for_latent = q
+    tt_base = base.get_t_t(u, v, w, t)
+    tt_lat = lat.get_t_t(u, v, w, t)
+    assert (tt_lat - tt_base).min() >= 0
+    assert (tt_lat - tt_base).max() > 0
+
+
+def test_clim_sources_pooled_buffer() -> None:
+    """Клим-источники: annual (13, 32) → усреднение широты до (1, 13, 8, 1)."""
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    arrays = {
+        f"C15_now__annual_{k}": rng.normal(0, 1e-5, size=(13, 32)).astype("float32")
+        for k in ("t", "q", "z")
+    }
+    np.savez("tests/goldens/exp16_clim_stub.npz", **arrays)
+    kernel = _kernel(clim_sources_path="tests/goldens/exp16_clim_stub.npz")
+    assert kernel.clim_src_t.shape == (1, 13, 8, 1)
+    expected_row0 = arrays["C15_now__annual_t"][:, 0:4].mean(axis=1)
+    assert torch.allclose(kernel.clim_src_t[0, :, 0, 0], torch.from_numpy(expected_row0))
+    with torch.no_grad():
+        out = kernel.physics_only_forward(_state())
+    assert torch.isfinite(out).all()
