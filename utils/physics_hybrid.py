@@ -19,6 +19,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from utils.physics import _lagrange3_dz_matrix
+
 # ===== Исходные расчёты параметров дискретизации =====
 # USA-crop: вход 32×64 → patch=4 → latents 8×16.
 latents_size = [8, 16]
@@ -265,6 +267,11 @@ class PDE_kernel(nn.Module):
         tendency_limiter: str = "physical_clip",
         tendency_caps: dict[str, float] | None = None,
         physical_passthrough: bool = False,
+        advection_form: str = "flux",
+        metric_terms: bool = False,
+        spherical_divergence: bool = False,
+        rayleigh_friction: bool = False,
+        vertical_scheme: str = "stencil",
     ):
         """Инициализирует ядро с crop-aware геометрией и переключателями физики.
 
@@ -334,6 +341,15 @@ class PDE_kernel(nn.Module):
         self.use_universal_R = use_universal_R
         self.tendency_limiter = tendency_limiter
         self.physical_passthrough = physical_passthrough
+        if advection_form not in ("flux", "advective"):
+            raise ValueError(f"Unknown advection_form {advection_form!r}")
+        if vertical_scheme not in ("stencil", "lagrange3"):
+            raise ValueError(f"Unknown vertical_scheme {vertical_scheme!r}")
+        self.advection_form = advection_form
+        self.metric_terms = metric_terms
+        self.spherical_divergence = spherical_divergence
+        self.rayleigh_friction = rayleigh_friction
+        self.vertical_scheme = vertical_scheme
         self.tendency_caps = (
             {"z": 500.0, "t": 5.0, "q": 5.0, "u": 10.0, "v": 10.0}
             if tendency_caps is None
@@ -358,6 +374,30 @@ class PDE_kernel(nn.Module):
         self.register_buffer("pixel_x", pixel_x)
         self.register_buffer("pixel_y", pixel_y)
         self.register_buffer("f_field", f_field.reshape(1, 1, grid_h, 1))
+
+        # ===== exp 14 (порт из PurePDEKernel): кривизна сферы, трение
+        # Хелда–Суареса, Лагранжева вертикальная производная. Дефолты
+        # выключены — существующие армы бит-в-бит. =====
+        if metric_terms or spherical_divergence:
+            self.register_buffer(
+                "tan_phi_over_a", (torch.tan(lat_rad) / radius).reshape(1, 1, grid_h, 1)
+            )
+        else:
+            self.tan_phi_over_a = None
+        if rayleigh_friction:
+            # k_v(σ) = k_f·max(0, (σ−σ_b)/(1−σ_b)), σ = p/p₀, p₀ = 1000 гПа,
+            # k_f = 1/сут, σ_b = 0.7 (Held & Suarez 1994).
+            sigma = pressure.to(torch.float32) / 1000.0
+            k_v = (1.0 / 86400.0) * torch.clamp((sigma - 0.7) / (1.0 - 0.7), min=0.0)
+            self.register_buffer("rayleigh_k", k_v)
+        else:
+            self.rayleigh_k = None
+        if vertical_scheme == "lagrange3":
+            self.register_buffer(
+                "dz_lagrange", _lagrange3_dz_matrix(pressure.reshape(-1).to(torch.float32))
+            )
+        else:
+            self.dz_lagrange = None
 
         self.variable_norm = nn.Conv2d(
             in_channels=in_dim, out_channels=variable_dim * 5, kernel_size=3, stride=1, padding=1
@@ -440,6 +480,17 @@ class PDE_kernel(nn.Module):
         """Производная по широте (ось y) на геометрии инстанса (``self.pixel_y``)."""
         return d_y_weno(field, boundary=boundary, dy=self.pixel_y)
 
+    def _d_z(self, field: torch.Tensor) -> torch.Tensor:
+        """Вертикальная производная d_z = −∂/∂p [1/гПа] по ``self.vertical_scheme``.
+
+        ``'stencil'`` (дефолт) — легаси модульная ``d_z`` бит-в-бит;
+        ``'lagrange3'`` — точная 3-точечная производная Лагранжа на
+        нерегулярной p-сетке (матрица уже содержит знак −∂/∂p).
+        """
+        if self.vertical_scheme == "lagrange3":
+            return torch.einsum("pq,bqhw->bphw", self.dz_lagrange, field)
+        return d_z(field)
+
     def _laplacian(self, field: torch.Tensor) -> torch.Tensor:
         """∂²/∂x²+∂²/∂y² на геометрии инстанса (для вихревой вязкости)."""
         return self._d_x(self._d_x(field)) + self._d_y(self._d_y(field))
@@ -447,25 +498,39 @@ class PDE_kernel(nn.Module):
     def share_z_dxyz(self, z):
         self.z_x = self._d_x(z)
         self.z_y = self._d_y(z)
-        self.z_z = d_z(z)
+        self.z_z = self._d_z(z)
 
     ############################# u, v #############################
     def get_uv_dt(self, u, v, w):
-        # Консервативное представление нелинейных членов (адвекция) на геометрии инстанса
-        adv_u = (
-            compute_spatial_derivative(u * u, self._d_x)
-            + compute_spatial_derivative(u * v, self._d_y)
-            + d_z(u * w)
-        )
-        adv_v = (
-            compute_spatial_derivative(u * v, self._d_x)
-            + compute_spatial_derivative(v * v, self._d_y)
-            + d_z(v * w)
-        )
+        if self.advection_form == "advective":
+            # Адвективная форма (exp 14, C_best): −(u·∂ₓ + v·∂ᵧ + w·∂_z);
+            # flux-форма X·∇·V контаминирует перенос (измерено хуже, exp 14 §3.4).
+            adv_u = u * self._d_x(u) + v * self._d_y(u) + w * self._d_z(u)
+            adv_v = u * self._d_x(v) + v * self._d_y(v) + w * self._d_z(v)
+        else:
+            # Консервативное представление нелинейных членов (легаси, байт-в-байт)
+            adv_u = (
+                compute_spatial_derivative(u * u, self._d_x)
+                + compute_spatial_derivative(u * v, self._d_y)
+                + self._d_z(u * w)
+            )
+            adv_v = (
+                compute_spatial_derivative(u * v, self._d_x)
+                + compute_spatial_derivative(v * v, self._d_y)
+                + self._d_z(v * w)
+            )
 
         # Используем f_field (вариация по широте)
         self.u_t = -adv_u + self.f_field * v - self.z_x
         self.v_t = -adv_v - self.f_field * u - self.z_y
+        if self.metric_terms:
+            # Кривизна сферы: +u·v·tanφ/a (u_t), −u²·tanφ/a (v_t) —
+            # Holton & Hakim, ур. (2.19)–(2.20).
+            self.u_t = self.u_t + self.tan_phi_over_a * u * v
+            self.v_t = self.v_t - self.tan_phi_over_a * u * u
+        if self.rayleigh_friction:
+            self.u_t = self.u_t - self.rayleigh_k * u
+            self.v_t = self.v_t - self.rayleigh_k * v
 
         # Параметризация субрешеточной турбулентности через вихревую вязкость
         if self.eddy_viscosity > 0:
@@ -488,7 +553,7 @@ class PDE_kernel(nn.Module):
     def get_t_t(self, u, v, w, t):
         t_x = self._d_x(t)
         t_y = self._d_y(t)
-        t_z = d_z(t)
+        t_z = self._d_z(t)
         if self.t_t_formulation == "adiabatic_omega":
             # Адиабата dT/dt = R_d·T·ω/(c_p·p), p в Pa. Знаковая конвенция ядра:
             # get_w возвращает вверх-положительную w = −ω [гПа/с] (интеграл M_z
@@ -540,6 +605,9 @@ class PDE_kernel(nn.Module):
         self.u_x = self._d_x(u)
         self.v_y = self._d_y(v)
         div = self.u_x + self.v_y
+        if self.spherical_divergence:
+            # ∇·V на сфере: меридиональный метрический член −v·tanφ/a (exp 14)
+            div = div - v * self.tan_phi_over_a
         if getattr(self, "w_diagnostic", "plain") == "mass_consistent":
             # p-weighted column-mean divergence removed so int(div) dp ~ 0 per column
             pz = pixel_z.reshape(1, -1, 1, 1).to(div.dtype).to(div.device)
@@ -590,7 +658,7 @@ class PDE_kernel(nn.Module):
 
         q_x = self._d_x(q)
         q_y = self._d_y(q)
-        q_z = d_z(q)
+        q_z = self._d_z(q)
 
         pressure_pa = pressure.to(t.dtype).to(t.device) * 100.0
         omega_pa = -100.0 * w
@@ -720,6 +788,11 @@ class PDE_block(nn.Module):
         tendency_limiter: str = "physical_clip",
         tendency_caps: dict[str, float] | None = None,
         physical_passthrough: bool = False,
+        advection_form: str = "flux",
+        metric_terms: bool = False,
+        spherical_divergence: bool = False,
+        rayleigh_friction: bool = False,
+        vertical_scheme: str = "stencil",
     ):
         """Собирает стек ядер, прокидывая геометрию и флаги физики в каждое.
 
@@ -765,6 +838,11 @@ class PDE_block(nn.Module):
                     tendency_limiter=tendency_limiter,
                     tendency_caps=tendency_caps,
                     physical_passthrough=physical_passthrough,
+                    advection_form=advection_form,
+                    metric_terms=metric_terms,
+                    spherical_divergence=spherical_divergence,
+                    rayleigh_friction=rayleigh_friction,
+                    vertical_scheme=vertical_scheme,
                 )
             )
 
@@ -829,6 +907,11 @@ class HybridBlock(nn.Module):
         tendency_limiter: str = "physical_clip",
         tendency_caps: dict[str, float] | None = None,
         physical_passthrough: bool = False,
+        advection_form: str = "flux",
+        metric_terms: bool = False,
+        spherical_divergence: bool = False,
+        rayleigh_friction: bool = False,
+        vertical_scheme: str = "stencil",
     ):
         """Строит стек ``PDE_block`` и обучаемый роутер-вес.
 
@@ -874,6 +957,11 @@ class HybridBlock(nn.Module):
             tendency_limiter=tendency_limiter,
             tendency_caps=tendency_caps,
             physical_passthrough=physical_passthrough,
+            advection_form=advection_form,
+            metric_terms=metric_terms,
+            spherical_divergence=spherical_divergence,
+            rayleigh_friction=rayleigh_friction,
+            vertical_scheme=vertical_scheme,
         )
         self.router_weight = nn.Parameter(torch.zeros(1, 1, 1, dim), requires_grad=True)
 
