@@ -42,6 +42,7 @@ sys.path.insert(0, REPO_ROOT)
 from torch.utils.data import DataLoader  # noqa: E402
 
 import Data  # noqa: E402, F401  (регистрирует датасеты в utils.registry)
+import Models  # noqa: E402, F401  (регистрирует модели в utils.registry)
 from training_strategies._index_maps import MULTIOUT_INDEX_MAP  # noqa: E402
 from utils.metrics import weighted_rmse_torch_channels  # noqa: E402
 from utils.normalize import WeatherNormalize  # noqa: E402
