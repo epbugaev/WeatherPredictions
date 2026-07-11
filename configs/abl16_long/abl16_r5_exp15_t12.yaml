@@ -1,0 +1,107 @@
+# exp16-long: нативный t=12 (вход 12 кадров -> прогноз 12), 2-суточная волна.
+# Отличия от ablation16-праотца: T_data=12, окна данных 0..11 -> 12..23,
+# batch 64 (заполнение GPU), lr 1e-3 (sqrt-скейл от 5e-4 при x4 батче),
+# max_epoch 400, val каждые 10 эпох. Сгенерировано из abl16_r5_exp15_s0.yaml.
+experiment:
+  name: abl16L-r5-exp15-t12-s0
+model:
+  type: PI-IAM4VP
+  params:
+    use_physics: false
+    use_physics_residual_corrector: true
+    physics_residual_hidden_channels: 128
+    physics_residual_apply_to: upper_air_only
+    physics_residual_zero_init: true
+    physics_residual_lambda_l1: 0.0001
+    physics_feature_mode: tendency
+    physics_residual_shuffle: none
+    physics_residual_hybrid_steps: 3
+    physics_residual_hybrid_mode: stable_physical_v2
+    physics_residual_input_space: physical
+    physics_residual_humidity_mode: relative_to_specific
+    physics_residual_tendency_clip: 8.0
+    physics_w_diagnostic: mass_consistent
+    physics_advection_form: advective
+    physics_metric_terms: true
+    physics_spherical_divergence: true
+    physics_rayleigh_friction: true
+    physics_vertical_scheme: lagrange3
+    physics_omega_free:
+    - t
+    - q
+    - u
+    - v
+    physics_latent_heating_coupling: true
+    physics_clim_sources_path: /home/fa.buzaev/abl16_data/eq15_clim_summary_usa_2000.npz
+    use_diabatic_term: true
+    diabatic_hidden_channels: 64
+    diabatic_lambda_l1: 0.0001
+    diabatic_constants_path: /home/fratnikov/weather_bench/1.40625deg/constants/constants_1.40625deg.nc
+    diabatic_cut:
+    - 75
+    - 107
+    - 164
+    - 228
+    diabatic_apply_to: t_and_q
+    physics_lat_start_deg: 18.28125
+    physics_dlat_deg: 5.625
+    physics_dlon_deg: 5.625
+    freeze_iam4vp_for_residual_warmup: false
+    residual_warmup_epochs: 0
+    T_data: 12
+data:
+  dataset_version: v4
+  cut:
+  - - 75
+    - 107
+  - - 164
+    - 228
+  include_target: false
+  lead_time: 0
+  sample_stride: 12
+  frame_interval: 1
+  muti_target_steps: 1
+  start_time_x: 0
+  end_time_x: 11
+  start_time_y: 12
+  end_time_y: 23
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: false
+  prefetch_factor: 4
+  train:
+    start_time: '2000-01-01 00:00:00'
+    end_time: '2003-12-30 00:00:00'
+    batch_size: 64
+    shuffle: true
+  val:
+    start_time: '2004-01-01 00:00:00'
+    end_time: '2004-12-30 00:00:00'
+    batch_size: 64
+    shuffle: false
+  memmap_path: null
+training:
+  seed: 0
+  litmodel: mutiout_imvp_small_world
+  lr: 0.001
+  eta_min: 0.0
+  max_epoch: 400
+  loss_type: MAE
+  early_stopping_patience: 34
+  extra_kwargs:
+    muti_out_nums: 12
+    time_prediction: 12
+  warmup_ratio: 0.05
+  warmup_start_factor: 0.001
+trainer:
+  precision: 32
+  log_every_n_steps: 50
+  static_graph: false
+  find_unused_parameters: true
+  num_sanity_val_steps: 0
+  float32_matmul_precision: high
+  val_every_n_epochs: 10
+logging:
+  checkpoint_base: ${WEATHERPRED_CHECKPOINT_BASE:-./checkpoints}
+  comet_project: ${COMET_PROJECT_NAME:-weather-plus-physics}
+  log_code_file: null

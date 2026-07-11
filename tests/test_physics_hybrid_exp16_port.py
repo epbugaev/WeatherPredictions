@@ -8,6 +8,7 @@
 
 import torch
 
+from Models.IAM4VP import IAM4VP
 from utils.physics_hybrid import HybridBlock, PDE_kernel
 
 
@@ -189,3 +190,18 @@ def test_clim_sources_pooled_buffer() -> None:
     with torch.no_grad():
         out = kernel.physics_only_forward(_state())
     assert torch.isfinite(out).all()
+
+
+def test_diabatic_mask_t_only_covers_only_t_block() -> None:
+    """exp16-long R3q: маска ``t_only`` — единицы ровно на T-блоке (13 каналов)."""
+    mask = IAM4VP._build_diabatic_mask("t_only", 65, 0)
+    assert mask.shape == (1, 65, 1, 1)
+    assert mask[0, 13:26].sum().item() == 13.0
+    assert mask.sum().item() == 13.0
+    # регрессия существующих режимов
+    assert IAM4VP._build_diabatic_mask("t_and_q", 65, 0).sum().item() == 26.0
+    assert IAM4VP._build_diabatic_mask("all_upper_air", 65, 0).sum().item() == 65.0
+    # смещение surface-каналов сдвигает блок
+    shifted = IAM4VP._build_diabatic_mask("t_only", 69, 4)
+    assert shifted[0, 17:30].sum().item() == 13.0
+    assert shifted.sum().item() == 13.0

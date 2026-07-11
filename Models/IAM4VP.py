@@ -546,7 +546,7 @@ class IAM4VP(nn.Module):
         self.use_diabatic_term = bool(use_diabatic_term)
         self.diabatic_lambda_l1 = float(diabatic_lambda_l1)
         self.diabatic_head = None
-        valid_diabatic_apply_to = {"all_upper_air", "t_and_q"}
+        valid_diabatic_apply_to = {"all_upper_air", "t_and_q", "t_only"}
         if diabatic_apply_to not in valid_diabatic_apply_to:
             raise ValueError(
                 "diabatic_apply_to must be one of "
@@ -1053,10 +1053,12 @@ class IAM4VP(nn.Module):
         """Channel mask restricting the diabatic head output (E9'/exp 10).
 
         Args:
-            apply_to: ``'all_upper_air'`` (mask of ones) or ``'t_and_q'``
+            apply_to: ``'all_upper_air'`` (mask of ones), ``'t_and_q'``
                 (nonzero only on the T block and the humidity block; the data
                 humidity channel is relative humidity r, which the inherited
-                HybridBlock equations name q).
+                HybridBlock equations name q) or ``'t_only'`` (nonzero only on
+                the T block — exp16-long R3q: isolates the humidity tax of the
+                learned diabatic source, see exp16 README §8.5-г).
             corrected_channels: number of channels the residual heads emit
                 (65 for ``upper_air_only``, 69 for ``all_channels``).
             surface_offset: 0 when the corrected slice starts at upper-air
@@ -1070,6 +1072,9 @@ class IAM4VP(nn.Module):
         if apply_to == "t_and_q":
             mask = torch.zeros(1, corrected_channels, 1, 1, dtype=torch.float32)
             mask[:, surface_offset + 13 : surface_offset + 39] = 1.0
+        elif apply_to == "t_only":
+            mask = torch.zeros(1, corrected_channels, 1, 1, dtype=torch.float32)
+            mask[:, surface_offset + 13 : surface_offset + 26] = 1.0
         return mask
 
     def _residual_slice(self, x: torch.Tensor) -> torch.Tensor:
