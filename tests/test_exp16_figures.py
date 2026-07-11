@@ -96,6 +96,19 @@ def test_common_epoch_is_min_over_arms() -> None:
     assert mf.common_epoch(parsed) == 6
 
 
+def test_build_window_delta_table_averages_over_epochs() -> None:
+    parsed = {
+        "abl16-r0-no-physics-s0": {"z": [(9, 100.0), (12, 100.0)], "t": [(9, 2.0), (12, 2.0)]},
+        "abl16-r4-exp14-s0": {"z": [(9, 90.0), (12, 110.0)], "t": [(9, 1.9)]},
+    }
+    table = mf.build_window_delta_table(parsed, "abl16-r0-no-physics-s0", ["z", "t"], (9, 12))
+    # z: (−10% @9 + +10% @12)/2 = +0.0%; t: у арма есть только эпоха 9 → −5.0%
+    assert "+0.0%" in table
+    assert "-5.0%" in table
+    assert "R4 · +exp14" in table
+    assert "R0 · без физики" not in table.split("\n", 1)[1]
+
+
 def test_build_delta_table_sign_and_baseline_excluded() -> None:
     parsed = {
         "abl16-r0-no-physics-s0": {"z": [(18, 100.0)], "t": [(18, 2.0)]},

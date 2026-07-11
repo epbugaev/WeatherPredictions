@@ -315,6 +315,35 @@ def value_at_epoch(
     return next((v for e, v in series.get(var, []) if e == epoch), None)
 
 
+def _delta_table(
+    parsed_by_run: dict[str, dict[str, list[tuple[int, float]]]],
+    baseline_run: str,
+    variables: list[str],
+    epochs: tuple[int, ...],
+    title: str,
+) -> str:
+    """Общий корень дельта-таблиц: средняя по окну эпох Δ% к baseline на ячейку."""
+    ordered_vars = order_variables(variables)
+    base = parsed_by_run.get(baseline_run)
+    header = "| ступень | " + " | ".join(ordered_vars) + " |"
+    sep = "|" + "---|" * (len(ordered_vars) + 1)
+    lines = [title, "", header, sep]
+    runs = [r for r in ARM_ORDER if r in parsed_by_run and r != baseline_run]
+    runs += [r for r in parsed_by_run if r not in ARM_ORDER and r != baseline_run]
+    for run in runs:
+        cells = [ARM_LABELS.get(run, run)]
+        for var in ordered_vars:
+            deltas = []
+            for epoch in epochs:
+                a = value_at_epoch(base, var, epoch) if base else None
+                b = value_at_epoch(parsed_by_run[run], var, epoch)
+                if a and b:
+                    deltas.append(100 * (b - a) / a)
+            cells.append(f"{sum(deltas) / len(deltas):+.1f}%" if deltas else "—")
+        lines.append("| " + " | ".join(cells) + " |")
+    return "\n".join(lines) + "\n"
+
+
 def build_delta_table(
     parsed_by_run: dict[str, dict[str, list[tuple[int, float]]]],
     baseline_run: str,
@@ -322,6 +351,10 @@ def build_delta_table(
     epoch: int,
 ) -> str:
     """Markdown: Δ% RMSE к baseline на общей эпохе (``−`` = лучше baseline).
+
+    Снимок одной эпохи: для медленных полей (t/u/v/r) устойчив, для z шумит
+    (±5–8 п.п. между соседними val-точками) — робастная версия
+    ``build_window_delta_table``.
 
     Args:
         parsed_by_run: ``{run: {var: [(epoch, value), ...]}}``.
@@ -332,26 +365,36 @@ def build_delta_table(
     Returns:
         Строка Markdown-таблицы Δ% (арм × переменная) относительно baseline.
     """
-    ordered_vars = order_variables(variables)
-    base = parsed_by_run.get(baseline_run)
-    header = "| ступень | " + " | ".join(ordered_vars) + " |"
-    sep = "|" + "---|" * (len(ordered_vars) + 1)
-    lines = [
-        f"Δ% RMSE к {ARM_LABELS.get(baseline_run, baseline_run)} @ эпоха {epoch} (− = лучше):",
-        "",
-        header,
-        sep,
-    ]
-    runs = [r for r in ARM_ORDER if r in parsed_by_run and r != baseline_run]
-    runs += [r for r in parsed_by_run if r not in ARM_ORDER and r != baseline_run]
-    for run in runs:
-        cells = [ARM_LABELS.get(run, run)]
-        for var in ordered_vars:
-            a = value_at_epoch(base, var, epoch) if base else None
-            b = value_at_epoch(parsed_by_run[run], var, epoch)
-            cells.append(f"{100 * (b - a) / a:+.1f}%" if a and b else "—")
-        lines.append("| " + " | ".join(cells) + " |")
-    return "\n".join(lines) + "\n"
+    title = f"Δ% RMSE к {ARM_LABELS.get(baseline_run, baseline_run)} @ эпоха {epoch} (− = лучше):"
+    return _delta_table(parsed_by_run, baseline_run, variables, (epoch,), title)
+
+
+def build_window_delta_table(
+    parsed_by_run: dict[str, dict[str, list[tuple[int, float]]]],
+    baseline_run: str,
+    variables: list[str],
+    epochs: tuple[int, ...],
+) -> str:
+    """Markdown: Δ% RMSE к baseline, усреднённая по окну эпох (``−`` = лучше).
+
+    Ячейка — среднее по-эпоховых Δ%; эпохи, отсутствующие у арма или baseline,
+    пропускаются (усечённые армы сравниваются по доступной части окна).
+
+    Args:
+        parsed_by_run: ``{run: {var: [(epoch, value), ...]}}``.
+        baseline_run: ключ рана-эталона.
+        variables: столбцы-переменные (упорядочиваются ``order_variables``).
+        epochs: окно эпох усреднения (напр. последние 4 общих val-эпохи).
+
+    Returns:
+        Строка Markdown-таблицы средних Δ% (арм × переменная).
+    """
+    window = ", ".join(str(e) for e in epochs)
+    title = (
+        f"Δ% RMSE к {ARM_LABELS.get(baseline_run, baseline_run)}, "
+        f"среднее по эпохам {{{window}}} (− = лучше):"
+    )
+    return _delta_table(parsed_by_run, baseline_run, variables, epochs, title)
 
 
 def main() -> None:
@@ -366,8 +409,13 @@ def main() -> None:
     epoch = common_epoch(parsed)
     delta = build_delta_table(parsed, ARM_ORDER[0], variables, epoch)
     (HERE / "results" / "abl16_delta_table.md").write_text(delta)
+    # последние 4 общих val-эпохи: устойчивая к шуму одной точки версия дельт
+    window = tuple(range(val_every, epoch + 1, val_every))[-4:]
+    window_delta = build_window_delta_table(parsed, ARM_ORDER[0], variables, window)
+    (HERE / "results" / "abl16_window_delta_table.md").write_text(window_delta)
     print(f"[figures] {len(parsed)} runs, vars={variables}, common_epoch={epoch}")  # noqa: T201
     print(delta)  # noqa: T201
+    print(window_delta)  # noqa: T201
     print(f"[figures] written {HERE / 'fig_val_rmse_curves.png'}")  # noqa: T201
 
 
