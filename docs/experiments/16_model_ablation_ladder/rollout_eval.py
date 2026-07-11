@@ -194,6 +194,8 @@ def evaluate_checkpoint(args: Namespace) -> None:
             n_samples += x.shape[0]
             if batch_idx % 10 == 0:
                 print(f"[rollout] {arm}: batch {batch_idx}, samples {n_samples}")  # noqa: T201
+            if args.max_batches and batch_idx + 1 >= args.max_batches:
+                break
 
     rmse_free = (rmse_free_sum / n_samples).cpu().numpy()
     rmse_forced = (rmse_forced_sum / n_samples).cpu().numpy()
@@ -228,6 +230,12 @@ def parse_args() -> Namespace:
     parser.add_argument("--out", required=True, help="выходной .npz")
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument(
+        "--max-batches",
+        type=int,
+        default=0,
+        help="ограничить число батчей (смоук); 0 = вся валидация",
+    )
     return parser.parse_args()
 
 
