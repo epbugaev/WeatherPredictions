@@ -50,6 +50,7 @@ ARM_COLORS = {
     "abl16-r5-exp15-s0": "#CC79A7",
 }
 STAT_PREFERENCE = ("mean", "last", "first")
+VAR_ORDER = ("z", "t", "u", "v", "r", "tp")
 INK, MUTED = "#1a1a1a", "#8a8a8a"
 CAPTION_BG = "#f4f4f2"
 
@@ -257,14 +258,22 @@ def render_curves(
         ax.spines["right"].set_visible(False)
     for idx in range(n, nrow * ncol):
         axes[idx // ncol][idx % ncol].set_visible(False)
-    handles, labels = axes[0][0].get_legend_handles_labels()
-    fig.legend(handles, labels, frameon=False, fontsize=8, loc="upper center", ncol=4)
     fig.suptitle(
-        "Лестница exp 16: val-RMSE по эпохам (сид 0, одинаковые данные/эпохи)",
+        "Лестница exp 16: val-RMSE по эпохам (сид 0, вал-2004)",
         fontsize=12,
-        y=1.02,
+        y=1.11,
     )
-    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    handles, labels = axes[0][0].get_legend_handles_labels()
+    fig.legend(
+        handles,
+        labels,
+        frameon=False,
+        fontsize=8,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.06),
+        ncol=7,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
     add_caption(
         fig,
         "Что показано: RMSE на валидации (2004, вне обучения) по переменным; линия — ступень\n"
@@ -275,17 +284,90 @@ def render_curves(
     plt.close(fig)
 
 
+def order_variables(variables: list[str]) -> list[str]:
+    """Упорядочить переменные по ``VAR_ORDER`` (неизвестные — в конец по алфавиту)."""
+    return sorted(
+        variables, key=lambda v: (VAR_ORDER.index(v) if v in VAR_ORDER else len(VAR_ORDER), v)
+    )
+
+
+def common_epoch(parsed_by_run: dict[str, dict[str, list[tuple[int, float]]]]) -> int:
+    """Наибольшая эпоха, достигнутая ВСЕМИ армами (для честного сравнения усечённых).
+
+    Args:
+        parsed_by_run: ``{run: {var: [(epoch, value), ...]}}``.
+
+    Returns:
+        ``min`` по армам от их максимальной эпохи (0, если данных нет).
+    """
+    per_run_max = [
+        max((pts[-1][0] for pts in series.values() if pts), default=0)
+        for series in parsed_by_run.values()
+        if series
+    ]
+    return min(per_run_max) if per_run_max else 0
+
+
+def value_at_epoch(
+    series: dict[str, list[tuple[int, float]]], var: str, epoch: int
+) -> float | None:
+    """Значение переменной на конкретной эпохе (``None``, если её нет)."""
+    return next((v for e, v in series.get(var, []) if e == epoch), None)
+
+
+def build_delta_table(
+    parsed_by_run: dict[str, dict[str, list[tuple[int, float]]]],
+    baseline_run: str,
+    variables: list[str],
+    epoch: int,
+) -> str:
+    """Markdown: Δ% RMSE к baseline на общей эпохе (``−`` = лучше baseline).
+
+    Args:
+        parsed_by_run: ``{run: {var: [(epoch, value), ...]}}``.
+        baseline_run: ключ рана-эталона (напр. R0 «без физики»).
+        variables: столбцы-переменные (упорядочиваются ``order_variables``).
+        epoch: общая эпоха сравнения.
+
+    Returns:
+        Строка Markdown-таблицы Δ% (арм × переменная) относительно baseline.
+    """
+    ordered_vars = order_variables(variables)
+    base = parsed_by_run.get(baseline_run)
+    header = "| ступень | " + " | ".join(ordered_vars) + " |"
+    sep = "|" + "---|" * (len(ordered_vars) + 1)
+    lines = [
+        f"Δ% RMSE к {ARM_LABELS.get(baseline_run, baseline_run)} @ эпоха {epoch} (− = лучше):",
+        "",
+        header,
+        sep,
+    ]
+    runs = [r for r in ARM_ORDER if r in parsed_by_run and r != baseline_run]
+    runs += [r for r in parsed_by_run if r not in ARM_ORDER and r != baseline_run]
+    for run in runs:
+        cells = [ARM_LABELS.get(run, run)]
+        for var in ordered_vars:
+            a = value_at_epoch(base, var, epoch) if base else None
+            b = value_at_epoch(parsed_by_run[run], var, epoch)
+            cells.append(f"{100 * (b - a) / a:+.1f}%" if a and b else "—")
+        lines.append("| " + " | ".join(cells) + " |")
+    return "\n".join(lines) + "\n"
+
+
 def main() -> None:
-    """Собрать фигуру и таблицу из results/abl16_metrics.json."""
+    """Собрать фигуру и таблицы из results/abl16_metrics.json."""
     payload = json.loads((HERE / "results" / "abl16_metrics.json").read_text())
     val_every = payload["meta"]["val_every_n_epochs"]
     runs = payload["runs"]
     parsed = {run: select_rmse_series(m, val_every) for run, m in runs.items()}
-    variables = sorted({var for series in parsed.values() for var in series})
+    variables = order_variables(list({var for series in parsed.values() for var in series}))
     render_curves(parsed, variables, HERE / "fig_val_rmse_curves.png")
-    table = build_final_table(parsed, variables)
-    (HERE / "results" / "abl16_final_table.md").write_text(table)
-    print(f"[figures] {len(parsed)} runs, vars={variables}")  # noqa: T201
+    (HERE / "results" / "abl16_final_table.md").write_text(build_final_table(parsed, variables))
+    epoch = common_epoch(parsed)
+    delta = build_delta_table(parsed, ARM_ORDER[0], variables, epoch)
+    (HERE / "results" / "abl16_delta_table.md").write_text(delta)
+    print(f"[figures] {len(parsed)} runs, vars={variables}, common_epoch={epoch}")  # noqa: T201
+    print(delta)  # noqa: T201
     print(f"[figures] written {HERE / 'fig_val_rmse_curves.png'}")  # noqa: T201
 
 

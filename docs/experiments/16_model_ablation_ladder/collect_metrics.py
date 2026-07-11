@@ -32,6 +32,10 @@ from comet_ml.api import API
 HERE = pathlib.Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[2]
 VAL_EVERY_N_EPOCHS = 3
+# exp16-раны логируются в этот Comet-проект (кластерный .env COMET_PROJECT_NAME=pi-iamvp).
+# Проект фиксирован наравне со списком RUNS — локальный .env может указывать на другой
+# проект (напр. weatherpredictions), поэтому из env его НЕ читаем.
+PROJECT = "pi-iamvp"
 
 RUNS = (
     "abl16-r0-no-physics-s0",
@@ -66,23 +70,23 @@ def load_env_file(path: pathlib.Path) -> dict[str, str]:
     return env
 
 
-def resolve_comet_credentials() -> tuple[str, str, str]:
-    """Достать (api_key, workspace, project) из окружения или ``<repo>/.env``.
+def resolve_comet_credentials() -> tuple[str, str]:
+    """Достать (api_key, workspace) из окружения или ``<repo>/.env``.
+
+    Проект намеренно не резолвится здесь — он фиксирован модульной ``PROJECT``
+    (локальный .env может указывать на другой проект).
 
     Returns:
-        Тройка (api_key, workspace, project_name).
+        Пара (api_key, workspace).
     """
     file_env = load_env_file(REPO_ROOT / ".env")
     api_key = os.environ.get("COMET_API_KEY") or file_env.get("COMET_API_KEY", "")
     workspace = os.environ.get("COMET_WORKSPACE") or file_env.get("COMET_WORKSPACE", "")
-    project = (
-        os.environ.get("COMET_PROJECT_NAME") or file_env.get("COMET_PROJECT_NAME") or "pi-iamvp"
-    )
     if not api_key or not workspace:
         raise ValueError(
             f"COMET_API_KEY / COMET_WORKSPACE не заданы ни в окружении, ни в {REPO_ROOT / '.env'}"
         )
-    return api_key, workspace, project
+    return api_key, workspace
 
 
 def collect_run(experiment) -> dict[str, list[list[float]]]:
@@ -118,7 +122,8 @@ def collect_run(experiment) -> dict[str, list[list[float]]]:
 
 def main() -> None:
     """Скачать метрики всех abl16-ранов и записать results/abl16_metrics.json."""
-    api_key, workspace, project = resolve_comet_credentials()
+    api_key, workspace = resolve_comet_credentials()
+    project = PROJECT
     api = API(api_key=api_key)
     runs_out: dict[str, dict] = {}
     for run in RUNS:

@@ -6,6 +6,19 @@
 
 ### Added
 
+- **Модельная абляция «лестница уравнений» (эксперимент 16)** —
+  `docs/experiments/16_model_ablation_ladder/`, конфиги `configs/ablation16/`.
+  7 армов PI-IAM4VP на одинаковых данных/сиде: R0 (без физики) → R1 (легаси-
+  hybrid) → R2a/R2 (A1/A2 до exp13) → R3 (+exp13) → R4 (+exp14) → R5 (+exp15).
+  Порт принятых exp14/15-термов в `utils/physics_hybrid.PDE_kernel` как opt-in
+  флаги (дефолты бит-в-бит, голден `tests/goldens/exp16_kernel_default_out.pt`,
+  пины `tests/test_physics_hybrid_exp16_port.py`); проброс через `Models/IAM4VP`.
+  Инструментарий `collect_metrics.py` (Comet→JSON, bulk) + `make_figures.py`
+  (кривые + Δ-таблица, `tests/test_exp16_figures.py`). **Результат (сид 0, @э18):**
+  легаси-физика вредит (z +16 %), знаковые фиксы exp13 выводят физику в плюс
+  (z −2.4 %), геометрия exp14 — лучший z (−5.9 %), exp15 — лучший t (−2.6 %);
+  влажность физика пока не улучшает (годовая климатология — ограничение exp15).
+
 - **Уравнения ядра: opt-in недостающая физика и структурные варианты
   (эксперимент 15)** в `utils/physics.py::PurePDEKernel` (дефолты бит-в-бит,
   запинены `Exp15EquationVariants`):

@@ -82,3 +82,29 @@ def test_build_final_table_handles_missing_variable() -> None:
     table = mf.build_final_table(parsed, ["z", "t"])
     # у арма нет t → прочерк, без падения
     assert "—" in table
+
+
+def test_order_variables_physical_order() -> None:
+    assert mf.order_variables(["r", "z", "tp", "t", "v", "u"]) == ["z", "t", "u", "v", "r", "tp"]
+
+
+def test_common_epoch_is_min_over_arms() -> None:
+    parsed = {
+        "a": {"z": [(3, 1.0), (6, 0.9), (9, 0.8)]},  # max эпоха 9
+        "b": {"z": [(3, 1.1), (6, 1.0)]},  # max эпоха 6 (боттлнек)
+    }
+    assert mf.common_epoch(parsed) == 6
+
+
+def test_build_delta_table_sign_and_baseline_excluded() -> None:
+    parsed = {
+        "abl16-r0-no-physics-s0": {"z": [(18, 100.0)], "t": [(18, 2.0)]},
+        "abl16-r4-exp14-s0": {"z": [(18, 94.0)], "t": [(18, 2.1)]},
+    }
+    table = mf.build_delta_table(parsed, "abl16-r0-no-physics-s0", ["z", "t"], 18)
+    # baseline не строкой в теле, R4 присутствует
+    assert "R4 · +exp14" in table
+    assert "R0 · без физики" not in table.split("\n", 1)[1]  # только в заголовке-описании
+    # z: 94 vs 100 → -6.0% (лучше); t: 2.1 vs 2.0 → +5.0% (хуже)
+    assert "-6.0%" in table
+    assert "+5.0%" in table
