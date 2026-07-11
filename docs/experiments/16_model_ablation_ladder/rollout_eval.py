@@ -95,7 +95,8 @@ def rollout_two_windows(
     """
     window1 = predict_window(model, x, horizon)
     free2 = predict_window(model, window1, horizon)
-    forced2 = predict_window(model, y[:, :horizon], horizon)
+    # y[:, :horizon] — non-contiguous view; IAM4VP.forward требует contiguous
+    forced2 = predict_window(model, y[:, :horizon].contiguous(), horizon)
     free = torch.cat([window1, free2], dim=1)
     forced = torch.cat([window1, forced2], dim=1)
     return free, forced

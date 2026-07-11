@@ -27,11 +27,16 @@ rf_mod = _load("exp16_rollout_figures", "rollout_figures.py")
 
 
 class _FakeModel:
-    """model(x, pred_list, t) -> последний кадр x + (len(pred_list)+1)."""
+    """model(x, pred_list, t) -> последний кадр x + (len(pred_list)+1).
+
+    Как настоящая IAM4VP, требует contiguous-вход (``x.view(B*T, ...)``).
+    """
 
     def __call__(
         self, x: torch.Tensor, pred_list: list[torch.Tensor], t: torch.Tensor
     ) -> torch.Tensor:
+        batch, time = x.shape[0], x.shape[1]
+        x.view(batch * time, *x.shape[2:])  # падает на non-contiguous, как модель
         return x[:, -1] + float(len(pred_list) + 1)
 
 
@@ -57,6 +62,16 @@ def test_rollout_two_windows_boundary_semantics() -> None:
     assert torch.allclose(free[:, horizon], torch.full_like(free[:, horizon], 3.0))
     # окно 2 forced стартует с реальных кадров y (=10) -> 10+1=11
     assert torch.allclose(forced[:, horizon], torch.full_like(forced[:, horizon], 11.0))
+
+
+def test_rollout_handles_noncontiguous_target_slice() -> None:
+    # y[:, :horizon] от contiguous y — non-contiguous при B>1; модель требует
+    # contiguous (view) → rollout обязан передавать contiguous срез
+    horizon = 2
+    x = torch.zeros(2, horizon, 1, 2, 2)
+    y = torch.arange(2 * 4 * 1 * 2 * 2, dtype=torch.float32).reshape(2, 4, 1, 2, 2)
+    free, forced = re_mod.rollout_two_windows(_FakeModel(), x, y, horizon)
+    assert free.shape == forced.shape == (2, 4, 1, 2, 2)
 
 
 def test_channel_names_layout() -> None:
