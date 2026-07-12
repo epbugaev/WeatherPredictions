@@ -1,6 +1,6 @@
 import torch
 
-from utils.physics_hybrid import PDE_kernel
+from utils.physics_hybrid import HybridBlock, PDE_kernel
 
 
 def _state(seed: int = 0) -> torch.Tensor:
@@ -73,3 +73,28 @@ def test_mask_learnable_default_off_bitexact() -> None:
         out = base.physics_only_forward(_state())
     golden = torch.load("tests/goldens/exp16_kernel_default_out.pt", weights_only=True)
     assert torch.equal(out, golden)
+
+
+def test_mask_flags_reach_kernel_through_hybrid_block() -> None:
+    """Сквозной проброс: HybridBlock → PDE_block → PDE_kernel."""
+    torch.manual_seed(0)
+    block = HybridBlock(
+        dim=65,
+        zquvtw_channel=13,
+        depth=2,
+        block_dt=300.0,
+        inverse_time=False,
+        physics_part_coef=0.5,
+        w_diagnostic="mass_consistent",
+        lat_start_deg=18.28125,
+        dlat_deg=5.625,
+        dlon_deg=5.625,
+        grid_h=8,
+        physical_passthrough=True,
+        physics_level_mask={"u": 700, "v": 700},
+        physics_level_mask_learnable=True,
+    )
+    for kernel in block.pde_block.PDE_kernels:
+        assert kernel.physics_level_mask == {"u": 700, "v": 700}
+        assert kernel.physics_level_mask_learnable
+        assert kernel.level_gate_logit.shape == (4, 13)

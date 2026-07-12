@@ -310,6 +310,8 @@ class IAM4VP(nn.Module):
         physics_omega_free: tuple[str, ...] | list[str] = (),
         physics_latent_heating_coupling: bool = False,
         physics_clim_sources_path: str | None = None,
+        physics_level_mask: dict[str, float] | None = None,
+        physics_level_mask_learnable: bool = False,
         use_diabatic_term=False,
         diabatic_hidden_channels=64,
         diabatic_lambda_l1=0.0,
@@ -348,6 +350,8 @@ class IAM4VP(nn.Module):
         self.physics_omega_free = tuple(physics_omega_free)
         self.physics_latent_heating_coupling = physics_latent_heating_coupling
         self.physics_clim_sources_path = physics_clim_sources_path
+        self.physics_level_mask = physics_level_mask
+        self.physics_level_mask_learnable = physics_level_mask_learnable
 
         self.skip_mask_token = nn.Parameter(torch.zeros(T_data, hid_S, H_data, W_data))
         self.embed_1_mask_token = nn.Parameter(torch.zeros(T_data, hid_S, H_data // 2, W_data // 2))
@@ -509,6 +513,8 @@ class IAM4VP(nn.Module):
             omega_free=self.physics_omega_free,
             latent_heating_coupling=self.physics_latent_heating_coupling,
             clim_sources_path=self.physics_clim_sources_path,
+            physics_level_mask=self.physics_level_mask,
+            physics_level_mask_learnable=self.physics_level_mask_learnable,
         )
         # Optimizer-poisoning guard. When the hybrid forward produces масked
         # nonfinite values (physics_residual_nonfinite_ratio > 0), the raw

@@ -928,6 +928,8 @@ class PDE_block(nn.Module):
         latent_heating_coupling: bool = False,
         clim_sources_path: str | None = None,
         clim_sources_prefix: str = "C15_now__",
+        physics_level_mask: dict[str, float] | None = None,
+        physics_level_mask_learnable: bool = False,
     ):
         """Собирает стек ядер, прокидывая геометрию и флаги физики в каждое.
 
@@ -950,6 +952,11 @@ class PDE_block(nn.Module):
             tendency_caps: поэлементные капы приращения по переменной.
             physical_passthrough: прокидывается в каждое ядро; включает
                 ``physics_only_forward`` (чистая физика, fix дефекта B).
+            physics_level_mask: прокидывается в каждое ``PDE_kernel`` (exp 19,
+                B1) — см. ``PDE_kernel.__init__``. ``None`` (дефолт) — маска
+                выключена, поведение бит-в-бит.
+            physics_level_mask_learnable: прокидывается в каждое ``PDE_kernel``
+                (exp 19, B1L) — см. ``PDE_kernel.__init__``. Дефолт False.
         """
         super().__init__()
         self.physical_passthrough = physical_passthrough
@@ -982,6 +989,8 @@ class PDE_block(nn.Module):
                     latent_heating_coupling=latent_heating_coupling,
                     clim_sources_path=clim_sources_path,
                     clim_sources_prefix=clim_sources_prefix,
+                    physics_level_mask=physics_level_mask,
+                    physics_level_mask_learnable=physics_level_mask_learnable,
                 )
             )
 
@@ -1055,6 +1064,8 @@ class HybridBlock(nn.Module):
         latent_heating_coupling: bool = False,
         clim_sources_path: str | None = None,
         clim_sources_prefix: str = "C15_now__",
+        physics_level_mask: dict[str, float] | None = None,
+        physics_level_mask_learnable: bool = False,
     ):
         """Строит стек ``PDE_block`` и обучаемый роутер-вес.
 
@@ -1078,6 +1089,12 @@ class HybridBlock(nn.Module):
             physical_passthrough: если True, ``physics_only_forward`` даёт чистую
                 физику без роутера/conv-контаминации (fix дефекта B, режим
                 ``stable_physical_v2`` модели). Штатный ``forward`` бит-в-бит.
+            physics_level_mask: прокидывается в ``PDE_block`` → каждое
+                ``PDE_kernel`` (exp 19, B1) — см. ``PDE_kernel.__init__``.
+                ``None`` (дефолт) — маска выключена, поведение бит-в-бит.
+            physics_level_mask_learnable: прокидывается в ``PDE_block`` →
+                каждое ``PDE_kernel`` (exp 19, B1L) — см.
+                ``PDE_kernel.__init__``. Дефолт False.
         """
         super().__init__()
 
@@ -1109,6 +1126,8 @@ class HybridBlock(nn.Module):
             latent_heating_coupling=latent_heating_coupling,
             clim_sources_path=clim_sources_path,
             clim_sources_prefix=clim_sources_prefix,
+            physics_level_mask=physics_level_mask,
+            physics_level_mask_learnable=physics_level_mask_learnable,
         )
         self.router_weight = nn.Parameter(torch.zeros(1, 1, 1, dim), requires_grad=True)
 
