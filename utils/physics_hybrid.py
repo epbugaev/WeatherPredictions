@@ -277,6 +277,7 @@ class PDE_kernel(nn.Module):
         latent_heating_coupling: bool = False,
         clim_sources_path: str | None = None,
         clim_sources_prefix: str = "C15_now__",
+        physics_level_mask: dict[str, float] | None = None,
     ):
         """Инициализирует ядро с crop-aware геометрией и переключателями физики.
 
@@ -311,11 +312,18 @@ class PDE_kernel(nn.Module):
                 conv-микс (``variable_norm``), ``norm_*``, ``variable_innorm`` и
                 роутер (fix дефекта B, режим ``stable_physical_v2`` модели). На
                 стандартный ``forward`` не влияет; существующие армы бит-в-бит.
+            physics_level_mask: жёсткая маска уровня (exp 19, B1) — ключи ⊆
+                ``{'u','v','t','q'}``, значение = порог давления в гПа; физика
+                активна там, где ``pressure <= порог``, ниже приращение
+                обнуляется (см. ``_mask_increment``). ``z`` не маскируется
+                (диагностический столбовой интеграл). ``None`` (дефолт) —
+                маска выключена, поведение бит-в-бит.
 
         Raises:
             ValueError: при недопустимом значении любого строкового флага
                 (``w_diagnostic``/``coriolis_formulation``/``t_t_formulation``/
-                ``tendency_limiter``).
+                ``tendency_limiter``) или если ``physics_level_mask`` содержит
+                ключи вне ``{'u','v','t','q'}``.
         """
         super().__init__()
         if w_diagnostic not in ("plain", "mass_consistent"):
@@ -358,6 +366,11 @@ class PDE_kernel(nn.Module):
         if not set(omega_free) <= {"u", "v", "t", "q"}:
             raise ValueError(f"omega_free must be a subset of u,v,t,q; got {omega_free!r}")
         self.omega_free = tuple(omega_free)
+        if physics_level_mask is not None and not set(physics_level_mask) <= {"u", "v", "t", "q"}:
+            raise ValueError(
+                f"physics_level_mask keys must be subset of u,v,t,q; got {physics_level_mask!r}"
+            )
+        self.physics_level_mask = physics_level_mask
         self.latent_heating_coupling = latent_heating_coupling
         self.tendency_caps = (
             {"z": 500.0, "t": 5.0, "q": 5.0, "u": 10.0, "v": 10.0}
@@ -426,6 +439,15 @@ class PDE_kernel(nn.Module):
             self.clim_src_q = None
             self.clim_src_z = None
 
+        if physics_level_mask is not None:
+            for mask_var in ("u", "v", "t", "q"):
+                threshold = physics_level_mask.get(mask_var)
+                if threshold is None:
+                    mask = torch.ones_like(pressure, dtype=torch.float32)
+                else:
+                    mask = (pressure <= threshold).to(torch.float32)
+                self.register_buffer(f"level_mask_{mask_var}", mask)
+
         self.variable_norm = nn.Conv2d(
             in_channels=in_dim, out_channels=variable_dim * 5, kernel_size=3, stride=1, padding=1
         )
@@ -493,6 +515,24 @@ class PDE_kernel(nn.Module):
             return self.scale_diff(raw_increment, state).detach()
         cap = self.tendency_caps[var_key]
         return torch.clamp(raw_increment, -cap, cap).detach()
+
+    def _mask_increment(self, increment: torch.Tensor, var: str) -> torch.Tensor:
+        """Обнуляет физическое приращение переменной ниже отсечки давления.
+
+        Маска — буфер ``level_mask_<var>`` формы ``(1, 13, 1, 1)`` из порогов
+        ``physics_level_mask``; при выключенной маске приращение возвращается
+        без изменений (бит-в-бит). z не маскируется (диагностический интеграл).
+
+        Args:
+            increment: приращение поля ``(B, 13, H, W)`` (выход ``_limit_increment``).
+            var: ключ переменной, одно из ``{'u','v','t','q'}``.
+
+        Returns:
+            ``torch.Tensor`` той же формы — приращение после маски уровня.
+        """
+        if self.physics_level_mask is None:
+            return increment
+        return increment * getattr(self, f"level_mask_{var}")
 
     def avoid_inf(self, tensor, threshold=1.0):
         sign = torch.sign(tensor)
@@ -575,8 +615,8 @@ class PDE_kernel(nn.Module):
 
     def uv_evolution(self, u, v, w):
         u_t, v_t = self.get_uv_dt(u, v, w)
-        u = u + self._limit_increment(u_t * self.block_dt, u, "u")
-        v = v + self._limit_increment(v_t * self.block_dt, v, "v")
+        u = u + self._mask_increment(self._limit_increment(u_t * self.block_dt, u, "u"), "u")
+        v = v + self._mask_increment(self._limit_increment(v_t * self.block_dt, v, "v"), "v")
         return u, v
 
     ################################################################
@@ -617,7 +657,7 @@ class PDE_kernel(nn.Module):
             t_t = t_t - adia + w * self._d_z(t)
         if self.clim_src_t is not None:
             t_t = t_t + self.clim_src_t
-        return t + self._limit_increment(t_t * self.block_dt, t, "t")
+        return t + self._mask_increment(self._limit_increment(t_t * self.block_dt, t, "t"), "t")
 
     ################################################################
 
@@ -738,7 +778,7 @@ class PDE_kernel(nn.Module):
 
     def q_evolution(self, u, v, t, w, q):
         q_t = self.get_q_dt(u, v, t, w, q)
-        return q + self._limit_increment(q_t * self.block_dt, q, "q")
+        return q + self._mask_increment(self._limit_increment(q_t * self.block_dt, q, "q"), "q")
 
     ################################################################
 
