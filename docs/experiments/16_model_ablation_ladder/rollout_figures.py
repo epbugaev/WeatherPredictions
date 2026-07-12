@@ -23,6 +23,11 @@ import numpy as np
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.ticker import LogLocator, NullLocator, ScalarFormatter  # noqa: E402
+
+# Деления лог-оси RMSE: дробные subs дают метки и внутри неполных декад
+# (напр. 120, 150 между 100 и 200; 0.8, 0.9, 1.2 у температуры).
+_LOG_SUBS = (1.0, 1.2, 1.5, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0)
 
 HERE = Path(__file__).resolve().parent
 ROLLOUT_DIR = HERE / "results" / "rollout"
@@ -238,7 +243,13 @@ def render_abs_rmse(runs: dict[str, dict], dst: Path) -> None:
         ax.set_xlabel("шаг прогноза t+N")
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
-    axes[0].set_ylabel("lat-weighted RMSE (физединицы)")
+        ax.set_yscale("log")
+        ax.yaxis.set_major_locator(LogLocator(base=10.0, subs=_LOG_SUBS))
+        ax.yaxis.set_major_formatter(ScalarFormatter())
+        ax.yaxis.set_minor_locator(NullLocator())
+        ax.tick_params(axis="y", labelsize=7)
+        ax.grid(True, which="major", axis="y", alpha=0.2)
+    axes[0].set_ylabel("lat-weighted RMSE (физединицы, лог-шкала)")
     fig.suptitle(
         f"Рост ошибки на {n_steps}-шаговом free-running rollout (полная вал-2004, сид 0, {epoch})",
         fontsize=12,
