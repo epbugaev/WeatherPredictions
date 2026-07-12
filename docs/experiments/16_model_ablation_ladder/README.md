@@ -307,7 +307,7 @@ CPU-ноды: 7 армов = 56 мин) → `results/rollout/*.npz` → `rollout
 Сверка протокола: шаги 1–6 R0 совпали с Comet `RMSE_*_first/last` @эп. 18
 с точностью батч-агрегации (z500: 53.45 vs 53.58; t850: 0.957 vs 0.961).
 
-Фигуры: `fig_rollout_abs_rmse.png` (RMSE ÷ R0 по шагам, R0 = 1.0),
+Фигуры: `fig_rollout_ratio_r0.png` (RMSE ÷ R0 по шагам, R0 = 1.0),
 `fig_rollout_delta_steps.png` (Δ% к R0 по шагам, free vs TF),
 `fig_rollout_heatmap.png` (Δ% по [уровень × шаг × арм]).
 
@@ -352,7 +352,7 @@ Long-волна t=12 (§10) на общей эпохе **90** (ещё учитс
 `rollout_eval.py`, который для нативного горизонта 12 собирает прогноз **одним
 окном** (без границы скользящих окон t=6): free-running (собственные прогнозы) vs
 teacher-forced (реальные кадры в истории). Полная вал-2004 (727), 9 арм
-параллельным job-array, CPU. Фигуры `fig_rollout_{delta_steps,abs_rmse,heatmap}_t12.png`.
+параллельным job-array, CPU. Фигуры `fig_rollout_{delta_steps,ratio_r0,heatmap}_t12.png`.
 
 - **Водораздел exp13 подтверждён нативно.** Free-running: на коротком лиде все
   физ-армы бьют R0 (шаг 1: R5 −7.6 %, R4/R3 −6.8 %), но с ростом лида pre-13

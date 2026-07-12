@@ -4,7 +4,7 @@
 channels, n_samples). Выход — три фигуры в стиле инференс-диагностики
 предыдущего поколения абляции:
 
-  * ``fig_rollout_abs_rmse.png`` — RMSE арма относительно R0 (÷R0, среднее по 13
+  * ``fig_rollout_ratio_r0.png`` — RMSE арма относительно R0 (÷R0, среднее по 13
     уровням) по шагам 1..12, панель на переменную, линия на арм (R0 = 1.0);
   * ``fig_rollout_delta_steps.png`` — средняя по всем 69 каналам Δ% к R0 по
     шагам, free-running vs teacher-forced;
@@ -212,7 +212,7 @@ def add_caption(fig, text: str, y: float = -0.02) -> None:
     )
 
 
-def render_abs_rmse(runs: dict[str, dict], dst: Path) -> None:
+def render_ratio_r0(runs: dict[str, dict], dst: Path) -> None:
     """Панель на переменную: RMSE арма относительно R0 (÷R0) по шагам rollout.
 
     Абсолютный RMSE в t/r/u/v почти не различает армы (спред 1–2 % тонет в росте
@@ -446,7 +446,7 @@ def main() -> None:
     runs = load_runs(rollout_dir)
     if BASELINE not in runs:
         raise SystemExit(f"нет baseline {BASELINE} в {rollout_dir}")
-    render_abs_rmse(runs, HERE / f"fig_rollout_abs_rmse{args.suffix}.png")
+    render_ratio_r0(runs, HERE / f"fig_rollout_ratio_r0{args.suffix}.png")
     render_delta_steps(runs, HERE / f"fig_rollout_delta_steps{args.suffix}.png")
     render_heatmap(runs, HERE / f"fig_rollout_heatmap{args.suffix}.png")
     index = {arm: {"n_samples": data["n_samples"]} for arm, data in sorted(runs.items())}
