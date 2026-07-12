@@ -280,6 +280,7 @@ class PDE_kernel(nn.Module):
         physics_level_mask: dict[str, float] | None = None,
         physics_level_mask_learnable: bool = False,
         ekman_K_profile: tuple[float, ...] | None = None,
+        humidity_evolution: str = "as_is",
     ):
         """Инициализирует ядро с crop-aware геометрией и переключателями физики.
 
@@ -332,12 +333,20 @@ class PDE_kernel(nn.Module):
                 импульса ``∂/∂p(K ∂u/∂p)``, добавляется к ``u_t``/``v_t`` в
                 ``get_uv_dt``. ``None`` (дефолт) — член выключен, поведение
                 бит-в-бит.
+            humidity_evolution: ``'as_is'`` (дефолт, бит-в-бит) или
+                ``'cc_bridge'`` — мост Клаузиуса–Клапейрона (exp 19): к
+                q-тенденции добавляется ``q·(L/(R_v·T²))·t_t``, чтобы
+                наблюдаемая относительная влажность ``r=q/q_s`` сохранялась
+                под изменением температуры (``self.t_t`` — полный кэш из
+                ``t_evolution``, доступен благодаря порядку вызовов в
+                ``_evolve_fields``).
 
         Raises:
             ValueError: при недопустимом значении любого строкового флага
                 (``w_diagnostic``/``coriolis_formulation``/``t_t_formulation``/
-                ``tendency_limiter``), если ``physics_level_mask`` содержит
-                ключи вне ``{'u','v','t','q'}``, если
+                ``tendency_limiter``/``humidity_evolution``), если
+                ``physics_level_mask`` содержит ключи вне
+                ``{'u','v','t','q'}``, если
                 ``physics_level_mask_learnable=True`` без ``physics_level_mask``,
                 или если ``ekman_K_profile`` задан с длиной ≠ ``variable_dim``.
         """
@@ -361,6 +370,12 @@ class PDE_kernel(nn.Module):
                 f"Unknown tendency_limiter {tendency_limiter!r}; "
                 "expected 'physical_clip' or 'scale_diff'"
             )
+        if humidity_evolution not in ("as_is", "cc_bridge"):
+            raise ValueError(
+                f"Unknown humidity_evolution {humidity_evolution!r}; "
+                "expected 'as_is' or 'cc_bridge'"
+            )
+        self.humidity_evolution = humidity_evolution
 
         self.norm = norm
         self.eddy_viscosity = eddy_viscosity
@@ -791,6 +806,22 @@ class PDE_kernel(nn.Module):
             q_t = q_t + self.clim_src_q
         return q_t
 
+    def _saturation_specific_humidity(self, t: torch.Tensor) -> torch.Tensor:
+        """q_s(T,p) по Магнусу (СИ), detached. Общий для конденсации и CC-моста.
+
+        Args:
+            t: температура ``(B, 13, H, W)``, K.
+
+        Returns:
+            ``torch.Tensor`` той же формы — насыщающая удельная влажность, кг/кг.
+        """
+        pressure_pa = pressure.to(t.dtype).to(t.device) * 100.0
+        t_c = t - 273.15
+        exponent = torch.clamp(17.67 * t_c / self.avoid_inf(t_c + 243.5), min=-20.0, max=20.0)
+        e_s = 6.112 * torch.exp(exponent) * 100
+        q_s = (0.622 * e_s / self.avoid_inf(pressure_pa - 0.378 * e_s)).detach()
+        return torch.maximum(q_s, torch.ones_like(q_s) * 1e-6)
+
     def _condensation_source(self, t, q, w):
         """Конденсационный сток q: δ·F(T,q_s)·ω/p ≤ 0 (насыщенный подъём).
 
@@ -808,14 +839,7 @@ class PDE_kernel(nn.Module):
         """
         pressure_pa = pressure.to(t.dtype).to(t.device) * 100.0
         omega_pa = -100.0 * w
-        # Magnus в СИ (e_s и p в Па). Поэлементный clamp ±20 — числовой guard
-        # как в saturation_specific_humidity; прежний диапазон [-3.47, 3.01]
-        # (наследие batch-remap) занижал/завышал e_s вне -35..+24 C.
-        t_c = t - 273.15
-        exponent = torch.clamp(17.67 * t_c / self.avoid_inf(t_c + 243.5), min=-20.0, max=20.0)
-        e_s = 6.112 * torch.exp(exponent) * 100
-        q_s = (0.622 * e_s / self.avoid_inf(pressure_pa - 0.378 * e_s)).detach()
-        q_s = torch.maximum(q_s, torch.ones_like(q_s) * 1e-6)
+        q_s = self._saturation_specific_humidity(t)
         delta = torch.logical_and(omega_pa < 0, torch.ge(q, q_s)).to(q.dtype).detach()
         R_ = (1 + 0.608 * q) * self.R_d
         F_ = (self.L * R_ - self.c_p * self.R_v * t) / self.avoid_inf(
@@ -826,6 +850,12 @@ class PDE_kernel(nn.Module):
 
     def q_evolution(self, u, v, t, w, q):
         q_t = self.get_q_dt(u, v, t, w, q)
+        if self.humidity_evolution == "cc_bridge":
+            # Мост Клаузиуса–Клапейрона: наблюдаемая величина — r=q/q_s; чтобы r
+            # эволюционировала под изменением T, к q-тенденции добавляется
+            # q·(L/(R_v T²))·t_t (dq_s/dT-связка). self.t_t — полный кэш из t_evolution.
+            cc_term = q * (self.L / (self.R_v * t * t)) * self.t_t
+            q_t = q_t + cc_term
         return q + self._mask_increment(self._limit_increment(q_t * self.block_dt, q, "q"), "q")
 
     ################################################################

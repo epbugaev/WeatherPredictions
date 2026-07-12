@@ -132,3 +132,28 @@ def test_ekman_adds_finite_boundary_layer_term() -> None:
     assert torch.isfinite(diff).all()
     assert diff[:, :8].abs().max() == 0  # ≥2 уровня выше границы → член нулевой
     assert diff[:, 8:].abs().max() > 0  # погранслой (со стенсильным следом) затронут
+
+
+def test_cc_bridge_default_off_bitexact() -> None:
+    """humidity_evolution='as_is' (дефолт) → выход бит-в-бит golden."""
+    kernel = _kernel()
+    with torch.no_grad():
+        out = kernel.physics_only_forward(_state())
+    golden = torch.load("tests/goldens/exp16_kernel_default_out.pt", weights_only=True)
+    assert torch.equal(out, golden)
+
+
+def test_cc_bridge_warming_adds_positive_q_tendency() -> None:
+    """cc_bridge: при прогреве (t_t>0) добавка к q_t = q·(L/R_v T²)·t_t > 0."""
+    base, cc = _kernel(), _kernel(humidity_evolution="cc_bridge")
+    state = _state()
+    with torch.no_grad():
+        out_base = base.physics_only_forward(state)
+        out_cc = cc.physics_only_forward(state)
+    q_base = out_base.chunk(5, dim=1)[2]
+    q_cc = out_cc.chunk(5, dim=1)[2]
+    assert torch.isfinite(out_cc).all()
+    assert not torch.equal(q_base, q_cc)
+    # z,t,u,v не затронуты CC-мостом (меняется только q-путь):
+    for idx in (0, 1, 3, 4):
+        assert torch.equal(out_base.chunk(5, dim=1)[idx], out_cc.chunk(5, dim=1)[idx])
