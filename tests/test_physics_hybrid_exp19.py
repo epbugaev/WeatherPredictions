@@ -48,3 +48,28 @@ def test_mask_hard_zeros_boundary_layer_u_only() -> None:
     assert torch.equal(u_m[:, :10], u_b[:, :10])
     # v,t,q не затронуты маской:
     assert torch.equal(v_m, v_b) and torch.equal(t_m, t_b) and torch.equal(q_m, q_b)
+
+
+def test_mask_learnable_gate_grad_and_init() -> None:
+    """Обучаемый гейт: параметр (4,13) с градиентом; α≈жёсткой маске при init ±4."""
+    masked = _kernel(
+        physics_level_mask={"u": 700, "v": 700, "t": 850, "q": 850},
+        physics_level_mask_learnable=True,
+    )
+    assert masked.level_gate_logit.shape == (4, 13)
+    assert masked.level_gate_logit.requires_grad
+    alpha = torch.sigmoid(masked.level_gate_logit)
+    # u (строка 0): выше 700 (индексы 0..9) ≈1, ниже ≈0
+    assert alpha[0, :10].min() > 0.95 and alpha[0, 10:].max() < 0.05
+    # t (строка 2): отсечка 850 → индексы 0..10 ≈1, 11,12 ≈0
+    assert alpha[2, :11].min() > 0.95 and alpha[2, 11:].max() < 0.05
+
+
+def test_mask_learnable_default_off_bitexact() -> None:
+    """Без learnable-флага гейт не создаётся; выход бит-в-бит с немаскированным."""
+    base = _kernel()
+    assert not hasattr(base, "level_gate_logit")
+    with torch.no_grad():
+        out = base.physics_only_forward(_state())
+    golden = torch.load("tests/goldens/exp16_kernel_default_out.pt", weights_only=True)
+    assert torch.equal(out, golden)

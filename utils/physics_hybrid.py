@@ -278,6 +278,7 @@ class PDE_kernel(nn.Module):
         clim_sources_path: str | None = None,
         clim_sources_prefix: str = "C15_now__",
         physics_level_mask: dict[str, float] | None = None,
+        physics_level_mask_learnable: bool = False,
     ):
         """Инициализирует ядро с crop-aware геометрией и переключателями физики.
 
@@ -318,12 +319,20 @@ class PDE_kernel(nn.Module):
                 обнуляется (см. ``_mask_increment``). ``z`` не маскируется
                 (диагностический столбовой интеграл). ``None`` (дефолт) —
                 маска выключена, поведение бит-в-бит.
+            physics_level_mask_learnable: обучаемый гейт уровня (exp 19, B1L).
+                Если True, вместо жёсткой маски используется параметр
+                ``level_gate_logit`` формы ``(4, 13)`` (строки ``u,v,t,q``),
+                α=sigmoid(logit), инициализированный ``+4.0``/``−4.0`` по
+                значениям жёсткой маски из ``physics_level_mask``. Требует
+                заданного ``physics_level_mask`` (источник инициализации).
+                Дефолт False — параметр не создаётся, поведение бит-в-бит.
 
         Raises:
             ValueError: при недопустимом значении любого строкового флага
                 (``w_diagnostic``/``coriolis_formulation``/``t_t_formulation``/
-                ``tendency_limiter``) или если ``physics_level_mask`` содержит
-                ключи вне ``{'u','v','t','q'}``.
+                ``tendency_limiter``), если ``physics_level_mask`` содержит
+                ключи вне ``{'u','v','t','q'}``, или если
+                ``physics_level_mask_learnable=True`` без ``physics_level_mask``.
         """
         super().__init__()
         if w_diagnostic not in ("plain", "mass_consistent"):
@@ -371,6 +380,9 @@ class PDE_kernel(nn.Module):
                 f"physics_level_mask keys must be subset of u,v,t,q; got {physics_level_mask!r}"
             )
         self.physics_level_mask = physics_level_mask
+        if physics_level_mask_learnable and physics_level_mask is None:
+            raise ValueError("physics_level_mask_learnable=True requires physics_level_mask init")
+        self.physics_level_mask_learnable = physics_level_mask_learnable
         self.latent_heating_coupling = latent_heating_coupling
         self.tendency_caps = (
             {"z": 500.0, "t": 5.0, "q": 5.0, "u": 10.0, "v": 10.0}
@@ -448,6 +460,12 @@ class PDE_kernel(nn.Module):
                     mask = (pressure <= threshold).to(torch.float32)
                 self.register_buffer(f"level_mask_{mask_var}", mask)
 
+            if physics_level_mask_learnable:
+                mask_rows = torch.stack(
+                    [getattr(self, f"level_mask_{v}").reshape(-1) for v in ("u", "v", "t", "q")]
+                )
+                self.level_gate_logit = nn.Parameter(torch.where(mask_rows > 0.5, 4.0, -4.0))
+
         self.variable_norm = nn.Conv2d(
             in_channels=in_dim, out_channels=variable_dim * 5, kernel_size=3, stride=1, padding=1
         )
@@ -517,11 +535,13 @@ class PDE_kernel(nn.Module):
         return torch.clamp(raw_increment, -cap, cap).detach()
 
     def _mask_increment(self, increment: torch.Tensor, var: str) -> torch.Tensor:
-        """Обнуляет физическое приращение переменной ниже отсечки давления.
+        """Обнуляет/масштабирует физическое приращение переменной по уровню.
 
         Маска — буфер ``level_mask_<var>`` формы ``(1, 13, 1, 1)`` из порогов
         ``physics_level_mask``; при выключенной маске приращение возвращается
-        без изменений (бит-в-бит). z не маскируется (диагностический интеграл).
+        без изменений (бит-в-бит). При ``physics_level_mask_learnable`` маска —
+        обучаемый гейт α=sigmoid(logit) (``level_gate_logit``) вместо жёсткой
+        буфер-маски. z не маскируется (диагностический интеграл).
 
         Args:
             increment: приращение поля ``(B, 13, H, W)`` (выход ``_limit_increment``).
@@ -532,7 +552,11 @@ class PDE_kernel(nn.Module):
         """
         if self.physics_level_mask is None:
             return increment
-        return increment * getattr(self, f"level_mask_{var}")
+        if self.physics_level_mask_learnable:
+            row = ("u", "v", "t", "q").index(var)
+            alpha = torch.sigmoid(self.level_gate_logit[row]).reshape(1, -1, 1, 1)
+            return increment * alpha.to(increment.dtype)
+        return increment * getattr(self, f"level_mask_{var}").to(increment.dtype)
 
     def avoid_inf(self, tensor, threshold=1.0):
         sign = torch.sign(tensor)
