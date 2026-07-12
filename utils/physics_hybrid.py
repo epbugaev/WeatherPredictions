@@ -279,6 +279,7 @@ class PDE_kernel(nn.Module):
         clim_sources_prefix: str = "C15_now__",
         physics_level_mask: dict[str, float] | None = None,
         physics_level_mask_learnable: bool = False,
+        ekman_K_profile: tuple[float, ...] | None = None,
     ):
         """Инициализирует ядро с crop-aware геометрией и переключателями физики.
 
@@ -326,13 +327,19 @@ class PDE_kernel(nn.Module):
                 значениям жёсткой маски из ``physics_level_mask``. Требует
                 заданного ``physics_level_mask`` (источник инициализации).
                 Дефолт False — параметр не создаётся, поведение бит-в-бит.
+            ekman_K_profile: 13 коэффициентов вихревой вязкости K(p) (Па²/с)
+                для Экмановского трения (exp 19) — вертикальная диффузия
+                импульса ``∂/∂p(K ∂u/∂p)``, добавляется к ``u_t``/``v_t`` в
+                ``get_uv_dt``. ``None`` (дефолт) — член выключен, поведение
+                бит-в-бит.
 
         Raises:
             ValueError: при недопустимом значении любого строкового флага
                 (``w_diagnostic``/``coriolis_formulation``/``t_t_formulation``/
                 ``tendency_limiter``), если ``physics_level_mask`` содержит
-                ключи вне ``{'u','v','t','q'}``, или если
-                ``physics_level_mask_learnable=True`` без ``physics_level_mask``.
+                ключи вне ``{'u','v','t','q'}``, если
+                ``physics_level_mask_learnable=True`` без ``physics_level_mask``,
+                или если ``ekman_K_profile`` задан с длиной ≠ ``variable_dim``.
         """
         super().__init__()
         if w_diagnostic not in ("plain", "mass_consistent"):
@@ -426,6 +433,17 @@ class PDE_kernel(nn.Module):
             self.register_buffer("rayleigh_k", k_v)
         else:
             self.rayleigh_k = None
+        if ekman_K_profile is not None:
+            if len(ekman_K_profile) != variable_dim:
+                raise ValueError(
+                    f"ekman_K_profile must have {variable_dim} entries; got {len(ekman_K_profile)}"
+                )
+            self.register_buffer(
+                "ekman_K",
+                torch.tensor(ekman_K_profile, dtype=torch.float32).reshape(1, -1, 1, 1),
+            )
+        else:
+            self.ekman_K = None
         if vertical_scheme == "lagrange3":
             self.register_buffer(
                 "dz_lagrange", _lagrange3_dz_matrix(pressure.reshape(-1).to(torch.float32))
@@ -627,6 +645,12 @@ class PDE_kernel(nn.Module):
         if self.rayleigh_friction:
             self.u_t = self.u_t - self.rayleigh_k * u
             self.v_t = self.v_t - self.rayleigh_k * v
+
+        if self.ekman_K is not None:
+            # Экмановское трение: ∂/∂p(K ∂/∂p u). _d_z = −∂/∂p, поэтому двойное
+            # применение восстанавливает знак: _d_z(K·_d_z(u)) = ∂/∂p(K ∂u/∂p).
+            self.u_t = self.u_t + self._d_z(self.ekman_K * self._d_z(u))
+            self.v_t = self.v_t + self._d_z(self.ekman_K * self._d_z(v))
 
         # Параметризация субрешеточной турбулентности через вихревую вязкость
         if self.eddy_viscosity > 0:

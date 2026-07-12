@@ -98,3 +98,37 @@ def test_mask_flags_reach_kernel_through_hybrid_block() -> None:
         assert kernel.physics_level_mask == {"u": 700, "v": 700}
         assert kernel.physics_level_mask_learnable
         assert kernel.level_gate_logit.shape == (4, 13)
+
+
+def test_ekman_default_off_bitexact() -> None:
+    """ekman_K_profile=None → выход бит-в-бит golden."""
+    kernel = _kernel()
+    with torch.no_grad():
+        out = kernel.physics_only_forward(_state())
+    golden = torch.load("tests/goldens/exp16_kernel_default_out.pt", weights_only=True)
+    assert torch.equal(out, golden)
+
+
+def test_ekman_adds_finite_boundary_layer_term() -> None:
+    """Профиль K, пиковый у поверхности: u_t меняется, наверху (K=0) — нет.
+
+    ``_d_z`` (дефолт ``vertical_scheme='stencil'``) — 5-точечная 4-го порядка
+    центральная разность (``[-1,8,0,-8,1]/12``), окно ±2 уровня. Двойное
+    применение (``_d_z(K·_d_z(field))``) расширяет след ненулевого K ещё на
+    2 уровня вверх: K нулевой на индексах 0..9 (50..700 гПа), ненулевой на
+    10..12 (850/925/1000), поэтому член затрагивает индексы 8..12, а не
+    только 10..12; индексы 0..7 (≥2 уровня от границы) остаются нулевыми.
+    """
+    profile = tuple([0.0] * 10 + [1.0e6, 2.0e6, 3.0e6])  # ненуль на 850/925/1000
+    base, ekman = _kernel(), _kernel(ekman_K_profile=profile)
+    state = _state()
+    z, t, q, u, v = state.chunk(5, dim=1)
+    w = base.get_w(u, v)
+    base.share_z_dxyz(z)
+    ekman.share_z_dxyz(z)
+    ut_base, _ = base.get_uv_dt(u, v, w)
+    ut_ekman, _ = ekman.get_uv_dt(u, v, w)
+    diff = ut_ekman - ut_base
+    assert torch.isfinite(diff).all()
+    assert diff[:, :8].abs().max() == 0  # ≥2 уровня выше границы → член нулевой
+    assert diff[:, 8:].abs().max() > 0  # погранслой (со стенсильным следом) затронут
