@@ -1,7 +1,7 @@
 # exp16-long: нативный t=12 (вход 12 кадров -> прогноз 12), 2-суточная волна.
 # Отличия от ablation16-праотца: T_data=12, окна данных 0..11 -> 12..23,
 # batch 64 (заполнение GPU), lr 1e-3 (sqrt-скейл от 5e-4 при x4 батче),
-# max_epoch 400, val каждые 10 эпох. Сгенерировано из abl16_r5_exp15_s0.yaml.
+# max_epoch 500, val каждые 10 эпох. Сгенерировано из abl16_r5_exp15_s0.yaml.
 experiment:
   name: abl16L-r5-exp15-t12-s0
 model:
@@ -85,7 +85,7 @@ training:
   litmodel: mutiout_imvp_small_world
   lr: 0.001
   eta_min: 0.0
-  max_epoch: 400
+  max_epoch: 500
   loss_type: MAE
   early_stopping_patience: 34
   extra_kwargs:
