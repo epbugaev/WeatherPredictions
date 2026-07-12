@@ -307,7 +307,7 @@ CPU-ноды: 7 армов = 56 мин) → `results/rollout/*.npz` → `rollout
 Сверка протокола: шаги 1–6 R0 совпали с Comet `RMSE_*_first/last` @эп. 18
 с точностью батч-агрегации (z500: 53.45 vs 53.58; t850: 0.957 vs 0.961).
 
-Фигуры: `fig_rollout_abs_rmse.png` (абсолютный рост ошибки),
+Фигуры: `fig_rollout_abs_rmse.png` (RMSE ÷ R0 по шагам, R0 = 1.0),
 `fig_rollout_delta_steps.png` (Δ% к R0 по шагам, free vs TF),
 `fig_rollout_heatmap.png` (Δ% по [уровень × шаг × арм]).
 

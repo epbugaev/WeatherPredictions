@@ -4,8 +4,8 @@
 channels, n_samples). Выход — три фигуры в стиле инференс-диагностики
 предыдущего поколения абляции:
 
-  * ``fig_rollout_abs_rmse.png`` — абсолютный lat-weighted RMSE (физединицы)
-    по шагам 1..12, панель на переменную (среднее по 13 уровням), линия на арм;
+  * ``fig_rollout_abs_rmse.png`` — RMSE арма относительно R0 (÷R0, среднее по 13
+    уровням) по шагам 1..12, панель на переменную, линия на арм (R0 = 1.0);
   * ``fig_rollout_delta_steps.png`` — средняя по всем 69 каналам Δ% к R0 по
     шагам, free-running vs teacher-forced;
   * ``fig_rollout_heatmap.png`` — Δ% к R0 (free-running) по
@@ -23,11 +23,6 @@ import numpy as np
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
-from matplotlib.ticker import LogLocator, NullLocator, ScalarFormatter  # noqa: E402
-
-# Деления лог-оси RMSE: дробные subs дают метки и внутри неполных декад
-# (напр. 120, 150 между 100 и 200; 0.8, 0.9, 1.2 у температуры).
-_LOG_SUBS = (1.0, 1.2, 1.5, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0)
 
 HERE = Path(__file__).resolve().parent
 ROLLOUT_DIR = HERE / "results" / "rollout"
@@ -218,40 +213,50 @@ def add_caption(fig, text: str, y: float = -0.02) -> None:
 
 
 def render_abs_rmse(runs: dict[str, dict], dst: Path) -> None:
-    """Панель на переменную: абсолютный RMSE (среднее по уровням) по шагам."""
+    """Панель на переменную: RMSE арма относительно R0 (÷R0) по шагам rollout.
+
+    Абсолютный RMSE в t/r/u/v почти не различает армы (спред 1–2 % тонет в росте
+    ошибки с лидом), поэтому нормируем на арм без физики: ``RMSE_arm / RMSE_R0``.
+    R0 — линия 1.0; автомасштаб отношения магнифицирует вклад каждого арма.
+    """
+    if BASELINE not in runs:
+        return
     arms = [arm for arm in ARM_ORDER if arm in runs]
     n_steps = runs[BASELINE]["rmse_free"].shape[0]
     boundary = window_boundary(runs)
     epoch = epoch_label(runs)
     fig, axes = plt.subplots(1, len(UPPER_VARS), figsize=(3.6 * len(UPPER_VARS), 3.2))
     steps = np.arange(1, n_steps + 1)
+    base = {
+        var: level_matrix(runs[BASELINE]["rmse_free"], runs[BASELINE]["channels"], var)[0].mean(
+            axis=0
+        )
+        for var in UPPER_VARS
+    }
     for ax, var in zip(axes, UPPER_VARS, strict=True):
         for arm in arms:
             matrix, _ = level_matrix(runs[arm]["rmse_free"], runs[arm]["channels"], var)
             ax.plot(
                 steps,
-                matrix.mean(axis=0),
+                matrix.mean(axis=0) / base[var],
                 color=ARM_COLORS[arm],
                 lw=1.7,
                 marker="o",
                 ms=3,
                 label=ARM_LABELS[arm],
             )
+        ax.axhline(1.0, color=MUTED, lw=0.9, ls="--")
         if boundary is not None:
             ax.axvline(boundary + 0.5, color=MUTED, lw=0.9, ls=":")
         ax.set_title(f"{var} [{VAR_UNITS[var]}]", fontsize=10)
         ax.set_xlabel("шаг прогноза t+N")
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
-        ax.set_yscale("log")
-        ax.yaxis.set_major_locator(LogLocator(base=10.0, subs=_LOG_SUBS))
-        ax.yaxis.set_major_formatter(ScalarFormatter())
-        ax.yaxis.set_minor_locator(NullLocator())
-        ax.tick_params(axis="y", labelsize=7)
-        ax.grid(True, which="major", axis="y", alpha=0.2)
-    axes[0].set_ylabel("lat-weighted RMSE (физединицы, лог-шкала)")
+        ax.grid(True, axis="y", alpha=0.25)
+    axes[0].set_ylabel("RMSE / RMSE(R0)   (÷R0; <1 — лучше R0)")
     fig.suptitle(
-        f"Рост ошибки на {n_steps}-шаговом free-running rollout (полная вал-2004, сид 0, {epoch})",
+        f"Вклад физики к R0 (÷R0) по шагам {n_steps}-шагового free-running rollout "
+        f"(полная вал-2004, сид 0, {epoch})",
         fontsize=12,
         y=1.12,
     )
@@ -274,8 +279,8 @@ def render_abs_rmse(runs: dict[str, dict], dst: Path) -> None:
     )
     add_caption(
         fig,
-        "Что показано: абсолютный lat-weighted RMSE (среднее по 13 уровням давления) по шагам\n"
-        f"free-running rollout; {window_note}. Все армы — чекпоинты одной эпохи. Ниже — лучше.",
+        "Что показано: RMSE каждого арма, делённый на RMSE R0 (÷R0, среднее по 13 уровням),\n"
+        f"по шагам free-running rollout; {window_note}. Пунктир 1.0 = R0. Ниже — лучше R0.",
     )
     fig.savefig(dst, bbox_inches="tight")
     plt.close(fig)
