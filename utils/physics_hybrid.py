@@ -984,6 +984,8 @@ class PDE_block(nn.Module):
         clim_sources_prefix: str = "C15_now__",
         physics_level_mask: dict[str, float] | None = None,
         physics_level_mask_learnable: bool = False,
+        ekman_K_profile: tuple[float, ...] | None = None,
+        humidity_evolution: str = "as_is",
     ):
         """Собирает стек ядер, прокидывая геометрию и флаги физики в каждое.
 
@@ -1011,6 +1013,12 @@ class PDE_block(nn.Module):
                 выключена, поведение бит-в-бит.
             physics_level_mask_learnable: прокидывается в каждое ``PDE_kernel``
                 (exp 19, B1L) — см. ``PDE_kernel.__init__``. Дефолт False.
+            ekman_K_profile: прокидывается в каждое ``PDE_kernel`` (exp 19,
+                B2) — см. ``PDE_kernel.__init__``. ``None`` (дефолт) — член
+                выключен, поведение бит-в-бит.
+            humidity_evolution: прокидывается в каждое ``PDE_kernel`` (exp 19,
+                B3) — см. ``PDE_kernel.__init__``. ``'as_is'`` (дефолт) —
+                поведение бит-в-бит.
         """
         super().__init__()
         self.physical_passthrough = physical_passthrough
@@ -1045,6 +1053,8 @@ class PDE_block(nn.Module):
                     clim_sources_prefix=clim_sources_prefix,
                     physics_level_mask=physics_level_mask,
                     physics_level_mask_learnable=physics_level_mask_learnable,
+                    ekman_K_profile=ekman_K_profile,
+                    humidity_evolution=humidity_evolution,
                 )
             )
 
@@ -1120,6 +1130,8 @@ class HybridBlock(nn.Module):
         clim_sources_prefix: str = "C15_now__",
         physics_level_mask: dict[str, float] | None = None,
         physics_level_mask_learnable: bool = False,
+        ekman_K_profile: tuple[float, ...] | None = None,
+        humidity_evolution: str = "as_is",
     ):
         """Строит стек ``PDE_block`` и обучаемый роутер-вес.
 
@@ -1149,6 +1161,12 @@ class HybridBlock(nn.Module):
             physics_level_mask_learnable: прокидывается в ``PDE_block`` →
                 каждое ``PDE_kernel`` (exp 19, B1L) — см.
                 ``PDE_kernel.__init__``. Дефолт False.
+            ekman_K_profile: прокидывается в ``PDE_block`` → каждое
+                ``PDE_kernel`` (exp 19, B2) — см. ``PDE_kernel.__init__``.
+                ``None`` (дефолт) — член выключен, поведение бит-в-бит.
+            humidity_evolution: прокидывается в ``PDE_block`` → каждое
+                ``PDE_kernel`` (exp 19, B3) — см. ``PDE_kernel.__init__``.
+                ``'as_is'`` (дефолт) — поведение бит-в-бит.
         """
         super().__init__()
 
@@ -1182,6 +1200,8 @@ class HybridBlock(nn.Module):
             clim_sources_prefix=clim_sources_prefix,
             physics_level_mask=physics_level_mask,
             physics_level_mask_learnable=physics_level_mask_learnable,
+            ekman_K_profile=ekman_K_profile,
+            humidity_evolution=humidity_evolution,
         )
         self.router_weight = nn.Parameter(torch.zeros(1, 1, 1, dim), requires_grad=True)
 

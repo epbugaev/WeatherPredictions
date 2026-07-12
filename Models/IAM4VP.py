@@ -312,6 +312,8 @@ class IAM4VP(nn.Module):
         physics_clim_sources_path: str | None = None,
         physics_level_mask: dict[str, float] | None = None,
         physics_level_mask_learnable: bool = False,
+        physics_ekman_K_profile: tuple[float, ...] | None = None,
+        physics_humidity_evolution: str = "as_is",
         use_diabatic_term=False,
         diabatic_hidden_channels=64,
         diabatic_lambda_l1=0.0,
@@ -352,6 +354,8 @@ class IAM4VP(nn.Module):
         self.physics_clim_sources_path = physics_clim_sources_path
         self.physics_level_mask = physics_level_mask
         self.physics_level_mask_learnable = physics_level_mask_learnable
+        self.physics_ekman_K_profile = physics_ekman_K_profile
+        self.physics_humidity_evolution = physics_humidity_evolution
 
         self.skip_mask_token = nn.Parameter(torch.zeros(T_data, hid_S, H_data, W_data))
         self.embed_1_mask_token = nn.Parameter(torch.zeros(T_data, hid_S, H_data // 2, W_data // 2))
@@ -515,6 +519,8 @@ class IAM4VP(nn.Module):
             clim_sources_path=self.physics_clim_sources_path,
             physics_level_mask=self.physics_level_mask,
             physics_level_mask_learnable=self.physics_level_mask_learnable,
+            ekman_K_profile=self.physics_ekman_K_profile,
+            humidity_evolution=self.physics_humidity_evolution,
         )
         # Optimizer-poisoning guard. When the hybrid forward produces масked
         # nonfinite values (physics_residual_nonfinite_ratio > 0), the raw

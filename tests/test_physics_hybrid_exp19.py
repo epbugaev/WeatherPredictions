@@ -100,6 +100,31 @@ def test_mask_flags_reach_kernel_through_hybrid_block() -> None:
         assert kernel.level_gate_logit.shape == (4, 13)
 
 
+def test_ekman_cc_flags_reach_kernel_through_hybrid_block() -> None:
+    """Сквозной проброс Экмана и CC-моста до ядра."""
+    torch.manual_seed(0)
+    profile = tuple([0.0] * 10 + [1.0e6, 2.0e6, 3.0e6])
+    block = HybridBlock(
+        dim=65,
+        zquvtw_channel=13,
+        depth=2,
+        block_dt=300.0,
+        inverse_time=False,
+        physics_part_coef=0.5,
+        w_diagnostic="mass_consistent",
+        lat_start_deg=18.28125,
+        dlat_deg=5.625,
+        dlon_deg=5.625,
+        grid_h=8,
+        physical_passthrough=True,
+        ekman_K_profile=profile,
+        humidity_evolution="cc_bridge",
+    )
+    for kernel in block.pde_block.PDE_kernels:
+        assert kernel.ekman_K is not None and kernel.ekman_K.shape == (1, 13, 1, 1)
+        assert kernel.humidity_evolution == "cc_bridge"
+
+
 def test_ekman_default_off_bitexact() -> None:
     """ekman_K_profile=None → выход бит-в-бит golden."""
     kernel = _kernel()
