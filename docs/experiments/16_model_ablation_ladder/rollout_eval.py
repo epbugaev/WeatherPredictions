@@ -1,13 +1,16 @@
-"""12-шаговый rollout-инференс арма exp16 из чекпоинта → npz с lat-weighted RMSE.
+"""Rollout-инференс арма exp16 из чекпоинта → npz с lat-weighted RMSE.
 
-Протокол (аналог инференс-диагностики предыдущего поколения абляции):
-модель нативно прогнозирует ``horizon`` = 6 кадров (mask_token), 12 шагов
-собираются скользящим окном из двух прогонов:
+Горизонт определяется из конфига (``training.extra_kwargs.time_prediction``):
 
-  * окно 1: вход — 6 реальных кадров ``t+0..t+5`` → прогнозы ``t+6..t+11``;
-  * окно 2 free-running: вход — СОБСТВЕННЫЕ прогнозы окна 1 → ``t+12..t+17``;
-  * окно 2 teacher-forced: вход — реальные кадры ``t+6..t+11`` → ``t+12..t+17``
-    (изолирует дрейф rollout от по-оконной ошибки модели).
+  * **t=6** (нативный горизонт 6) — 12 шагов скользящим окном из двух прогонов:
+    окно 1 (6 реальных кадров → t+6..t+11), окно 2 free-running (собственные
+    прогнозы → t+12..t+17) и окно 2 teacher-forced (реальные кадры → t+12..t+17);
+  * **t=12** (нативный горизонт ≥ 12) — весь прогноз ОДНИМ нативным окном:
+    free-running (собственные прогнозы) vs teacher-forced (реальные кадры в
+    истории ``pred_list``), без границы окон.
+
+Teacher-forced в обоих режимах изолирует по-шаговую ошибку модели от накопления
+дрейфа rollout.
 
 Модель, нормализация и конфиг данных восстанавливаются из чекпоинта трейнера
 (`payload["model"|"normalize"|"config"]`), поэтому скрипт работает и из
@@ -48,8 +51,7 @@ from utils.metrics import weighted_rmse_torch_channels  # noqa: E402
 from utils.normalize import WeatherNormalize  # noqa: E402
 from utils.registry import get_dataset, get_model  # noqa: E402
 
-HORIZON = 6
-ROLLOUT_STEPS = 2 * HORIZON
+HORIZON = 6  # дефолтный нативный горизонт (t=6); t≥12 читается из конфига
 
 
 def channel_names() -> list[str]:
@@ -82,6 +84,9 @@ def rollout_two_windows(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """12-шаговый прогноз двумя окнами: free-running и teacher-forced.
 
+    Режим для моделей с нативным горизонтом < 12 (t=6): 12 шагов собираются
+    скользящим окном из двух прогонов по ``horizon`` кадров.
+
     Args:
         model: вызываемая как ``model(x, pred_list, t)``.
         x: реальные входные кадры ``(B, horizon, C, H, W)``.
@@ -99,6 +104,53 @@ def rollout_two_windows(
     forced2 = predict_window(model, y[:, :horizon].contiguous(), horizon)
     free = torch.cat([window1, free2], dim=1)
     forced = torch.cat([window1, forced2], dim=1)
+    return free, forced
+
+
+def predict_teacher_forced(
+    model, frames: torch.Tensor, truth: torch.Tensor, horizon: int
+) -> torch.Tensor:
+    """Нативный прогон с teacher-forcing: в историю подаются РЕАЛЬНЫЕ кадры.
+
+    На шаге ``i`` ``pred_list`` содержит реальные кадры ``truth[:, :i]`` (а не
+    собственные прогнозы), что изолирует по-шаговую ошибку модели от накопления
+    дрейфа. Шаг 0 (пустая история) совпадает с free-running.
+
+    Args:
+        model: вызываемая как ``model(frames, pred_list, t)``.
+        frames: входное окно ``(B, T_in, C, H, W)`` (нормировано).
+        truth: реальные таргеты ``(B, horizon, C, H, W)`` — учитель.
+        horizon: число авторегрессивных шагов.
+
+    Returns:
+        Прогнозы ``(B, horizon, C, H, W)``.
+    """
+    pred_list: list[torch.Tensor] = []
+    preds: list[torch.Tensor] = []
+    for idx_time in range(horizon):
+        t = torch.full((frames.shape[0],), (idx_time + 1) * 100.0, device=frames.device)
+        preds.append(model(frames, pred_list, t))
+        pred_list.append(truth[:, idx_time])
+    return torch.stack(preds, dim=1)
+
+
+def rollout_native(
+    model, x: torch.Tensor, y: torch.Tensor, horizon: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Нативный горизонт ≥ 12 (t=12): одно окно, free-running vs teacher-forced.
+
+    Args:
+        model: вызываемая как ``model(x, pred_list, t)``.
+        x: входное окно ``(B, T_in, C, H, W)`` (12 реальных кадров).
+        y: реальные таргеты ``(B, horizon, C, H, W)``.
+        horizon: нативный горизонт (12) — весь прогноз одним окном.
+
+    Returns:
+        ``(free, forced)`` формы ``(B, horizon, C, H, W)``: free авторегрессивен
+        от собственных прогнозов, forced — с реальной историей (общий шаг 1).
+    """
+    free = predict_window(model, x, horizon)
+    forced = predict_teacher_forced(model, x, y, horizon)
     return free, forced
 
 
@@ -171,7 +223,13 @@ def evaluate_checkpoint(args: Namespace) -> None:
     if set_physics_normalization is not None:
         set_physics_normalization(normalize.mean.view(-1).cpu(), normalize.std.view(-1).cpu())
 
-    dataset = build_val_dataset(cfg["data"], args.memmap, ROLLOUT_STEPS)
+    # Нативный горизонт из конфига: t=6 → скользящие 2 окна (12 шагов);
+    # t≥12 → одно нативное окно (free vs teacher-forced реальными кадрами).
+    native_horizon = int(cfg["training"].get("extra_kwargs", {}).get("time_prediction", HORIZON))
+    single_window = native_horizon >= 2 * HORIZON
+    rollout_steps = native_horizon if single_window else 2 * native_horizon
+
+    dataset = build_val_dataset(cfg["data"], args.memmap, rollout_steps)
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -181,15 +239,18 @@ def evaluate_checkpoint(args: Namespace) -> None:
     )
 
     std_phys = normalize.std.view(-1)  # (C,) для перевода RMSE в физединицы
-    rmse_free_sum = torch.zeros(ROLLOUT_STEPS, n_channels, device=device)
-    rmse_forced_sum = torch.zeros(ROLLOUT_STEPS, n_channels, device=device)
+    rmse_free_sum = torch.zeros(rollout_steps, n_channels, device=device)
+    rmse_forced_sum = torch.zeros(rollout_steps, n_channels, device=device)
     n_samples = 0
 
     with torch.inference_mode():
         for batch_idx, (x_raw, y_raw) in enumerate(loader):
             x = normalize(x_raw.to(device, non_blocking=True))
             y = normalize(y_raw.to(device, non_blocking=True))
-            free, forced = rollout_two_windows(model, x, y, HORIZON)
+            if single_window:
+                free, forced = rollout_native(model, x, y, native_horizon)
+            else:
+                free, forced = rollout_two_windows(model, x, y, native_horizon)
             # (B, T, C) в нормированных единицах → физединицы через std
             rmse_free_sum += (weighted_rmse_torch_channels(free, y) * std_phys).sum(dim=0)
             rmse_forced_sum += (weighted_rmse_torch_channels(forced, y) * std_phys).sum(dim=0)
@@ -219,6 +280,7 @@ def evaluate_checkpoint(args: Namespace) -> None:
         channels=np.array(names),
         n_samples=n_samples,
         checkpoint_epoch=int(payload.get("epoch", -1)),
+        native_horizon=native_horizon,
         arm=arm,
     )
     print(f"[rollout] {arm}: written {out_path} (n={n_samples})")  # noqa: T201

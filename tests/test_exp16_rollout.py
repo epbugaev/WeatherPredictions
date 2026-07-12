@@ -74,6 +74,32 @@ def test_rollout_handles_noncontiguous_target_slice() -> None:
     assert free.shape == forced.shape == (2, 4, 1, 2, 2)
 
 
+def test_predict_teacher_forced_feeds_real_frames() -> None:
+    # нативное окно, teacher-forcing: pred_list на шаге i = реальные кадры truth[:i]
+    horizon = 3
+    x = torch.zeros(1, horizon, 1, 2, 2)
+    truth = torch.full((1, horizon, 1, 2, 2), 10.0)
+    preds = re_mod.predict_teacher_forced(_FakeModel(), x, truth, horizon)
+    assert preds.shape == (1, horizon, 1, 2, 2)
+    # шаг 0: pred_list пуст → x[-1]=0 + 1 = 1
+    assert torch.allclose(preds[:, 0], torch.full_like(preds[:, 0], 1.0))
+    # шаг 1: pred_list=[truth0=10] (len 1) → x[-1]=0 + 2 = 2 (модель видит РЕАЛЬНЫЙ кадр в истории)
+    assert torch.allclose(preds[:, 1], torch.full_like(preds[:, 1], 2.0))
+
+
+def test_rollout_native_free_and_forced_share_first_step() -> None:
+    # нативное одно окно: free (свои прогнозы) vs forced (реальные кадры)
+    horizon = 3
+    x = torch.zeros(1, horizon, 1, 2, 2)
+    y = torch.full((1, horizon, 1, 2, 2), 10.0)
+    free, forced = re_mod.rollout_native(_FakeModel(), x, y, horizon)
+    assert free.shape == forced.shape == (1, horizon, 1, 2, 2)
+    # шаг 0 идентичен (pred_list пуст у обоих)
+    assert torch.equal(free[:, 0], forced[:, 0])
+    # free авторегрессивен (как predict_window) → шаг 2 = 3.0
+    assert torch.allclose(free[:, 2], torch.full_like(free[:, 2], 3.0))
+
+
 def test_channel_names_layout() -> None:
     names = re_mod.channel_names()
     assert len(names) == 69
@@ -113,3 +139,19 @@ def test_mean_delta_over_channels() -> None:
     delta = np.array([[1.0, 3.0], [-2.0, 2.0]])  # (steps, C)
     mean = rf_mod.mean_delta_over_channels(delta)
     assert mean.tolist() == [2.0, 0.0]
+
+
+def test_canonical_arm_both_wave_namings() -> None:
+    # t=6 и t=12 имена сводятся к одному ключу
+    assert rf_mod.canonical_arm("abl16-r0-no-physics-s0") == "r0-no-physics"
+    assert rf_mod.canonical_arm("abl16L-r0-no-physics-t12-s0") == "r0-no-physics"
+    assert rf_mod.canonical_arm("abl16L-r3q-diabatic-t-only-t12-s0") == "r3q-diabatic-t-only"
+    assert rf_mod.canonical_arm("abl16-r2a-a1-pre13-s0") == "r2a-a1-pre13"
+
+
+def test_window_boundary_two_window_vs_native() -> None:
+    # t=6: native_horizon 6 < 12 шагов → граница 6; t=12: 12 == 12 → None
+    two_window = {"r0-no-physics": {"rmse_free": np.zeros((12, 3)), "native_horizon": 6}}
+    native = {"r0-no-physics": {"rmse_free": np.zeros((12, 3)), "native_horizon": 12}}
+    assert rf_mod.window_boundary(two_window) == 6
+    assert rf_mod.window_boundary(native) is None
