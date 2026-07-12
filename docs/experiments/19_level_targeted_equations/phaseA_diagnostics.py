@@ -21,6 +21,14 @@
 (индексы 11,12) ≥20% против K0=0 при росте невязки на ≤700 гПа (индексы 0..9)
 не более 5%.
 
+Дополнительно (r-часть): по тому же якорю C15_now сравниваются две схемы
+восстановления тенденции относительной влажности r=q/q_s из модельных
+``q_t``, ``t_t`` — ``as_is`` (полная T-зависимость q_s через ∂q_s/∂T·t_t) и
+``cc_bridge`` (T-зависимость считается уже снятой мостом Клаузиуса-Клапейрона
+в ``q_evolution``, см. ``utils/physics_hybrid.py``). Обе сравниваются с
+наблюдаемой ERA5-тенденцией r. Критерий приёмки (печать): невязка cc_bridge
+ниже as_is на уровнях 600–1000 гПа (индексы 8..12).
+
 Каркас (REPO_ROOT-ленивый импорт, ``Era5Reader``, ``synthetic_state``,
 ``LevelAccum``, ``build_kernel``, ``data_latitudes_deg``) — самодостаточная
 копия из ``18_level_resolved_physics/level_diagnostics.py`` (каждая подпапка
@@ -47,7 +55,11 @@ sys.path.insert(0, str(REPO_ROOT))
 import h5netcdf  # noqa: E402
 
 from utils.physics import Grid, GridConfig, PurePDEKernel  # noqa: E402
-from utils.physics_hybrid import relative_to_specific_humidity  # noqa: E402
+from utils.physics_hybrid import (  # noqa: E402
+    relative_to_specific_humidity,
+    saturation_specific_humidity,
+    specific_to_relative_humidity,
+)
 
 ERA5_ROOT = os.environ.get("ERA5_ROOT", "/home/fratnikov/weather_bench/1.40625deg/")
 YEAR = int(os.environ.get("YEAR", "2004"))
@@ -59,8 +71,10 @@ DT_OBS = 3600.0
 N_LEVELS = 13
 PRESSURE_HPA = [50, 100, 150, 200, 250, 300, 400, 500, 600, 700, 850, 925, 1000]
 K0_VALUES = [0.0, 5e5, 1e6, 2e6, 5e6, 1e7]
-BOUNDARY_LAYER_IDX = (11, 12)  # 925, 1000 hPa
+# Все *_IDX ниже — полу-открытые срезы (lo, hi) в смысле Python [lo:hi).
+BOUNDARY_LAYER_IDX = (11, 13)  # 925, 1000 hPa (индексы 11..12 включительно)
 FREE_TROP_IDX = (0, 10)  # 50..700 hPa (индексы 0..9 включительно)
+R_RESIDUAL_IDX = (8, 13)  # 600..1000 hPa (индексы 8..12 включительно)
 
 USA = {"H": 32, "W": 64, "rows": slice(75, 107), "cols": slice(164, 228), "boundary_x": "replicate"}
 VARS = (
@@ -98,6 +112,28 @@ class LevelAccum:
         return (self.num / (self.den + 1e-30)).tolist()
 
 
+def level_range_mean(*value_lists: list[float], idx_range: tuple[int, int]) -> float:
+    """Среднее по полу-открытому срезу ``[lo:hi)`` уровней для одного/нескольких списков.
+
+    Общий helper для критериев приёмки (Экман-sweep u,v; r-невязка as_is/cc_bridge)
+    и для соответствующих print-блоков в ``main`` — избегает дублирования логики
+    среза/усреднения (CLAUDE.md §1 DRY).
+
+    Args:
+        *value_lists: один или несколько списков per-level значений ``residual_rel``
+            одинаковой длины (например ``entry["u"]``, ``entry["v"]``).
+        idx_range: ``(lo, hi)`` — полу-открытый срез индексов уровней давления.
+
+    Returns:
+        float — среднее значение по объединённому срезу всех переданных списков.
+    """
+    lo, hi = idx_range
+    combined: list[float] = []
+    for values in value_lists:
+        combined.extend(values[lo:hi])
+    return float(np.mean(combined))
+
+
 class Era5Reader:
     """Чтение состояний ERA5 USA-кропа с кэшем часовых снимков."""
 
@@ -116,7 +152,12 @@ class Era5Reader:
             f.close()
 
     def state(self, hour: int) -> dict[str, torch.Tensor]:
-        """Состояние {u,v,t,q,z} формы (1, 13, 32, 64) в физических единицах."""
+        """Состояние {u,v,t,q,z,r} формы (1, 13, 32, 64) в физических единицах.
+
+        ``r`` — сырая относительная влажность ERA5 в процентах (для r-space
+        диагностики фазы A); ``q`` — конвертированная удельная влажность,
+        используемая ядром физики.
+        """
         if hour in self.cache:
             return self.cache[hour]
         fields = {}
@@ -133,6 +174,7 @@ class Era5Reader:
             "t": fields["t"],
             "q": q.clamp_min(1e-8),
             "z": fields["z"],
+            "r": fields["r"],
         }
         self.cache[hour] = state
         for old in [h for h in self.cache if h < hour - 2]:
@@ -141,7 +183,13 @@ class Era5Reader:
 
 
 def synthetic_state(seed: int) -> dict[str, torch.Tensor]:
-    """Квази-реалистичное состояние для локального smoke (без ERA5)."""
+    """Квази-реалистичное состояние для локального smoke (без ERA5).
+
+    ``r`` строится из синтетических ``q``, ``t`` через
+    ``specific_to_relative_humidity`` (тот же Магнус, что и q_s в
+    ``r_tendency_from_q``), чтобы r-часть диагностики имела физически
+    согласованный вход даже без реальных данных.
+    """
     gen = torch.Generator().manual_seed(seed)
     h, w = USA["H"], USA["W"]
     phi = torch.tensor(
@@ -161,15 +209,19 @@ def synthetic_state(seed: int) -> dict[str, torch.Tensor]:
             800,
         ]
     ).reshape(1, 13, 1, 1)
-    t = torch.tensor([217.0, 208, 213, 218, 223, 229, 242, 253, 262, 270, 279, 283, 287]).reshape(
-        1, 13, 1, 1
-    )
+    t_clim = torch.tensor(
+        [217.0, 208, 213, 218, 223, 229, 242, 253, 262, 270, 279, 283, 287]
+    ).reshape(1, 13, 1, 1)
+    t = t_clim + 2 * torch.randn(1, 13, h, w, generator=gen)
+    q = (3e-3 * (1 + 0.3 * torch.randn(1, 13, h, w, generator=gen))).clamp_min(1e-8)
+    pressure_pa = torch.tensor(PRESSURE_HPA, dtype=torch.float32).reshape(1, 13, 1, 1) * 100.0
     return {
         "u": 10 + 5 * torch.randn(1, 13, h, w, generator=gen),
         "v": 5 * torch.randn(1, 13, h, w, generator=gen),
-        "t": t + 2 * torch.randn(1, 13, h, w, generator=gen),
-        "q": (3e-3 * (1 + 0.3 * torch.randn(1, 13, h, w, generator=gen))).clamp_min(1e-8),
+        "t": t,
+        "q": q,
         "z": phi + 300 * torch.randn(1, 13, h, w, generator=gen),
+        "r": specific_to_relative_humidity(q, t, pressure_pa),
     }
 
 
@@ -257,7 +309,7 @@ def run_ekman_sweep(k: PurePDEKernel, triple_states: list[tuple[dict, dict]]) ->
         obs_u = (s1["u"] - s0["u"]) / DT_OBS
         obs_v = (s1["v"] - s0["v"]) / DT_OBS
         with torch.no_grad():
-            rhs = k.rhs(**s0)
+            rhs = k.rhs(**{key: s0[key] for key in ALL_KEYS})
             for k0 in K0_VALUES:
                 ek = ekman_term(k, s0, k_profiles[k0])
                 u_t = rhs["u_t"] + ek["u_t"]
@@ -265,6 +317,66 @@ def run_ekman_sweep(k: PurePDEKernel, triple_states: list[tuple[dict, dict]]) ->
                 accum[k0]["u"].add(obs_u - u_t, obs_u)
                 accum[k0]["v"].add(obs_v - v_t, obs_v)
     return {str(k0): {"u": accum[k0]["u"].ratios(), "v": accum[k0]["v"].ratios()} for k0 in K0_VALUES}
+
+
+def r_tendency_from_q(
+    q_t: torch.Tensor,
+    t_t: torch.Tensor,
+    q: torch.Tensor,
+    t: torch.Tensor,
+    q_s: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Тенденция относительной влажности r=q/q_s из модельных q_t,t_t, две схемы.
+
+    as_is: r_t = d(q/q_s)/dt ≈ q_t/q_s − q·q_s_t/q_s² (полная T-зависимость q_s
+    через частную производную по времени). cc_bridge: r_t = q_t/q_s
+    (T-зависимость снята мостом Клаузиуса-Клапейрона — см. ``q_evolution`` в
+    ``utils/physics_hybrid.py``). q_s_t = q_s·(L/(R_v·T²))·t_t.
+
+    Args:
+        q_t: тенденция удельной влажности, ``(B, 13, H, W)``, кг/(кг·с).
+        t_t: тенденция температуры, ``(B, 13, H, W)``, К/с.
+        q: удельная влажность, ``(B, 13, H, W)``, кг/кг.
+        t: температура, ``(B, 13, H, W)``, К.
+        q_s: насыщенная удельная влажность, ``(B, 13, H, W)``, кг/кг.
+
+    Returns:
+        Кортеж ``(r_as_is, r_cc)`` тенденций r (доля/с), каждый формы ``q_t``.
+    """
+    L, R_v = 2.5e6, 461.5
+    q_s_t = q_s * (L / (R_v * t * t)) * t_t
+    r_as_is = q_t / q_s - q * q_s_t / (q_s * q_s)
+    r_cc = q_t / q_s
+    return r_as_is, r_cc
+
+
+def r_space_residual(
+    k: PurePDEKernel, triple_states: list[tuple[dict, dict]]
+) -> dict[str, list[float]]:
+    """Per-level residual_rel влажности r для схем as_is и cc_bridge, якорь C15_now.
+
+    Сравнивает две схемы восстановления тенденции r=q/q_s из модельных q_t,t_t
+    (``r_tendency_from_q``) с наблюдаемой ERA5-тенденцией r (``Era5Reader.state``
+    сохраняет сырое поле ``"r"``, %).
+
+    Args:
+        k: ядро якоря C15_now (арм R5).
+        triple_states: список пар (s0, s1) состояний, разделённых DT_OBS; каждое
+            состояние содержит ключи u,v,t,q,z,r (``(B, 13, H, W)``, r в %).
+
+    Returns:
+        ``{"as_is": [13 значений residual_rel], "cc_bridge": [...]}``.
+    """
+    accum = {"as_is": LevelAccum(N_LEVELS), "cc_bridge": LevelAccum(N_LEVELS)}
+    for s0, s1 in triple_states:
+        obs_r = (s1["r"] - s0["r"]) / DT_OBS / 100.0
+        with torch.no_grad():
+            rhs = k.rhs(**{key: s0[key] for key in ALL_KEYS})
+            q_s = saturation_specific_humidity(s0["t"], k.grid.pressure)
+            r_as_is, r_cc = r_tendency_from_q(rhs["q_t"], rhs["t_t"], s0["q"], s0["t"], q_s)
+        accum["as_is"].add(obs_r - r_as_is, obs_r)
+        accum["cc_bridge"].add(obs_r - r_cc, obs_r)
+    return {name: accumulator.ratios() for name, accumulator in accum.items()}
 
 
 def evaluate_acceptance(ekman_sweep: dict[str, dict[str, list[float]]]) -> dict:
@@ -283,14 +395,10 @@ def evaluate_acceptance(ekman_sweep: dict[str, dict[str, list[float]]]) -> dict:
     """
 
     def boundary_score(entry: dict[str, list[float]]) -> float:
-        lo, hi = BOUNDARY_LAYER_IDX
-        vals = entry["u"][lo : hi + 1] + entry["v"][lo : hi + 1]
-        return float(np.mean(vals))
+        return level_range_mean(entry["u"], entry["v"], idx_range=BOUNDARY_LAYER_IDX)
 
     def free_trop_score(entry: dict[str, list[float]]) -> float:
-        lo, hi = FREE_TROP_IDX
-        vals = entry["u"][lo:hi] + entry["v"][lo:hi]
-        return float(np.mean(vals))
+        return level_range_mean(entry["u"], entry["v"], idx_range=FREE_TROP_IDX)
 
     baseline_key = str(0.0)
     baseline_boundary = boundary_score(ekman_sweep[baseline_key])
@@ -348,6 +456,7 @@ def run() -> dict:
 
     ekman_sweep = run_ekman_sweep(kernel, triple_states)
     acceptance = evaluate_acceptance(ekman_sweep)
+    r_residual = r_space_residual(kernel, triple_states)
 
     return {
         "meta": {
@@ -365,19 +474,19 @@ def run() -> dict:
         },
         "ekman_sweep": ekman_sweep,
         "acceptance": acceptance,
+        "r_residual": r_residual,
     }
 
 
 def main() -> None:
-    """Прогоняет USA/YEAR, пишет JSON в $OUT, печатает критерий приёмки."""
+    """Прогоняет USA/YEAR, пишет JSON в $OUT, печатает критерии приёмки."""
     results = run()
     Path(OUT).write_text(json.dumps(results, indent=2, ensure_ascii=False))
     print("WROTE", OUT)
     print("--- ekman_sweep: residual_rel boundary-layer (925/1000 hPa) mean by K0 ---")
     for k0 in K0_VALUES:
         entry = results["ekman_sweep"][str(k0)]
-        lo, hi = BOUNDARY_LAYER_IDX
-        mean_bl = float(np.mean(entry["u"][lo : hi + 1] + entry["v"][lo : hi + 1]))
+        mean_bl = level_range_mean(entry["u"], entry["v"], idx_range=BOUNDARY_LAYER_IDX)
         print(f"  K0={k0:.1e}  boundary_mean={mean_bl:.4f}")
     acc = results["acceptance"]
     print(
@@ -385,6 +494,13 @@ def main() -> None:
         f"boundary_drop={acc['boundary_drop_pct']:.1f}% "
         f"free_trop_increase={acc['free_trop_increase_pct']:.1f}% "
         f"accepted={acc['accepted']} ---"
+    )
+    r_res = results["r_residual"]
+    as_is_mean = level_range_mean(r_res["as_is"], idx_range=R_RESIDUAL_IDX)
+    cc_mean = level_range_mean(r_res["cc_bridge"], idx_range=R_RESIDUAL_IDX)
+    print(
+        f"--- r_residual (600-1000 hPa): as_is={as_is_mean:.4f} cc_bridge={cc_mean:.4f} "
+        f"cc_better={cc_mean < as_is_mean} ---"
     )
 
 
