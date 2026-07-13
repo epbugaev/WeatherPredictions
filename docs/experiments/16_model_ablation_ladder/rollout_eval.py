@@ -39,7 +39,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-REPO_ROOT = os.environ.get("REPO_ROOT", str(Path(__file__).resolve().parents[2]))
+REPO_ROOT = os.environ.get("REPO_ROOT", str(Path(__file__).resolve().parents[3]))
 sys.path.insert(0, REPO_ROOT)
 
 from torch.utils.data import DataLoader  # noqa: E402

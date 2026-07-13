@@ -192,9 +192,20 @@ def window_boundary(runs: dict[str, dict]) -> int | None:
 
 
 def epoch_label(runs: dict[str, dict]) -> str:
-    """Подпись эпохи чекпоинта для заголовков (``эпоха N`` или ``эпоха ?``)."""
-    epoch = runs[BASELINE]["checkpoint_epoch"]
-    return f"эпоха {epoch + 1}" if epoch >= 0 else "эпоха ?"
+    """Подпись чекпоинтов для заголовков.
+
+    Волна с общего тега эпохи → ``эпоха N``. При отборе по валидации (``best.pt``)
+    эпохи армов разные, и подпись обязана показать диапазон: эпоха одного baseline
+    соврала бы про остальные армы.
+    """
+    epochs = sorted(
+        {run["checkpoint_epoch"] + 1 for run in runs.values() if run["checkpoint_epoch"] >= 0}
+    )
+    if not epochs:
+        return "эпоха ?"
+    if len(epochs) == 1:
+        return f"эпоха {epochs[0]}"
+    return f"лучший val, эпохи {epochs[0]}–{epochs[-1]}"
 
 
 def add_caption(fig, text: str, y: float = -0.02) -> None:

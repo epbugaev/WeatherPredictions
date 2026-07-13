@@ -155,3 +155,21 @@ def test_window_boundary_two_window_vs_native() -> None:
     native = {"r0-no-physics": {"rmse_free": np.zeros((12, 3)), "native_horizon": 12}}
     assert rf_mod.window_boundary(two_window) == 6
     assert rf_mod.window_boundary(native) is None
+
+
+def test_epoch_label_fixed_epoch_wave() -> None:
+    # волна на общей эпохе: все армы с одного тега → одна подпись (тег 89 = эпоха 90)
+    runs = {"r0-no-physics": {"checkpoint_epoch": 89}, "r4-exp14": {"checkpoint_epoch": 89}}
+    assert rf_mod.epoch_label(runs) == "эпоха 90"
+
+
+def test_epoch_label_best_val_selection_reports_range() -> None:
+    # отбор по валидации: у армов РАЗНЫЕ эпохи → подпись обязана показать диапазон,
+    # а не эпоху одного baseline (иначе фигура врёт про остальные 8 армов)
+    runs = {"r0-no-physics": {"checkpoint_epoch": 269}, "r4-exp14": {"checkpoint_epoch": 208}}
+    assert rf_mod.epoch_label(runs) == "лучший val, эпохи 209–270"
+
+
+def test_epoch_label_without_provenance() -> None:
+    runs = {"r0-no-physics": {"checkpoint_epoch": -1}}
+    assert rf_mod.epoch_label(runs) == "эпоха ?"
