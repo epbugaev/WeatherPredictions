@@ -24,7 +24,7 @@ from utils.registry import register_strategy
 
 
 def _predrnn_forward(
-    model: nn.Module, x: torch.Tensor, y: torch.Tensor
+    model: nn.Module, x: torch.Tensor, y: torch.Tensor, mask_value: float = 0.0
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
     """Run a full ``(x, y)`` concat-permute-forward-permute pipeline.
 
@@ -33,6 +33,10 @@ def _predrnn_forward(
             ``(next_frames, aux_losses)``.
         x: Context clip, ``(B, T_ctx, C, H, W)``.
         y: Target clip, ``(B, T_pred, C, H, W)``.
+        mask_value: Fill of the scheduled-sampling mask, ``(1, T_pred, 1, 1, 1)``.
+            ``0.0`` (default, and what training/validation use) makes the model
+            feed itself its own predictions past the context frames —
+            free-running; ``1.0`` feeds it the real frames — teacher forcing.
 
     Returns:
         Tuple ``(inp, y_hat, aux_losses)``; ``inp``/``y_hat`` are
@@ -41,11 +45,39 @@ def _predrnn_forward(
     """
     inp = torch.cat([x, y], dim=1)
     inp = inp.permute(0, 1, 3, 4, 2).contiguous()
-    mask = torch.zeros((1, y.shape[1], 1, 1, 1), device=x.device, dtype=x.dtype)
+    mask = torch.full((1, y.shape[1], 1, 1, 1), mask_value, device=x.device, dtype=x.dtype)
     y_hat_perm, aux_losses = model(inp, mask)
     y_hat = y_hat_perm.permute(0, 1, 4, 2, 3)
     inp = inp.permute(0, 1, 4, 2, 3)
     return inp, y_hat, aux_losses
+
+
+def predrnn_forecast(
+    model: nn.Module, x: torch.Tensor, y: torch.Tensor, teacher_forcing: bool = False
+) -> torch.Tensor:
+    """Forecast frames only: the ``T_pred`` predictions that line up with ``y``.
+
+    PredRNN emits ``T - 1`` frames for a ``T``-frame clip, where entry ``i`` is
+    the prediction of frame ``i + 1``. The forecast therefore starts at index
+    ``x.shape[1] - 1`` — the frame predicted from the *last* context frame. An
+    off-by-one here silently shifts every lead time, so the slice lives in this
+    one place (validation and the exp20 rollout diagnostic share it).
+
+    Args:
+        model: A PredRNN-family model, see :func:`_predrnn_forward`.
+        x: Context clip, ``(B, T_ctx, C, H, W)``.
+        y: Target clip, ``(B, T_pred, C, H, W)``. Under free-running the model
+            never reads it — only its length sets the rollout horizon.
+        teacher_forcing: If ``True``, the real frames of ``y`` are fed back at
+            every step instead of the model's own predictions. This isolates the
+            per-step error from the drift a free-running rollout accumulates.
+
+    Returns:
+        ``torch.Tensor`` of shape ``(B, T_pred, C, H, W)``, aligned with ``y``.
+    """
+    _, y_hat_full, _ = _predrnn_forward(model, x, y, mask_value=float(teacher_forcing))
+    start = x.shape[1] - 1
+    return y_hat_full[:, start : start + y.shape[1], ...]
 
 
 @register_strategy("mutiout_predrnn")
@@ -106,9 +138,7 @@ class PredRNNStep(StepStrategy):
         ctx: StepContext,
     ) -> dict[str, torch.Tensor]:
         x, y = batch
-        _, y_hat_full, _ = _predrnn_forward(model, x, y)
-        start = x.shape[1] - 1
-        y_hat = y_hat_full[:, start : start + y.shape[1], ...]
+        y_hat = predrnn_forecast(model, x, y)
         val_loss = self.loss(y_hat, y)
 
         metrics = self._build_val_metrics(
