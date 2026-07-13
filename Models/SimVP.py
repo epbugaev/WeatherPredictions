@@ -17,6 +17,9 @@ from Models.SimVP_utils import (
     ViTSubBlock,
     gInception_ST,
 )
+from utils.physics_residual import PhysicsResidualMixin
+
+PHYSICS_COUPLINGS = ("batched", "chained")
 
 
 class SimVP_Model(nn.Module):
@@ -97,6 +100,153 @@ class SimVP_Model(nn.Module):
         Y = self.dec(hid, skip)
         Y = Y.reshape(B, T, C, H, W)
         return Y
+
+
+class PI_SimVP_Model(PhysicsResidualMixin, SimVP_Model):
+    """SimVPv2 с физическим residual-корректором (exp21).
+
+    Тот же физический путь, что у PI-IAM4VP и PI-PredRNNv2: прогноз бэкбона
+    корректируется головой, которой на вход подаётся физическая невязка
+    ``delta_phys = physics(prev) - prev``. Отличается **источник** ``prev``.
+
+    SimVP — MIMO: все T кадров выдаются одним forward, рекуррентности нет, и
+    «предыдущего состояния» для кадра t архитектура не предоставляет. Физядро же
+    парное (``state(t) --dt--> state(t+1)``), поэтому ``prev`` конструируется, и
+    способ его конструирования — предмет эксперимента, а не деталь реализации:
+
+    * ``physics_coupling="batched"`` (основной режим лестницы): ``prev`` для
+      кадра t — прогноз **бэкбона** на кадр t-1 (для кадра 0 — последний входной
+      кадр). Все T кадров корректируются одним вызовом физядра на батче ``B*T``.
+      MIMO-характер модели сохраняется: авторегрессия не навязывается.
+    * ``physics_coupling="chained"`` (контрольный арм S3c): ``prev`` — уже
+      **скорректированный** кадр t-1, то есть семантика PI-IAM4VP 1:1, T
+      последовательных вызовов. Разница арм ``S3c - S3`` измеряет цену
+      авторегрессивной связки физики при идентичных уравнениях.
+
+    ``prev`` детачится в обоих режимах — паритет с PI-IAM4VP (стратегия кладёт в
+    историю ``prediction.detach()``): физприор не пробрасывает градиент сквозь
+    предыдущие кадры, иначе T шагов физядра попали бы в один граф.
+
+    Args:
+        in_shape: ``(T, C, H, W)`` — длина клипа и shape кадра; физядро требует
+            ``C=69`` и латент-сетку 8x16, то есть ``(H, W) = (32, 64)``.
+        hid_S, hid_T, N_S, N_T, model_type, mlp_ratio, drop, drop_path,
+            spatio_kernel_enc, spatio_kernel_dec, act_inplace: параметры бэкбона
+            :class:`SimVP_Model`; дефолтный ``model_type="gSTA"`` — это v2.
+        physics_coupling: ``"batched"`` или ``"chained"`` (см. выше).
+        **physics_kwargs: параметры физветки, пробрасываются дословно в
+            :meth:`utils.physics_residual.PhysicsResidualMixin.init_physics_residual`.
+    """
+
+    def __init__(
+        self,
+        in_shape,
+        hid_S=16,
+        hid_T=256,
+        N_S=4,
+        N_T=4,
+        model_type="gSTA",
+        mlp_ratio=8.0,
+        drop=0.0,
+        drop_path=0.0,
+        spatio_kernel_enc=3,
+        spatio_kernel_dec=3,
+        act_inplace=True,
+        physics_coupling: str = "batched",
+        **physics_kwargs,
+    ) -> None:
+        super().__init__(
+            in_shape,
+            hid_S=hid_S,
+            hid_T=hid_T,
+            N_S=N_S,
+            N_T=N_T,
+            model_type=model_type,
+            mlp_ratio=mlp_ratio,
+            drop=drop,
+            drop_path=drop_path,
+            spatio_kernel_enc=spatio_kernel_enc,
+            spatio_kernel_dec=spatio_kernel_dec,
+            act_inplace=act_inplace,
+        )
+        if physics_coupling not in PHYSICS_COUPLINGS:
+            raise ValueError(
+                f"Unknown physics_coupling {physics_coupling!r}; "
+                f"expected one of {PHYSICS_COUPLINGS}"
+            )
+        self.physics_coupling = physics_coupling
+        _, C_data, H_data, W_data = tuple(in_shape)
+        self.init_physics_residual(
+            C_data=C_data,
+            H_data=H_data,
+            W_data=W_data,
+            downscaling_factor_all=4,
+            **physics_kwargs,
+        )
+
+    def _correct_batched(self, y_nn: torch.Tensor, x_raw: torch.Tensor) -> torch.Tensor:
+        """Correct every frame in one physics call, MIMO-style.
+
+        Args:
+            y_nn: backbone prediction ``(B, T, C, H, W)`` (normalized).
+            x_raw: input clip ``(B, T_in, C, H, W)`` (normalized).
+
+        Returns:
+            ``torch.Tensor`` ``(B, T, C, H, W)`` — corrected prediction. Side
+            effect: sets the mixin's aux-loss/diagnostics of this single call.
+        """
+        B, T, C, H, W = y_nn.shape
+        prev = torch.cat([x_raw[:, -1:], y_nn[:, :-1]], dim=1).detach()
+        corrected = self._apply_physics_residual(
+            y_nn.reshape(B * T, C, H, W), prev.reshape(B * T, C, H, W)
+        )
+        return corrected.view(B, T, C, H, W)
+
+    def _correct_chained(self, y_nn: torch.Tensor, x_raw: torch.Tensor) -> torch.Tensor:
+        """Correct frames one by one, feeding each corrected frame forward.
+
+        The aux penalty is averaged over the T calls: the mixin overwrites it on
+        every ``_apply_physics_residual``, so without averaging only the last
+        frame's penalty would reach the optimizer. The diagnostics are those of
+        the last frame.
+
+        Args:
+            y_nn: backbone prediction ``(B, T, C, H, W)`` (normalized).
+            x_raw: input clip ``(B, T_in, C, H, W)`` (normalized).
+
+        Returns:
+            ``torch.Tensor`` ``(B, T, C, H, W)`` — corrected prediction. Side
+            effect: sets the mixin's aux loss to the mean over frames.
+        """
+        prev = x_raw[:, -1].detach()
+        corrected_frames = []
+        step_aux_losses = []
+        for frame in range(y_nn.shape[1]):
+            corrected = self._apply_physics_residual(y_nn[:, frame], prev)
+            step_aux = self.physics_residual_aux_loss()
+            if step_aux is not None:
+                step_aux_losses.append(step_aux)
+            corrected_frames.append(corrected)
+            prev = corrected.detach()
+        if step_aux_losses:
+            self._last_residual_aux_loss = torch.mean(torch.stack(step_aux_losses, dim=0))
+        return torch.stack(corrected_frames, dim=1)
+
+    def forward(self, x_raw: torch.Tensor, **kwargs) -> torch.Tensor:
+        """Run the SimVPv2 backbone, then correct its clip with the physics head.
+
+        Args:
+            x_raw: input clip ``(B, T, C, H, W)``, normalized.
+
+        Returns:
+            ``torch.Tensor`` ``(B, T, C, H, W)`` — the corrected forecast clip.
+        """
+        y_nn = super().forward(x_raw)
+        if not self.use_physics_residual_corrector:
+            return y_nn
+        if self.physics_coupling == "batched":
+            return self._correct_batched(y_nn, x_raw)
+        return self._correct_chained(y_nn, x_raw)
 
 
 def sampling_generator(N, reverse=False):

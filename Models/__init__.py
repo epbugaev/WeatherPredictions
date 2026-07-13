@@ -8,7 +8,7 @@ reference active thesis models by string keys without any local imports in
 
 from Models.IAM4VP import IAM4VP
 from Models.PredRNN import PI_PredRNNv2_Model, PredRNN_Model, PredRNNv2_Model
-from Models.SimVP import SimVP_Model
+from Models.SimVP import PI_SimVP_Model, SimVP_Model
 from utils.registry import register_model
 
 
@@ -17,6 +17,18 @@ def _build_simvp(**params):
     if "in_shape" in params:
         params["in_shape"] = tuple(params["in_shape"])
     return SimVP_Model(**params)
+
+
+def _build_pi_simvp(**params):
+    """``PI_SimVP_Model``: SimVPv2 geometry plus the physics-branch params.
+
+    Everything outside the backbone arguments is forwarded to
+    ``PhysicsResidualMixin.init_physics_residual`` — the same ``physics_*`` /
+    ``diabatic_*`` keys the PI-IAM4VP and PI-PredRNNv2 configs use.
+    """
+    if "in_shape" in params:
+        params["in_shape"] = tuple(params["in_shape"])
+    return PI_SimVP_Model(**params)
 
 
 def _build_predrnn(**params):
@@ -55,6 +67,11 @@ def _build_pi_predrnn_v2(**params):
 
 
 register_model("SimVP")(_build_simvp)
+# ``SimVP_Model(model_type="gSTA")`` (дефолт) — это MidMetaNet + gSTA-attention,
+# то есть SimVPv2 (v1 — ветка IncepU). Ключ ``SimVPv2`` не врёт о том, что
+# обучается; ``SimVP`` оставлен ради старых конфигов.
+register_model("SimVPv2")(_build_simvp)
+register_model("PI-SimVPv2")(_build_pi_simvp)
 # Один класс на семейство: физика включается параметрами конфига
 # (use_physics / use_physics_residual_corrector), поэтому оба ключа —
 # алиасы одного конструктора.
