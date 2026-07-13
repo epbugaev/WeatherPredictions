@@ -173,3 +173,17 @@ def test_epoch_label_best_val_selection_reports_range() -> None:
 def test_epoch_label_without_provenance() -> None:
     runs = {"r0-no-physics": {"checkpoint_epoch": -1}}
     assert rf_mod.epoch_label(runs) == "эпоха ?"
+
+
+def test_level_step_delta_matrix_against_baseline() -> None:
+    # Δ% к R0 на сетке [уровень × шаг]: строки — уровни по возрастанию, столбцы — шаги
+    channels = ["z50", "z500"]
+    runs = {
+        "r0-no-physics": {"rmse_free": np.array([[10.0, 20.0], [10.0, 20.0]]), "channels": channels},
+        "r3-a2-exp13": {"rmse_free": np.array([[9.0, 20.0], [11.0, 20.0]]), "channels": channels},
+    }
+    delta, levels = rf_mod.level_step_delta(runs, "r3-a2-exp13", "z")
+    assert levels == [50, 500]
+    assert delta.shape == (2, 2)
+    assert delta[0].tolist() == [-10.0, 10.0]  # z50: шаг 1 лучше R0, шаг 2 хуже
+    assert delta[1].tolist() == [0.0, 0.0]  # z500 не отличается от R0

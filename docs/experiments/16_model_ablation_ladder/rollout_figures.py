@@ -89,6 +89,9 @@ def canonical_arm(name: str) -> str:
 
 UPPER_VARS = ("z", "t", "r", "u", "v")
 VAR_UNITS = {"z": "м²/с²", "t": "K", "r": "%", "u": "м/с", "v": "м/с"}
+# Армы с исправленными уравнениями: для них строятся пер-армовые хитмапы по уровням.
+EQUATION_ARMS = ("r2-a2-pre13", "r3-a2-exp13", "r4-exp14", "r5-exp15")
+TABLE_STEPS = (1, 6, 12)  # шаги прогноза (1-индексация) в markdown-таблице по уровням
 INK, MUTED = "#1a1a1a", "#8a8a8a"
 CAPTION_BG = "#f4f4f2"
 
@@ -441,8 +444,116 @@ def render_heatmap(runs: dict[str, dict], dst: Path, clip: float = 12.0) -> None
     plt.close(fig)
 
 
+def level_step_delta(runs: dict[str, dict], arm: str, var: str) -> tuple[np.ndarray, list[int]]:
+    """Δ% RMSE арма к R0 (free-running) на сетке [уровень давления × шаг].
+
+    Args:
+        runs: словарь прогонов из ``load_runs``.
+        arm: канонический ключ арма.
+        var: переменная из ``UPPER_VARS``.
+
+    Returns:
+        ``(delta (13, steps), levels)`` — Δ% (<0 — арм лучше R0) и уровни в гПа
+        по возрастанию (порядок строк).
+    """
+    arm_matrix, levels = level_matrix(runs[arm]["rmse_free"], runs[arm]["channels"], var)
+    base_matrix, _ = level_matrix(runs[BASELINE]["rmse_free"], runs[BASELINE]["channels"], var)
+    return delta_percent(arm_matrix, base_matrix), levels
+
+
+def render_arm_level_heatmap(
+    runs: dict[str, dict], arm: str, dst: Path, clip: float = 12.0
+) -> None:
+    """Хитмап одного арма: Δ% к R0 по [уровень × шаг], панель на переменную.
+
+    В отличие от ``render_heatmap`` (все армы в одной панели блоками) — фигура на
+    один арм, с числами в ячейках. Подпись несёт эпохи чекпоинтов: сравнение
+    честно, только если эпоха арма совпадает с эпохой R0.
+    """
+    n_steps = runs[arm]["rmse_free"].shape[0]
+    arm_epoch, base_epoch = (
+        runs[arm]["checkpoint_epoch"] + 1,
+        runs[BASELINE]["checkpoint_epoch"] + 1,
+    )
+    fig, axes = plt.subplots(1, len(UPPER_VARS), figsize=(4.0 * len(UPPER_VARS), 4.4), sharey=True)
+    image = None
+    for ax, var in zip(axes, UPPER_VARS, strict=True):
+        delta, levels = level_step_delta(runs, arm, var)
+        image = ax.imshow(
+            delta, cmap="RdBu_r", vmin=-clip, vmax=clip, aspect="auto", interpolation="nearest"
+        )
+        for row in range(delta.shape[0]):
+            for col in range(delta.shape[1]):
+                value = delta[row, col]
+                ax.text(
+                    col,
+                    row,
+                    f"{value:+.0f}",
+                    ha="center",
+                    va="center",
+                    fontsize=5.5,
+                    color="white" if abs(value) > 0.62 * clip else INK,
+                )
+        ax.set_title(var, fontsize=11)
+        ax.set_xticks(range(n_steps), [str(step + 1) for step in range(n_steps)], fontsize=6)
+        ax.set_xlabel("шаг прогноза")
+        ax.grid(False)
+    axes[0].set_yticks(range(len(levels)), [str(level) for level in levels], fontsize=7)
+    axes[0].set_ylabel("уровень давления, гПа")
+    matched = "эпоха совпадает с R0 — сравнение без конфаунда"
+    mismatched = f"эпоха НЕ совпадает с R0 ({base_epoch}) — сравнение конфаундировано глубиной"
+    fig.suptitle(
+        f"{ARM_LABELS[arm]} против R0: Δ% RMSE по уровням и шагам free-running "
+        f"(вал-2004, эпоха {arm_epoch}); синее = физика лучше",
+        fontsize=12,
+        y=1.02,
+    )
+    colorbar = fig.colorbar(image, ax=axes, fraction=0.012, pad=0.01)
+    colorbar.set_label("Δ% RMSE к R0")
+    add_caption(
+        fig,
+        f"Что показано: Δ% lat-weighted RMSE арма к R0 на каждом [уровень × шаг]\n"
+        f"{n_steps}-шагового free-running прогноза. Синее — физика лучше R0, красное — хуже "
+        f"(шкала ±{clip:.0f} %).\n"
+        f"Чекпоинт арма — эпоха {arm_epoch}, R0 — эпоха {base_epoch}: "
+        f"{matched if arm_epoch == base_epoch else mismatched}.",
+        y=-0.08,
+    )
+    fig.savefig(dst, bbox_inches="tight")
+    plt.close(fig)
+
+
+def write_level_step_table(runs: dict[str, dict], arms: list[str], dst: Path) -> None:
+    """Markdown-таблица Δ% к R0 по [уровень × шаг ``TABLE_STEPS``] для каждого арма."""
+    lines: list[str] = [
+        f"# Δ% RMSE к R0 по уровням давления (free-running, {epoch_label(runs)})\n",
+        "Отрицательное — физика лучше R0. Шаги прогноза: "
+        + ", ".join(str(step) for step in TABLE_STEPS)
+        + ".\n",
+        "**Конфаунд:** сравнивать с R0 без поправки можно только арм с ТОЙ ЖЕ эпохой "
+        f"чекпоинта (R0 — эпоха {runs[BASELINE]['checkpoint_epoch'] + 1}).\n",
+    ]
+    for arm in arms:
+        lines.append(f"\n## {ARM_LABELS[arm]} — эпоха {runs[arm]['checkpoint_epoch'] + 1}\n")
+        header = "| гПа | " + " | ".join(
+            f"{var} ш{step}" for var in UPPER_VARS for step in TABLE_STEPS
+        )
+        lines.append(header + " |")
+        lines.append("|---" * (1 + len(UPPER_VARS) * len(TABLE_STEPS)) + "|")
+        deltas = {var: level_step_delta(runs, arm, var) for var in UPPER_VARS}
+        levels = deltas[UPPER_VARS[0]][1]
+        for row, level in enumerate(levels):
+            cells = [
+                f"{deltas[var][0][row, step - 1]:+.1f}"
+                for var in UPPER_VARS
+                for step in TABLE_STEPS
+            ]
+            lines.append(f"| {level} | " + " | ".join(cells) + " |")
+    dst.write_text("\n".join(lines) + "\n")
+
+
 def main() -> None:
-    """Собрать три rollout-фигуры и JSON-индекс из указанного каталога npz.
+    """Собрать rollout-фигуры, пер-армовые хитмапы, таблицу по уровням и JSON-индекс.
 
     CLI: ``--rollout-dir`` (по умолч. results/rollout — волна t=6 USA) и
     ``--suffix`` (добавляется к именам PNG, напр. ``_t12``), чтобы разные
@@ -460,9 +571,16 @@ def main() -> None:
     render_ratio_r0(runs, HERE / f"fig_rollout_ratio_r0{args.suffix}.png")
     render_delta_steps(runs, HERE / f"fig_rollout_delta_steps{args.suffix}.png")
     render_heatmap(runs, HERE / f"fig_rollout_heatmap{args.suffix}.png")
+    equation_arms = [arm for arm in EQUATION_ARMS if arm in runs]
+    for arm in equation_arms:
+        render_arm_level_heatmap(runs, arm, HERE / f"fig_rollout_levels_{arm}{args.suffix}.png")
+    write_level_step_table(runs, equation_arms, rollout_dir / "level_step_table.md")
     index = {arm: {"n_samples": data["n_samples"]} for arm, data in sorted(runs.items())}
     (rollout_dir / "rollout_index.json").write_text(json.dumps(index, indent=2))
-    print(f"[rollout-figures] {len(runs)} runs -> 3 figures{args.suffix}")  # noqa: T201
+    print(  # noqa: T201
+        f"[rollout-figures] {len(runs)} runs -> 3 figures{args.suffix} "
+        f"+ {len(equation_arms)} пер-армовых хитмапов + level_step_table.md"
+    )
 
 
 if __name__ == "__main__":
