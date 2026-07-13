@@ -41,34 +41,6 @@ class IterativeManualStep(StepStrategy):
         self.log_figures_once = log_figures_once
         self._figures_logged = False
 
-    @staticmethod
-    def _inner_model(model: nn.Module) -> nn.Module:
-        return model.module if isinstance(model, nn.parallel.DistributedDataParallel) else model
-
-    def _physics_residual_aux_loss(
-        self,
-        model: nn.Module,
-        device: torch.device,
-    ) -> torch.Tensor:
-        inner = self._inner_model(model)
-        aux_fn = getattr(inner, "physics_residual_aux_loss", None)
-        if aux_fn is None:
-            return torch.zeros((), device=device)
-        aux_loss = aux_fn()
-        if aux_loss is None:
-            return torch.zeros((), device=device)
-        return aux_loss
-
-    def _physics_residual_diagnostics(
-        self,
-        model: nn.Module,
-    ) -> dict[str, torch.Tensor]:
-        inner = self._inner_model(model)
-        diagnostics_fn = getattr(inner, "physics_residual_diagnostics", None)
-        if diagnostics_fn is None:
-            return {}
-        return diagnostics_fn()
-
     def _set_residual_warmup(self, model: nn.Module, epoch: int) -> None:
         """Toggle IAM4VP-backbone freezing for the residual-corrector warmup.
 

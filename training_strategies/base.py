@@ -102,6 +102,65 @@ class StepStrategy(ABC):
         return tuple(validation_channels)
 
     @staticmethod
+    def _inner_model(model: nn.Module) -> nn.Module:
+        """Unwrap ``DistributedDataParallel`` so duck-typed hooks stay visible.
+
+        Args:
+            model: the training model, possibly DDP-wrapped.
+
+        Returns:
+            The underlying module (the argument itself when not wrapped).
+        """
+        return model.module if isinstance(model, nn.parallel.DistributedDataParallel) else model
+
+    def _physics_residual_aux_loss(
+        self,
+        model: nn.Module,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Read the physics-branch auxiliary penalty off a PI-model.
+
+        Duck-typed on :class:`~utils.physics_residual.PhysicsResidualMixin`: any
+        model exposing ``physics_residual_aux_loss`` contributes its L1 penalty
+        on the residual correction, which the caller must add to the task loss.
+        Models without a physics branch yield a zero scalar, so every strategy
+        can call this unconditionally and stay bit-exact for them.
+
+        Args:
+            model: the training model, possibly DDP-wrapped.
+            device: device for the zero fallback.
+
+        Returns:
+            Scalar ``torch.Tensor``; zero for models without a physics branch.
+        """
+        aux_fn = getattr(self._inner_model(model), "physics_residual_aux_loss", None)
+        if aux_fn is None:
+            return torch.zeros((), device=device)
+        aux_loss = aux_fn()
+        if aux_loss is None:
+            return torch.zeros((), device=device)
+        return aux_loss
+
+    def _physics_residual_diagnostics(self, model: nn.Module) -> dict[str, torch.Tensor]:
+        """Read the physics-branch diagnostics off a PI-model, if it exposes any.
+
+        These carry ``physics_residual_nonfinite_ratio``, without which a physics
+        branch quietly degrading to its sanitize fallback would be invisible in
+        Comet.
+
+        Args:
+            model: the training model, possibly DDP-wrapped.
+
+        Returns:
+            Mapping of diagnostic name to scalar ``torch.Tensor``; empty for
+            models without a physics branch.
+        """
+        diagnostics_fn = getattr(self._inner_model(model), "physics_residual_diagnostics", None)
+        if diagnostics_fn is None:
+            return {}
+        return diagnostics_fn()
+
+    @staticmethod
     def _mae_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         return torch.mean(torch.abs(pred - target))
 

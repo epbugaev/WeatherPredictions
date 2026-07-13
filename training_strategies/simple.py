@@ -34,13 +34,29 @@ class SimpleStep(StepStrategy):
             ctx: Per-step context.
 
         Returns:
-            ``{"loss": ..., "lr": ...}``; the trainer logs both.
+            ``{"loss": ..., "lr": ...}``; the trainer logs both. For PI-models
+            (PI-SimVPv2, exp21) the physics L1 penalty is added to the task loss
+            and both terms are reported separately — ``forecast_loss``,
+            ``physics_residual_aux_loss`` — alongside the physics diagnostics,
+            so a physics branch degrading to its sanitize fallback stays visible.
+            Models without a physics branch keep the plain two-key dict.
         """
         x, y = batch
         y_hat = model(x)
-        loss = self.loss(y_hat, y)
-        lr = torch.tensor(ctx.optimizer.param_groups[0]["lr"], device=loss.device)
-        return {"loss": loss, "lr": lr}
+        forecast_loss = self.loss(y_hat, y)
+        lr = torch.tensor(ctx.optimizer.param_groups[0]["lr"], device=forecast_loss.device)
+        if not hasattr(self._inner_model(model), "physics_residual_aux_loss"):
+            return {"loss": forecast_loss, "lr": lr}
+
+        aux_loss = self._physics_residual_aux_loss(model, forecast_loss.device)
+        metrics = {
+            "loss": forecast_loss + aux_loss,
+            "forecast_loss": forecast_loss.detach(),
+            "physics_residual_aux_loss": aux_loss.detach(),
+            "lr": lr,
+        }
+        metrics.update(self._physics_residual_diagnostics(model))
+        return metrics
 
     def val_step(
         self,

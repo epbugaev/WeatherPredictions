@@ -57,29 +57,6 @@ class PredRNNStep(StepStrategy):
         self.log_figures_once = log_figures_once
         self._figures_logged = False
 
-    @staticmethod
-    def _physics_residual_diagnostics(model: nn.Module) -> dict[str, torch.Tensor]:
-        """Read the physics-branch diagnostics off a PI-model, if it exposes any.
-
-        Duck-typed exactly like :class:`~training_strategies.iterative_manual.IterativeManualStep`
-        so PI-PredRNNv2 (exp20) surfaces the same Comet panels as PI-IAM4VP —
-        notably ``physics_residual_nonfinite_ratio``, without which a physics
-        branch quietly degrading to its sanitize fallback is invisible. Plain
-        PredRNN/PredRNNv2 have no such method and yield no keys.
-
-        Args:
-            model: the training model, possibly wrapped in ``DistributedDataParallel``.
-
-        Returns:
-            Mapping of diagnostic name to scalar ``torch.Tensor``; empty for
-            models without a physics branch.
-        """
-        inner = model.module if isinstance(model, nn.parallel.DistributedDataParallel) else model
-        diagnostics_fn = getattr(inner, "physics_residual_diagnostics", None)
-        if diagnostics_fn is None:
-            return {}
-        return diagnostics_fn()
-
     def train_step(
         self,
         model: nn.Module,
