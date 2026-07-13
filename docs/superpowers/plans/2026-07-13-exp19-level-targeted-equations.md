@@ -1,5 +1,16 @@
 # exp19 — level-targeted equations Implementation Plan
 
+> [!CAUTION]
+> **ПЛАН ПРИОСТАНОВЛЕН — 2026-07-13.** [Экс. 18 отозван](../../experiments/18_level_resolved_physics/),
+> а вся мотивация этого плана выведена из его принципа. На плато валидации посылка
+> каждого рычага отпала: маска уровня **вредна**, «r-налог» и «удар R3q по T@850»
+> не существуют, а вреда физики в погранслое нет. Фаза A/B **не запускалась**.
+> Прежде чем продолжать: снять маску уровня и обучаемый гейт, а Экман и CC-мост
+> переобосновать как улучшение *уравнений* (невязка внизу реальна), а не как
+> лечение послойного скилла. Подробности — [спека, шапка](../specs/2026-07-13-exp19-level-targeted-equations-design.md).
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Реализовать три opt-in физических механизма (маска уровня, Экмановское трение, CC-мост влажности) как переключаемые флаги ядра PI-IAM4VP, измерить кандидатов на данных (фаза A) и обучить прошедшие армы поверх R5 (фаза B).
