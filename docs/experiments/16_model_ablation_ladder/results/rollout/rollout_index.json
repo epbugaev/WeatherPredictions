@@ -1,23 +1,23 @@
 {
-  "abl16-r0-no-physics-s0": {
+  "r0-no-physics": {
     "n_samples": 727
   },
-  "abl16-r1-legacy-hybrid-s0": {
+  "r1-legacy-hybrid": {
     "n_samples": 727
   },
-  "abl16-r2-a2-pre13-s0": {
+  "r2-a2-pre13": {
     "n_samples": 727
   },
-  "abl16-r2a-a1-pre13-s0": {
+  "r2a-a1-pre13": {
     "n_samples": 727
   },
-  "abl16-r3-a2-exp13-s0": {
+  "r3-a2-exp13": {
     "n_samples": 727
   },
-  "abl16-r4-exp14-s0": {
+  "r4-exp14": {
     "n_samples": 727
   },
-  "abl16-r5-exp15-s0": {
+  "r5-exp15": {
     "n_samples": 727
   }
 }

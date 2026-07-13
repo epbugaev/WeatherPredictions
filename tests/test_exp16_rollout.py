@@ -179,7 +179,10 @@ def test_level_step_delta_matrix_against_baseline() -> None:
     # Δ% к R0 на сетке [уровень × шаг]: строки — уровни по возрастанию, столбцы — шаги
     channels = ["z50", "z500"]
     runs = {
-        "r0-no-physics": {"rmse_free": np.array([[10.0, 20.0], [10.0, 20.0]]), "channels": channels},
+        "r0-no-physics": {
+            "rmse_free": np.array([[10.0, 20.0], [10.0, 20.0]]),
+            "channels": channels,
+        },
         "r3-a2-exp13": {"rmse_free": np.array([[9.0, 20.0], [11.0, 20.0]]), "channels": channels},
     }
     delta, levels = rf_mod.level_step_delta(runs, "r3-a2-exp13", "z")

@@ -89,7 +89,16 @@ def canonical_arm(name: str) -> str:
 
 UPPER_VARS = ("z", "t", "r", "u", "v")
 VAR_UNITS = {"z": "м²/с²", "t": "K", "r": "%", "u": "м/с", "v": "м/с"}
-# Армы с исправленными уравнениями: для них строятся пер-армовые хитмапы по уровням.
+# Армы лестницы в общем хитмапе (без R0): отдельная фигура на каждый.
+LADDER_ARMS = (
+    "r1-legacy-hybrid",
+    "r2a-a1-pre13",
+    "r2-a2-pre13",
+    "r3-a2-exp13",
+    "r4-exp14",
+    "r5-exp15",
+)
+# Армы с исправленными уравнениями: markdown-таблица по уровням + аннотированный хитмап.
 EQUATION_ARMS = ("r2-a2-pre13", "r3-a2-exp13", "r4-exp14", "r5-exp15")
 TABLE_STEPS = (1, 6, 12)  # шаги прогноза (1-индексация) в markdown-таблице по уровням
 INK, MUTED = "#1a1a1a", "#8a8a8a"
@@ -461,6 +470,52 @@ def level_step_delta(runs: dict[str, dict], arm: str, var: str) -> tuple[np.ndar
     return delta_percent(arm_matrix, base_matrix), levels
 
 
+def render_arm_heatmap(runs: dict[str, dict], arm: str, dst: Path, clip: float = 12.0) -> None:
+    """Один арм в стиле ``render_heatmap``: Δ% к R0, [уровень × шаг], без подписей в ячейках."""
+    n_steps = runs[arm]["rmse_free"].shape[0]
+    boundary = window_boundary(runs)
+    epoch = epoch_label(runs)
+    mid = boundary - 1 if boundary is not None else n_steps // 2 - 1
+    tick_offsets = sorted({0, mid, n_steps - 1})
+    tick_labels = [str(off + 1) for off in tick_offsets]
+    fig, axes = plt.subplots(1, len(UPPER_VARS), figsize=(3.4 * len(UPPER_VARS), 4.2), sharey=True)
+    image = None
+    for ax, var in zip(axes, UPPER_VARS, strict=True):
+        delta, levels = level_step_delta(runs, arm, var)
+        image = ax.imshow(
+            delta, cmap="RdBu_r", vmin=-clip, vmax=clip, aspect="auto", interpolation="nearest"
+        )
+        if boundary is not None:
+            ax.axvline(boundary - 0.5, color=MUTED, lw=0.7, ls=":")
+        ax.set_title(f"{var}", fontsize=10)
+        ax.set_xticks(tick_offsets, tick_labels, fontsize=6)
+        ax.set_xlabel("шаг прогноза")
+        ax.grid(False)
+    axes[0].set_yticks(range(len(levels)), [str(level) for level in levels], fontsize=7)
+    axes[0].set_ylabel("уровень давления, гПа")
+    fig.suptitle(
+        f"{ARM_LABELS[arm]}: Δ% RMSE к R0 по уровням и шагам free-running rollout "
+        f"(вал-2004, {epoch}); синее = лучше R0",
+        fontsize=12,
+        y=1.06,
+    )
+    colorbar = fig.colorbar(image, ax=axes, fraction=0.012, pad=0.01)
+    colorbar.set_label("Δ% RMSE к R0")
+    window_note = (
+        f"пунктир — граница окон {boundary}→{boundary}"
+        if boundary is not None
+        else f"нативный {n_steps}-шаговый прогноз"
+    )
+    add_caption(
+        fig,
+        "Что показано: Δ% lat-weighted RMSE к R0 на каждом [уровень давления × шаг rollout];\n"
+        f"{window_note}. Синее — арм лучше R0 (шкала ±{clip:.0f} %).",
+        y=-0.06,
+    )
+    fig.savefig(dst, bbox_inches="tight")
+    plt.close(fig)
+
+
 def render_arm_level_heatmap(
     runs: dict[str, dict], arm: str, dst: Path, clip: float = 12.0
 ) -> None:
@@ -571,7 +626,10 @@ def main() -> None:
     render_ratio_r0(runs, HERE / f"fig_rollout_ratio_r0{args.suffix}.png")
     render_delta_steps(runs, HERE / f"fig_rollout_delta_steps{args.suffix}.png")
     render_heatmap(runs, HERE / f"fig_rollout_heatmap{args.suffix}.png")
+    ladder_arms = [arm for arm in LADDER_ARMS if arm in runs]
     equation_arms = [arm for arm in EQUATION_ARMS if arm in runs]
+    for arm in ladder_arms:
+        render_arm_heatmap(runs, arm, HERE / f"fig_rollout_heatmap_{arm}{args.suffix}.png")
     for arm in equation_arms:
         render_arm_level_heatmap(runs, arm, HERE / f"fig_rollout_levels_{arm}{args.suffix}.png")
     write_level_step_table(runs, equation_arms, rollout_dir / "level_step_table.md")
@@ -579,7 +637,8 @@ def main() -> None:
     (rollout_dir / "rollout_index.json").write_text(json.dumps(index, indent=2))
     print(  # noqa: T201
         f"[rollout-figures] {len(runs)} runs -> 3 figures{args.suffix} "
-        f"+ {len(equation_arms)} пер-армовых хитмапов + level_step_table.md"
+        f"+ {len(ladder_arms)} пер-армовых heatmap + {len(equation_arms)} levels-хитмапов "
+        f"+ level_step_table.md"
     )
 
 
