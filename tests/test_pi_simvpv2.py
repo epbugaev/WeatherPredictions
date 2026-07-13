@@ -146,6 +146,33 @@ class TestContract(unittest.TestCase):
                 ]
                 self.assertTrue(grads and sum(grads) > 0.0)
 
+    def test_chunking_does_not_change_the_result(self) -> None:
+        """Физпуть посэмплово независим => размер чанка не влияет на выход.
+
+        Чанк существует только ради лимита CUDA-грида: WENO-производная
+        разворачивает латент в (B*13*16, H) и зовёт reflection_pad1d, чей кернел
+        кладёт плоский батч в grid-измерение с пределом 65535. При B*T = 768
+        (batch 64 x 12 кадров) это 159 744 -> "CUDA error: invalid configuration
+        argument" (смоук-джоба 4175599).
+        """
+        whole = _build(PHYSICS_S3, physics_residual_zero_init=False, physics_chunk_size=1000)
+        chunked = _build(PHYSICS_S3, physics_residual_zero_init=False, physics_chunk_size=3)
+        with torch.no_grad():
+            out_whole = whole(_clip())
+            out_chunked = chunked(_clip())
+        torch.testing.assert_close(out_chunked, out_whole, rtol=0, atol=0)
+        torch.testing.assert_close(
+            chunked.physics_residual_aux_loss(),
+            whole.physics_residual_aux_loss(),
+            rtol=1e-6,
+            atol=1e-8,
+        )
+
+    def test_nonpositive_chunk_is_rejected(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            _build(PHYSICS_S3, physics_chunk_size=0)
+        self.assertIn("physics_chunk_size", str(ctx.exception))
+
     def test_physics_stays_finite(self) -> None:
         model = _build(PHYSICS_S3, physics_residual_zero_init=False)
         out = model(_clip())

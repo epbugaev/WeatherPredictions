@@ -116,7 +116,8 @@ class PI_SimVP_Model(PhysicsResidualMixin, SimVP_Model):
 
     * ``physics_coupling="batched"`` (основной режим лестницы): ``prev`` для
       кадра t — прогноз **бэкбона** на кадр t-1 (для кадра 0 — последний входной
-      кадр). Все T кадров корректируются одним вызовом физядра на батче ``B*T``.
+      кадр). Все T кадров корректируются независимо, одним «плоским» батчем
+      ``B*T`` (порезанным на чанки, см. :meth:`_apply_physics_chunked`), поэтому
       MIMO-характер модели сохраняется: авторегрессия не навязывается.
     * ``physics_coupling="chained"`` (контрольный арм S3c): ``prev`` — уже
       **скорректированный** кадр t-1, то есть семантика PI-IAM4VP 1:1, T
@@ -153,6 +154,7 @@ class PI_SimVP_Model(PhysicsResidualMixin, SimVP_Model):
         spatio_kernel_dec=3,
         act_inplace=True,
         physics_coupling: str = "batched",
+        physics_chunk_size: int = 256,
         **physics_kwargs,
     ) -> None:
         super().__init__(
@@ -174,7 +176,10 @@ class PI_SimVP_Model(PhysicsResidualMixin, SimVP_Model):
                 f"Unknown physics_coupling {physics_coupling!r}; "
                 f"expected one of {PHYSICS_COUPLINGS}"
             )
+        if physics_chunk_size < 1:
+            raise ValueError(f"physics_chunk_size must be >= 1, got {physics_chunk_size}")
         self.physics_coupling = physics_coupling
+        self.physics_chunk_size = physics_chunk_size
         _, C_data, H_data, W_data = tuple(in_shape)
         self.init_physics_residual(
             C_data=C_data,
@@ -184,20 +189,73 @@ class PI_SimVP_Model(PhysicsResidualMixin, SimVP_Model):
             **physics_kwargs,
         )
 
+    def _apply_physics_chunked(self, y_nn: torch.Tensor, prev: torch.Tensor) -> torch.Tensor:
+        """Apply the residual correction in chunks of at most ``physics_chunk_size``.
+
+        Chunking exists purely to respect a CUDA grid limit, not for memory: the
+        WENO derivative flattens the physics latent to ``(B*13*16, H)`` and calls
+        ``reflection_pad1d``, whose CUDA kernel maps that flat batch onto a grid
+        dimension capped at 65535. The ``batched`` coupling feeds ``B*T = 768``
+        samples (batch 64 x 12 frames), i.e. 159 744 rows — which aborts with
+        "CUDA error: invalid configuration argument" (smoke job 4175599). The
+        ceiling is 315 samples per call; the default 256 stays under it.
+
+        The split is exact for the physics passthrough arms: the residual
+        corrector and the diabatic head are plain conv+GELU stacks, and
+        ``physics_only_forward`` is a pure PDE integrator — every sample is
+        independent. The legacy arm is the one exception: its ``PDE_kernel``
+        carries BatchNorm, so the chunk size sets the BN batch statistics. Hence
+        the exp21 configs pin ``physics_chunk_size: 64``, the very batch the
+        physics saw in exp16 — the legacy arm stays comparable with exp16's R1.
+
+        Args:
+            y_nn: backbone prediction ``(N, C, H, W)`` (normalized).
+            prev: previous state ``(N, C, H, W)`` (normalized, already detached).
+
+        Returns:
+            ``torch.Tensor`` ``(N, C, H, W)`` — corrected prediction. Side effect:
+            sets the mixin's aux loss and diagnostics to the size-weighted mean
+            over chunks (the mixin overwrites both on every call).
+        """
+        n_samples = y_nn.shape[0]
+        if n_samples <= self.physics_chunk_size:
+            return self._apply_physics_residual(y_nn, prev)
+
+        corrected_chunks = []
+        aux_terms = []
+        diagnostic_terms: list[tuple[int, dict[str, torch.Tensor]]] = []
+        for start in range(0, n_samples, self.physics_chunk_size):
+            stop = min(start + self.physics_chunk_size, n_samples)
+            corrected_chunks.append(
+                self._apply_physics_residual(y_nn[start:stop], prev[start:stop])
+            )
+            weight = stop - start
+            chunk_aux = self.physics_residual_aux_loss()
+            if chunk_aux is not None:
+                aux_terms.append(weight * chunk_aux)
+            diagnostic_terms.append((weight, self.physics_residual_diagnostics()))
+
+        if aux_terms:
+            self._last_residual_aux_loss = torch.stack(aux_terms).sum() / n_samples
+        self._last_residual_diagnostics = {
+            key: torch.stack([w * diag[key] for w, diag in diagnostic_terms]).sum() / n_samples
+            for key in diagnostic_terms[0][1]
+        }
+        return torch.cat(corrected_chunks, dim=0)
+
     def _correct_batched(self, y_nn: torch.Tensor, x_raw: torch.Tensor) -> torch.Tensor:
-        """Correct every frame in one physics call, MIMO-style.
+        """Correct every frame against the backbone's own previous frame, MIMO-style.
 
         Args:
             y_nn: backbone prediction ``(B, T, C, H, W)`` (normalized).
             x_raw: input clip ``(B, T_in, C, H, W)`` (normalized).
 
         Returns:
-            ``torch.Tensor`` ``(B, T, C, H, W)`` — corrected prediction. Side
-            effect: sets the mixin's aux-loss/diagnostics of this single call.
+            ``torch.Tensor`` ``(B, T, C, H, W)`` — corrected prediction.
         """
         B, T, C, H, W = y_nn.shape
         prev = torch.cat([x_raw[:, -1:], y_nn[:, :-1]], dim=1).detach()
-        corrected = self._apply_physics_residual(
+        corrected = self._apply_physics_chunked(
             y_nn.reshape(B * T, C, H, W), prev.reshape(B * T, C, H, W)
         )
         return corrected.view(B, T, C, H, W)
@@ -222,7 +280,7 @@ class PI_SimVP_Model(PhysicsResidualMixin, SimVP_Model):
         corrected_frames = []
         step_aux_losses = []
         for frame in range(y_nn.shape[1]):
-            corrected = self._apply_physics_residual(y_nn[:, frame], prev)
+            corrected = self._apply_physics_chunked(y_nn[:, frame], prev)
             step_aux = self.physics_residual_aux_loss()
             if step_aux is not None:
                 step_aux_losses.append(step_aux)

@@ -14,6 +14,7 @@ model:
     N_T: 4
     model_type: gSTA
     physics_coupling: batched
+    physics_chunk_size: 64
     use_physics_residual_corrector: true
     physics_residual_hidden_channels: 128
     physics_residual_apply_to: upper_air_only
