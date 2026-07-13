@@ -8,9 +8,12 @@ adapted to this repository's contract:
 
 * constructor ``PredRNN_Model(num_layers, num_hidden, configs: dict)`` where
   ``configs`` is a plain dict (not an ``argparse`` namespace);
-* ``forward(frames_tensor, mask_true) -> (next_frames, loss)`` with
+* ``forward(frames_tensor, mask_true) -> (next_frames, aux_losses)`` with
   channels-last ``(B, T, H, W, C)`` tensors, exactly as fed by
-  :class:`training_strategies.predrnn.PredRNNStep`;
+  :class:`training_strategies.predrnn.PredRNNStep`; ``aux_losses`` is a dict of
+  already-weighted scalar penalties the strategy adds to its own task loss
+  (upstream folds an MSE task term into the model's return — here the strategy
+  owns the task loss, so the model reports auxiliary terms only);
 * the device is taken from the input tensor (no ``configs.device``);
 * patch embedding (``reshape_patch``) is done inside ``forward`` so the model
   is self-contained (the upstream code patches in the data pipeline).
@@ -133,11 +136,10 @@ class PredRNN_Model(nn.Module):
             padding=0,
             bias=False,
         )
-        self.mse_criterion = nn.MSELoss()
 
     def forward(
         self, frames_tensor: torch.Tensor, mask_true: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Roll out predictions over the full clip.
 
         Args:
@@ -147,9 +149,10 @@ class PredRNN_Model(nn.Module):
                 all-zeros means fully autoregressive generation.
 
         Returns:
-            Tuple ``(next_frames, loss)`` where ``next_frames`` is
-            ``(B, T - 1, H, W, C)`` and ``loss`` is the MSE against the
-            shifted input (the trainer strategy recomputes its own loss).
+            Tuple ``(next_frames, aux_losses)`` where ``next_frames`` is
+            ``(B, T - 1, H, W, C)`` and ``aux_losses`` is empty: v1 has no
+            auxiliary penalty. The task loss is owned by the training
+            strategy, which is why no MSE is computed here.
         """
         patches = _reshape_patch(frames_tensor, self.patch_size)
         frames = patches.permute(0, 1, 4, 2, 3).contiguous()
@@ -191,8 +194,7 @@ class PredRNN_Model(nn.Module):
 
         next_frames = torch.stack(next_frames, dim=0).permute(1, 0, 3, 4, 2).contiguous()
         next_frames = _reshape_patch_back(next_frames, self.patch_size, self.img_channel)
-        loss = self.mse_criterion(next_frames, frames_tensor[:, 1:])
-        return next_frames, loss
+        return next_frames, {}
 
 
 class PredRNNv2_Model(nn.Module):
@@ -247,22 +249,24 @@ class PredRNNv2_Model(nn.Module):
         self.adapter = nn.Conv2d(
             adapter_num_hidden, adapter_num_hidden, 1, stride=1, padding=0, bias=False
         )
-        self.mse_criterion = nn.MSELoss()
 
     def forward(
         self, frames_tensor: torch.Tensor, mask_true: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Roll out predictions and add the memory-decoupling penalty.
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Roll out predictions and report the memory-decoupling penalty.
 
         Args:
             frames_tensor: ``(B, T, H, W, C)`` channels-last input clip.
             mask_true: Scheduled-sampling mask, ``(1, T_pred, 1, 1, 1)``.
 
         Returns:
-            Tuple ``(next_frames, loss)`` where ``next_frames`` is
-            ``(B, T - 1, H, W, C)`` and ``loss`` is MSE plus
-            ``decouple_beta`` times the mean cosine-similarity decoupling
-            term (the trainer strategy recomputes its own task loss).
+            Tuple ``(next_frames, aux_losses)`` where ``next_frames`` is
+            ``(B, T - 1, H, W, C)`` and ``aux_losses`` maps ``"decouple"`` to
+            the already-weighted (``decouple_beta`` times) mean
+            cosine-similarity decoupling term — a scalar the training strategy
+            adds to its own task loss. No task loss is computed here: the
+            strategy owns it (MAE), and an internal MSE would silently blend a
+            second objective.
         """
         patches = _reshape_patch(frames_tensor, self.patch_size)
         frames = patches.permute(0, 1, 4, 2, 3).contiguous()
@@ -331,8 +335,4 @@ class PredRNNv2_Model(nn.Module):
         decouple_loss = torch.mean(torch.stack(decouple_loss, dim=0))
         next_frames = torch.stack(next_frames, dim=0).permute(1, 0, 3, 4, 2).contiguous()
         next_frames = _reshape_patch_back(next_frames, self.patch_size, self.img_channel)
-        loss = (
-            self.mse_criterion(next_frames, frames_tensor[:, 1:])
-            + self.decouple_beta * decouple_loss
-        )
-        return next_frames, loss
+        return next_frames, {"decouple": self.decouple_beta * decouple_loss}

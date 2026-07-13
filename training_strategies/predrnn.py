@@ -4,6 +4,12 @@ Replaces ``LitModels.mutiout_predrnn``. PredRNN's API differs from the other
 video predictors: input is ``(x, y)`` concatenated along the time axis and
 permuted to channels-last; the second positional argument is the
 mask-tensor used for scheduled sampling (we pass zeros, matching legacy).
+
+The models return ``(next_frames, aux_losses)``, where ``aux_losses`` holds
+already-weighted scalar penalties (PredRNN-V2's memory-decoupling term, and the
+physics penalty of the PI variants). This strategy owns the task loss and adds
+whatever auxiliary terms the model reports, logging each one separately so the
+weight of a penalty against the task is visible.
 """
 
 from __future__ import annotations
@@ -19,24 +25,32 @@ from utils.registry import register_strategy
 
 def _predrnn_forward(
     model: nn.Module, x: torch.Tensor, y: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
     """Run a full ``(x, y)`` concat-permute-forward-permute pipeline.
 
+    Args:
+        model: A PredRNN-family model whose ``forward(frames, mask)`` returns
+            ``(next_frames, aux_losses)``.
+        x: Context clip, ``(B, T_ctx, C, H, W)``.
+        y: Target clip, ``(B, T_pred, C, H, W)``.
+
     Returns:
-        Tuple ``(inp, y_hat)`` both in ``(B, T, C, H, W)`` layout.
+        Tuple ``(inp, y_hat, aux_losses)``; ``inp``/``y_hat`` are
+        ``(B, T, C, H, W)``, ``aux_losses`` maps a name to an already-weighted
+        scalar penalty the caller must add to the task loss.
     """
     inp = torch.cat([x, y], dim=1)
     inp = inp.permute(0, 1, 3, 4, 2).contiguous()
     mask = torch.zeros((1, y.shape[1], 1, 1, 1), device=x.device, dtype=x.dtype)
-    y_hat_perm, _ = model(inp, mask)
+    y_hat_perm, aux_losses = model(inp, mask)
     y_hat = y_hat_perm.permute(0, 1, 4, 2, 3)
     inp = inp.permute(0, 1, 4, 2, 3)
-    return inp, y_hat
+    return inp, y_hat, aux_losses
 
 
 @register_strategy("mutiout_predrnn")
 class PredRNNStep(StepStrategy):
-    """PredRNN forward signature plus per-variable RMSE and figure logging."""
+    """PredRNN forward signature, model aux losses, per-variable RMSE, figures."""
 
     def __init__(self, log_figures_once: bool = True, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -50,10 +64,16 @@ class PredRNNStep(StepStrategy):
         ctx: StepContext,
     ) -> dict[str, torch.Tensor]:
         x, y = batch
-        inp, y_hat = _predrnn_forward(model, x, y)
-        loss = self.loss(inp[:, 1:, ...], y_hat)
+        inp, y_hat, aux_losses = _predrnn_forward(model, x, y)
+        task_loss = self.loss(inp[:, 1:, ...], y_hat)
+        loss = task_loss
+        for aux_loss in aux_losses.values():
+            loss = loss + aux_loss
         lr = torch.tensor(ctx.optimizer.param_groups[0]["lr"], device=loss.device)
-        return {"loss": loss, "lr": lr}
+        metrics = {"loss": loss, "task_loss": task_loss.detach(), "lr": lr}
+        for name, aux_loss in aux_losses.items():
+            metrics[f"aux_{name}"] = aux_loss.detach()
+        return metrics
 
     def val_step(
         self,
@@ -62,7 +82,7 @@ class PredRNNStep(StepStrategy):
         ctx: StepContext,
     ) -> dict[str, torch.Tensor]:
         x, y = batch
-        _, y_hat_full = _predrnn_forward(model, x, y)
+        _, y_hat_full, _ = _predrnn_forward(model, x, y)
         start = x.shape[1] - 1
         y_hat = y_hat_full[:, start : start + y.shape[1], ...]
         val_loss = self.loss(y_hat, y)
