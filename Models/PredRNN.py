@@ -29,6 +29,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from Models.PredRNN_utils import SpatioTemporalLSTMCell, SpatioTemporalLSTMCellv2
+from utils.physics_residual import PhysicsResidualMixin
 
 
 def _reshape_patch(frames: torch.Tensor, patch_size: int) -> torch.Tensor:
@@ -250,6 +251,23 @@ class PredRNNv2_Model(nn.Module):
             adapter_num_hidden, adapter_num_hidden, 1, stride=1, padding=0, bias=False
         )
 
+    def _correct_step(self, x_gen: torch.Tensor, net: torch.Tensor) -> torch.Tensor:
+        """Post-process one rollout step; the identity in the physics-free model.
+
+        Extension point for :class:`PI_PredRNNv2_Model`, which corrects every
+        step with a physics prior. Kept here so the physics subclass reuses the
+        rollout instead of copying it.
+
+        Args:
+            x_gen: this step's cell output, ``(B, frame_channel, H', W')``.
+            net: this step's input frame, same shape as ``x_gen``.
+
+        Returns:
+            ``torch.Tensor`` of the same shape — the step output to emit and to
+            feed back into the next autoregressive step.
+        """
+        return x_gen
+
     def forward(
         self, frames_tensor: torch.Tensor, mask_true: torch.Tensor
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
@@ -323,7 +341,7 @@ class PredRNNv2_Model(nn.Module):
                     self.adapter(delta_m).view(delta_m.shape[0], delta_m.shape[1], -1), dim=2
                 )
 
-            x_gen = self.conv_last(h_t[self.num_layers - 1])
+            x_gen = self._correct_step(self.conv_last(h_t[self.num_layers - 1]), net)
             next_frames.append(x_gen)
             for i in range(self.num_layers):
                 decouple_loss.append(
@@ -336,3 +354,92 @@ class PredRNNv2_Model(nn.Module):
         next_frames = torch.stack(next_frames, dim=0).permute(1, 0, 3, 4, 2).contiguous()
         next_frames = _reshape_patch_back(next_frames, self.patch_size, self.img_channel)
         return next_frames, {"decouple": self.decouple_beta * decouple_loss}
+
+
+class PI_PredRNNv2_Model(PhysicsResidualMixin, PredRNNv2_Model):
+    """PredRNN-V2 with the shared physics residual corrector (exp20).
+
+    Same physics path as PI-IAM4VP: at each autoregressive step the cell output
+    is corrected by a head fed with the physics residual
+    ``delta_phys = physics(prev) - prev``. The difference is *where* the rollout
+    lives. PI-IAM4VP is driven step-by-step by the training strategy, which
+    detaches the previous state between steps; PredRNN rolls out inside its own
+    ``forward``, so this class detaches ``prev_state`` itself — otherwise every
+    rollout step's physics kernel would stay in one autograd graph.
+
+    Requires ``patch_size == 1``: the physics kernel consumes the raw state
+    ``(B, 69, H, W)``, and patching folds space into the channel axis, which
+    would destroy the channel layout (surface 0:4, then z/t/r/u/v blocks of 13)
+    the kernel relies on.
+
+    Args:
+        num_layers: number of stacked :class:`SpatioTemporalLSTMCellv2` layers.
+        num_hidden: per-layer hidden channel counts, length ``num_layers``.
+        configs: geometry/config dict (see :func:`_parse_configs`).
+        **physics_kwargs: physics-branch parameters, forwarded verbatim to
+            :meth:`utils.physics_residual.PhysicsResidualMixin.init_physics_residual`.
+    """
+
+    def __init__(self, num_layers: int, num_hidden, configs: dict, **physics_kwargs) -> None:
+        super().__init__(num_layers, num_hidden, configs)
+        if self.patch_size != 1:
+            raise ValueError(
+                "PI-PredRNNv2 requires patch_size=1: the physics kernel consumes the raw "
+                f"state (B, 69, H, W), but patch_size={self.patch_size} folds space into "
+                "the channel axis and breaks the z/t/r/u/v channel layout."
+            )
+        _, img_channel, img_height, img_width = tuple(configs["in_shape"])
+        self._physics_aux_steps: list[torch.Tensor] = []
+        self.init_physics_residual(
+            C_data=img_channel,
+            H_data=img_height,
+            W_data=img_width,
+            downscaling_factor_all=4,
+            **physics_kwargs,
+        )
+
+    def _correct_step(self, x_gen: torch.Tensor, net: torch.Tensor) -> torch.Tensor:
+        """Correct one rollout step with the physics residual head.
+
+        ``net`` is detached: the physics prior must not backpropagate through
+        earlier autoregressive steps (parity with PI-IAM4VP, whose strategy
+        stores ``prediction.detach()`` in the rollout history).
+
+        Args:
+            x_gen: this step's cell output, ``(B, 69, H, W)`` (normalized).
+            net: this step's input frame, ``(B, 69, H, W)`` (normalized).
+
+        Returns:
+            ``torch.Tensor`` of shape ``(B, 69, H, W)`` — the corrected output.
+            Side effect: appends this step's auxiliary penalty to
+            ``_physics_aux_steps``.
+        """
+        corrected = self._apply_physics_residual(x_gen, net.detach())
+        step_aux = self.physics_residual_aux_loss()
+        if step_aux is not None:
+            self._physics_aux_steps.append(step_aux)
+        return corrected
+
+    def forward(
+        self, frames_tensor: torch.Tensor, mask_true: torch.Tensor
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Roll out predictions, correcting every step with the physics head.
+
+        Args:
+            frames_tensor: ``(B, T, H, W, C)`` channels-last input clip.
+            mask_true: Scheduled-sampling mask, ``(1, T_pred, 1, 1, 1)``.
+
+        Returns:
+            Tuple ``(next_frames, aux_losses)`` where ``next_frames`` is
+            ``(B, T - 1, H, W, C)`` and ``aux_losses`` carries the weighted
+            ``"decouple"`` penalty plus ``"physics_aux"`` — the residual/diabatic
+            L1 penalty **averaged over rollout steps**. The average is built here
+            because the mixin overwrites its per-call aux loss on every step, so
+            reading it once after the loop would keep only the last step's.
+        """
+        self._physics_aux_steps = []
+        next_frames, aux_losses = super().forward(frames_tensor, mask_true)
+        if self._physics_aux_steps:
+            aux_losses["physics_aux"] = torch.mean(torch.stack(self._physics_aux_steps, dim=0))
+        self._physics_aux_steps = []
+        return next_frames, aux_losses

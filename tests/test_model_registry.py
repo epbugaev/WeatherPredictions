@@ -40,7 +40,7 @@ class ModelRegistryTest(unittest.TestCase):
         """The registry should expose IAM4VP, SimVP, and PredRNN-family models."""
         self.assertEqual(
             registered_model_names(),
-            ["IAM4VP", "PI-IAM4VP", "PredRNN", "PredRNNv2", "SimVP"],
+            ["IAM4VP", "PI-IAM4VP", "PI-PredRNNv2", "PredRNN", "PredRNNv2", "SimVP"],
         )
 
 
