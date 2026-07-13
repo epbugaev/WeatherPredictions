@@ -123,6 +123,21 @@ def load_runs(rollout_dir: Path) -> dict[str, dict]:
     return runs
 
 
+def epoch_label(runs: dict[str, dict]) -> str:
+    """Подпись чекпоинтов для заголовков и сводки.
+
+    Волна с общего тега эпохи → ``эпоха N``. При отборе по валидации (``best.pt``)
+    эпохи армов разные, и подпись обязана показать диапазон: эпоха произвольного
+    арма (порядок словаря!) соврала бы про остальные.
+    """
+    epochs = sorted({run["epoch"] + 1 for run in runs.values() if run["epoch"] >= 0})
+    if not epochs:
+        return "эпоха ?"
+    if len(epochs) == 1:
+        return f"эпоха {epochs[0]}"
+    return f"лучший val, эпохи {epochs[0]}–{epochs[-1]}"
+
+
 def level_profile(rmse: np.ndarray, var: str, reduce_steps: str) -> np.ndarray:
     """13-уровневый профиль RMSE переменной ``var``.
 
@@ -199,10 +214,9 @@ def render_skill_profiles(runs: dict, out_path: Path, reduce_steps: str) -> None
     axes[0].invert_yaxis()
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="lower center", ncol=8, fontsize=9, frameon=False)
-    epoch = next(iter(runs.values()))["epoch"]
     reduce_ru = "среднее по 12 шагам" if reduce_steps == "mean" else "шаг 1 (короткий лид)"
     fig.suptitle(
-        f"Вертикальный профиль вклада физики (эпоха {epoch + 1}, {reduce_ru}); "
+        f"Вертикальный профиль вклада физики ({epoch_label(runs)}, {reduce_ru}); "
         f"<0 — физика улучшает",
         fontsize=13,
     )
@@ -261,7 +275,8 @@ def build_summary(runs: dict, diag: dict) -> dict:
         v: level_profile(runs["r0-no-physics"]["rmse_free"], v, "first") for v in UPPER_VARS
     }
     summary: dict = {
-        "epoch": next(iter(runs.values()))["epoch"],
+        "epochs": sorted({run["epoch"] + 1 for run in runs.values() if run["epoch"] >= 0}),
+        "epoch_label": epoch_label(runs),
         "pressure_hpa": PRESSURE_HPA,
         "R0_rmse_mean": {v: base_mean[v].tolist() for v in UPPER_VARS},
         "R0_rmse_first": {v: base_first[v].tolist() for v in UPPER_VARS},
@@ -303,8 +318,9 @@ def build_summary(runs: dict, diag: dict) -> dict:
 def write_markdown_table(summary: dict, out_path: Path) -> None:
     """Компактная markdown-таблица дельт по уровням (step-mean) для README."""
     lines: list[str] = []
-    epoch = summary["epoch"]
-    lines.append(f"### Дельта RMSE к R0 по уровням (%, среднее по 12 шагам, эпоха {epoch + 1})\n")
+    lines.append(
+        f"### Дельта RMSE к R0 по уровням (%, среднее по 12 шагам, {summary['epoch_label']})\n"
+    )
     lines.append("Отрицательное = физика улучшает. Уровни в гПа.\n")
     for var in UPPER_VARS:
         lines.append(f"\n**{VAR_LABEL[var]}**\n")
@@ -342,7 +358,7 @@ def write_mechanism_digest(summary: dict, diag: dict, out_path: Path) -> None:
     residual = summary["residual_rel"]
     show_arms = ["r1-legacy-hybrid", "r3-a2-exp13", "r4-exp14", "r5-exp15"]
     lines: list[str] = [
-        f"# Механистическая сводка exp18 (эпоха {summary['epoch'] + 1}, "
+        f"# Механистическая сводка exp18 ({summary['epoch_label']}, "
         f"невязка ERA5 USA {summary['residual_year']})\n",
         "Δ — дельта RMSE к R0 (%, среднее по 12 шагам; <0 — физика лучше). "
         "resid — невязка уравнения ядра residual_rel (<1 — ловит сигнал, ≫1 — шум). "

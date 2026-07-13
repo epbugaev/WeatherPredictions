@@ -1,0 +1,29 @@
+{
+  "r0-no-physics": {
+    "n_samples": 727
+  },
+  "r1-legacy-hybrid": {
+    "n_samples": 727
+  },
+  "r2-a2-pre13": {
+    "n_samples": 727
+  },
+  "r2a-a1-pre13": {
+    "n_samples": 727
+  },
+  "r3-a2-exp13": {
+    "n_samples": 727
+  },
+  "r3a-no-diabatic": {
+    "n_samples": 727
+  },
+  "r3q-diabatic-t-only": {
+    "n_samples": 727
+  },
+  "r4-exp14": {
+    "n_samples": 727
+  },
+  "r5-exp15": {
+    "n_samples": 727
+  }
+}
