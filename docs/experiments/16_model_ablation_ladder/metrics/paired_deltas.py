@@ -97,6 +97,15 @@ def compute_deltas(
         statistics["csi"] = _absolute(csi["arm"], csi["base"])
         statistics["fss"] = _absolute(fss["arm"], fss["base"])
         statistics["bias"] = _bias_over_sigma(values["bias"], base["bias"], base["std_obs"])
+        # Агрегаты (mCSI = среднее по порогам; FSS с окном 3) — самостоятельные метрики:
+        # усреднять НАДО до бутстрапа. Иначе CI агрегата пришлось бы «усреднять» из
+        # интервалов слагаемых, а это не CI. FSS_NEIGHBOURHOOD_INDEX=1 → окно 3 ячейки.
+        statistics["mcsi"] = _absolute(
+            np.nanmean(csi["arm"], axis=-1), np.nanmean(csi["base"], axis=-1)
+        )
+        statistics["fss3"] = _absolute(
+            np.nanmean(fss["arm"][..., 1], axis=-1), np.nanmean(fss["base"][..., 1], axis=-1)
+        )
 
         n_samples = base["rmse"].shape[0]
         for metric, statistic in statistics.items():

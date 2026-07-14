@@ -64,10 +64,21 @@ PRESSURE_HPA = (50, 100, 150, 200, 250, 300, 400, 500, 600, 700, 850, 925, 1000)
 METRICS = {
     "rmse": ("RMSE, Δ%", -1),
     "acc": ("ACC, Δ пункта", +1),
-    "csi": ("CSI p90/95/99, Δ пункта", +1),
-    "fss": ("FSS окно 3, Δ пункта", +1),
+    "mcsi": ("mCSI (p90/95/99), Δ пункта", +1),
+    "fss3": ("FSS (окно 3), Δ пункта", +1),
     "w1": ("W1 распределения, Δ%", -1),
     "bias": ("|bias|, Δ в % от σ", -1),
+    "std_pred": ("дисперсия поля, Δ%", +1),
+}
+# Шкала цвета на метрику: у них разные единицы и разный масштаб эффекта.
+METRIC_CLIP = {
+    "rmse": 8.0,
+    "acc": 2.0,
+    "mcsi": 4.0,
+    "fss3": 4.0,
+    "w1": 12.0,
+    "bias": 3.0,
+    "std_pred": 6.0,
 }
 INK, MUTED = "#1a1a1a", "#8a8a8a"
 plt.rcParams.update({"figure.dpi": 150, "font.size": 9, "axes.edgecolor": MUTED})
@@ -86,13 +97,40 @@ def load(results_dir: Path) -> tuple[dict[str, np.ndarray], np.ndarray, list[str
 
 
 def delta_grid(deltas: np.ndarray, arm: str, metric: str, key: str) -> np.ndarray:
-    """Дельта метрики → ``(12, 69)``; CSI усредняется по порогам, FSS берётся с окном 3."""
-    values = deltas[f"{arm}__{metric}__{key}"]
-    if metric == "csi":
-        return np.nanmean(values, axis=-1)  # среднее по p90/p95/p99 = mCSI
-    if metric == "fss":
-        return np.nanmean(values[..., 1], axis=-1)  # окно 3 ячейки, среднее по порогам
-    return values
+    """Дельта метрики → ``(12, 69)``.
+
+    Агрегаты по порогам (``mcsi``) и окнам (``fss3``) — отдельные ключи в npz: они
+    усреднены ДО бутстрапа, поэтому их CI настоящий. Усреднять готовые интервалы
+    нельзя — среднее интервалов не является интервалом среднего.
+    """
+    return deltas[f"{arm}__{metric}__{key}"]
+
+
+def oriented_delta_and_mask(
+    deltas: np.ndarray, arm: str, metric: str, var: str
+) -> tuple[np.ndarray, np.ndarray]:
+    """Сетка ``[13 уровней × 12 шагов]``: выигрыш к R0 и маска НЕзначимых ячеек.
+
+    Знак разворачивается так, чтобы «синее = физика лучше» для любой метрики:
+    у RMSE/W1/bias лучше меньше, у ACC/CSI/FSS — больше.
+
+    Args:
+        deltas: npz парных дельт.
+        arm: канонический ключ арма.
+        metric: ключ метрики из `METRICS`.
+        var: переменная из `UPPER_VARS`.
+
+    Returns:
+        ``(gain (13, 12), insignificant (13, 12))`` — во второй True там, где CI
+        накрывает ноль (такую ячейку читать нельзя).
+    """
+    _, better = METRICS[metric]
+    base = VAR_BASE[var]
+    columns = slice(base, base + 13)
+    gain = delta_grid(deltas, arm, metric, "delta")[:, columns].T * better
+    low = delta_grid(deltas, arm, metric, "ci_low")[:, columns].T
+    high = delta_grid(deltas, arm, metric, "ci_high")[:, columns].T
+    return gain, ~((low > 0) | (high < 0))
 
 
 def render_forest(deltas: np.ndarray, channels: list[str], dst: Path) -> None:
@@ -132,27 +170,23 @@ def render_forest(deltas: np.ndarray, channels: list[str], dst: Path) -> None:
     plt.close(fig)
 
 
-def render_levels(deltas: np.ndarray, metric: str, dst: Path, clip: float = 8.0) -> None:
+def render_levels(deltas: np.ndarray, metric: str, dst: Path) -> None:
     """Хитмап [уровень × шаг] к R0: строка = арм, столбец = переменная.
 
     Незначимые ячейки (CI накрывает ноль) заштрихованы — по ним нельзя судить.
     """
-    label, better = METRICS[metric]
+    label, _ = METRICS[metric]
+    clip = METRIC_CLIP[metric]
     fig, axes = plt.subplots(
         len(LEVEL_ARMS), len(UPPER_VARS), figsize=(3.0 * len(UPPER_VARS), 2.6 * len(LEVEL_ARMS))
     )
     image = None
     for row, arm in enumerate(LEVEL_ARMS):
-        grid = delta_grid(deltas, arm, metric, "delta")
-        low = delta_grid(deltas, arm, metric, "ci_low")
-        high = delta_grid(deltas, arm, metric, "ci_high")
         for col, var in enumerate(UPPER_VARS):
-            base = VAR_BASE[var]
-            block = grid[:, base : base + 13].T * (-better)  # знак: синее = лучше
-            insignificant = ~((low[:, base : base + 13] > 0) | (high[:, base : base + 13] < 0)).T
+            block, insignificant = oriented_delta_and_mask(deltas, arm, metric, var)
             ax = axes[row, col]
             image = ax.imshow(
-                block, cmap="RdBu_r", vmin=-clip, vmax=clip, aspect="auto", interpolation="nearest"
+                block, cmap="RdBu", vmin=-clip, vmax=clip, aspect="auto", interpolation="nearest"
             )
             ax.contourf(
                 insignificant.astype(float),
@@ -181,6 +215,78 @@ def render_levels(deltas: np.ndarray, metric: str, dst: Path, clip: float = 8.0)
     )
     fig.savefig(dst, bbox_inches="tight")
     plt.close(fig)
+
+
+def render_arm_metric_heatmap(deltas: np.ndarray, arm: str, metric: str, dst: Path) -> None:
+    """Один арм × одна метрика: хитмап [уровень × шаг], панель на переменную.
+
+    Числа — в ячейках; **штриховка = CI накрывает ноль** (ячейку читать нельзя).
+    Синее всегда означает «физика лучше R0», независимо от направления метрики.
+    """
+    label, _ = METRICS[metric]
+    clip = METRIC_CLIP[metric]
+    fig, axes = plt.subplots(1, len(UPPER_VARS), figsize=(4.0 * len(UPPER_VARS), 4.4), sharey=True)
+    image = None
+    for ax, var in zip(axes, UPPER_VARS, strict=True):
+        gain, insignificant = oriented_delta_and_mask(deltas, arm, metric, var)
+        image = ax.imshow(
+            gain, cmap="RdBu", vmin=-clip, vmax=clip, aspect="auto", interpolation="nearest"
+        )
+        ax.contourf(
+            insignificant.astype(float),
+            levels=[0.5, 1.5],
+            colors="none",
+            hatches=["////"],
+            extend="neither",
+        )
+        for row in range(gain.shape[0]):
+            for col in range(gain.shape[1]):
+                value = gain[row, col]
+                ax.text(
+                    col,
+                    row,
+                    f"{value:+.0f}" if abs(value) >= 0.5 else "·",
+                    ha="center",
+                    va="center",
+                    fontsize=5.5,
+                    color="white" if abs(value) > 0.62 * clip else INK,
+                )
+        ax.set_title(var, fontsize=11)
+        ax.set_xticks(range(12), [str(step + 1) for step in range(12)], fontsize=6)
+        ax.set_xlabel("шаг прогноза")
+        ax.grid(False)
+    axes[0].set_yticks(range(13), [str(p) for p in PRESSURE_HPA], fontsize=7)
+    axes[0].set_ylabel("уровень давления, гПа")
+    colorbar = fig.colorbar(image, ax=axes, fraction=0.012, pad=0.01)
+    colorbar.set_label(f"выигрыш к R0 ({label})")
+    fig.suptitle(
+        f"{ARM_LABELS[arm]} против R0 — {label} по [уровень × шаг] (эпоха 500, парный бутстрап)",
+        fontsize=12,
+        y=1.02,
+    )
+    add_caption(
+        fig,
+        "Синее = физика лучше R0, красное = хуже (знак развёрнут под направление метрики).\n"
+        "ШТРИХОВКА = 95 % CI накрывает ноль: эффект от нуля не отличим, ячейку читать нельзя.\n"
+        "Точка вместо числа = |эффект| < 0.5 в единицах метрики.",
+    )
+    fig.savefig(dst, bbox_inches="tight")
+    plt.close(fig)
+
+
+def add_caption(fig, text: str) -> None:
+    """Врезка-пояснение под фигурой (попадает в PNG через bbox_inches='tight')."""
+    fig.text(
+        0.5,
+        -0.06,
+        text,
+        ha="center",
+        va="top",
+        ma="left",
+        fontsize=8,
+        color=INK,
+        bbox={"boxstyle": "round,pad=0.6", "facecolor": "#f4f4f2", "edgecolor": "#d5d5d2"},
+    )
 
 
 def render_psd(summaries: dict[str, np.ndarray], channels: list[str], dst: Path) -> None:
@@ -252,11 +358,21 @@ def write_table(deltas: np.ndarray, channels: list[str], dst: Path) -> None:
 
 
 def main() -> None:
-    """CLI: каталог результатов → фигуры и markdown-таблица."""
+    """CLI: каталог результатов → сводные фигуры, пер-армовые хитмапы, markdown-таблица.
+
+    Пер-армовые хитмапы раскладываются как ``<heatmaps-dir>/<метрика>/<арм>.png`` —
+    каталог на метрику, файл на арм.
+    """
     parser = ArgumentParser(description=__doc__)
     parser.add_argument("--results-dir", default=str(HERE / "results"))
+    parser.add_argument(
+        "--heatmaps-dir",
+        default=str(HERE.parent / "results"),
+        help="корень для <метрика>/<арм>.png (по умолч. results/ эксперимента 16)",
+    )
     args = parser.parse_args()
     results_dir = Path(args.results_dir)
+    heatmaps_dir = Path(args.heatmaps_dir)
 
     summaries, deltas, channels = load(results_dir)
     render_forest(deltas, channels, HERE / "fig_ci_forest.png")
@@ -264,7 +380,18 @@ def main() -> None:
         render_levels(deltas, metric, HERE / f"fig_levels_{metric}.png")
     render_psd(summaries, channels, HERE / "fig_psd.png")
     write_table(deltas, channels, results_dir / "metrics_table.md")
-    print(f"[metrics-figures] {len(summaries)} армов → {2 + len(METRICS)} фигур + таблица")  # noqa: T201
+
+    written = 0
+    for metric in METRICS:
+        metric_dir = heatmaps_dir / metric
+        metric_dir.mkdir(parents=True, exist_ok=True)
+        for arm in ARM_ORDER:
+            render_arm_metric_heatmap(deltas, arm, metric, metric_dir / f"{arm}.png")
+            written += 1
+    print(  # noqa: T201
+        f"[metrics-figures] {len(summaries)} армов → {2 + len(METRICS)} сводных фигур, "
+        f"таблица, {written} пер-армовых хитмапов в {heatmaps_dir}/<метрика>/<арм>.png"
+    )
 
 
 if __name__ == "__main__":

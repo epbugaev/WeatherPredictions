@@ -410,9 +410,7 @@ def bootstrap_paired_delta_ci(
     for i in range(n_resamples):
         idx = rng.integers(0, n_samples, n_samples)  # ОДИН набор индексов на оба арма
         with np.errstate(invalid="ignore", divide="ignore"):
-            draws[i] = 100.0 * (
-                np.nanmean(arm[idx], axis=0) / np.nanmean(base[idx], axis=0) - 1.0
-            )
+            draws[i] = 100.0 * (np.nanmean(arm[idx], axis=0) / np.nanmean(base[idx], axis=0) - 1.0)
     tail = (1.0 - confidence) / 2.0
     return (
         mean,
