@@ -1,0 +1,20 @@
+{
+  "p0-no-physics": {
+    "n_samples": 727
+  },
+  "p1-legacy-hybrid": {
+    "n_samples": 727
+  },
+  "p3-a2-exp13": {
+    "n_samples": 727
+  },
+  "p3a-no-diabatic": {
+    "n_samples": 727
+  },
+  "p4-exp14": {
+    "n_samples": 727
+  },
+  "p5-exp15": {
+    "n_samples": 727
+  }
+}

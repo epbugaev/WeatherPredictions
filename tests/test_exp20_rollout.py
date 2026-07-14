@@ -16,13 +16,29 @@
 
 from __future__ import annotations
 
+import importlib.util
 import unittest
+from pathlib import Path
 
+import numpy as np
 import torch
 
 from Models.PredRNN import PI_PredRNNv2_Model
 from tools.rollout_common import LatWeightedRmseAccumulator, channel_names
+from tools.rollout_ladder import window_boundary
 from training_strategies.predrnn import predrnn_forecast
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+EXP_DIR = REPO_ROOT / "docs/experiments/20_pi_predrnnv2_ladder"
+
+
+def _load_module(name: str, path: Path):
+    """Загрузить скрипт эксперимента по пути: ``docs/experiments`` не пакет."""
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
 
 PRE_SEQ, AFT_SEQ = 2, 2
 HEIGHT, WIDTH, CHANNELS = 32, 64, 69
@@ -205,6 +221,31 @@ class TestRmseAggregation(unittest.TestCase):
         # средневзвешенное по сэмплам: (2*1 + 1*3) / 3
         self.assertAlmostEqual(float(accumulator.mean()[0, 0]), 5.0 / 3.0, places=5)
         self.assertEqual(accumulator.n_samples, 3)
+
+
+class TestRolloutFigureSpec(unittest.TestCase):
+    """Арм-специфика exp20 в общем ядре фигур (:mod:`tools.rollout_ladder`)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.spec = _load_module("exp20_rollout_figures", EXP_DIR / "rollout_figures.py").SPEC
+
+    def test_run_names_map_to_canonical_arms(self) -> None:
+        """Имена ранов npz сводятся к ключам ``arm_order`` — иначе арм молча выпадет с фигуры."""
+        for arm in self.spec.arm_order:
+            self.assertEqual(self.spec.canonical(f"exp20-{arm}-s0"), arm)
+
+    def test_every_arm_has_label_and_color(self) -> None:
+        for arm in self.spec.arm_order:
+            self.assertIn(arm, self.spec.labels)
+            self.assertIn(arm, self.spec.colors)
+
+    def test_native_horizon_leaves_no_window_seam(self) -> None:
+        """12 шагов = один форвард (native_horizon 12) => шва скользящего окна нет."""
+        native = {
+            self.spec.baseline: {"rmse_free": np.zeros((12, 69)), "native_horizon": 12},
+        }
+        self.assertIsNone(window_boundary(native, self.spec.baseline))
 
 
 class TestChannelNames(unittest.TestCase):
