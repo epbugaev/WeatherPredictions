@@ -329,6 +329,52 @@ def bootstrap_ratio_ci(
     return mean, np.nanstd(draws, axis=0), ci_low, ci_high
 
 
+def bootstrap_paired_delta_ci(
+    arm: np.ndarray,
+    base: np.ndarray,
+    n_resamples: int = 1000,
+    confidence: float = 0.95,
+    seed: int = 0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Бутстрап-CI относительной разницы ``arm`` и ``base`` в процентах, **парный**.
+
+    Армы прогоняются по одним и тем же валидационным сэмплам, поэтому ресэмплить надо
+    **общий** набор индексов: «трудный день» поднимает ошибку у обоих армов, и при
+    парном ресэмпле эта общая изменчивость сокращается. Независимые CI каждого арма
+    её не убирают и переоценивают неопределённость разницы в разы — по ним нельзя
+    судить, отличаются ли армы между собой.
+
+    Args:
+        arm: ``(S, ...)`` — по-сэмпльная метрика арма.
+        base: ``(S, ...)`` — она же у baseline (те же сэмплы, тот же порядок).
+        n_resamples: число ресэмплов с возвращением.
+        confidence: ширина интервала.
+        seed: сид генератора.
+
+    Returns:
+        ``(mean, std, ci_low, ci_high)`` в **процентах** относительно baseline;
+        разница значима, если интервал не накрывает 0.
+    """
+    rng = np.random.default_rng(seed)
+    n_samples = arm.shape[0]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mean = 100.0 * (np.nanmean(arm, axis=0) / np.nanmean(base, axis=0) - 1.0)
+    draws = np.empty((n_resamples, *arm.shape[1:]), dtype=np.float64)
+    for i in range(n_resamples):
+        idx = rng.integers(0, n_samples, n_samples)  # ОДИН набор индексов на оба арма
+        with np.errstate(invalid="ignore", divide="ignore"):
+            draws[i] = 100.0 * (
+                np.nanmean(arm[idx], axis=0) / np.nanmean(base[idx], axis=0) - 1.0
+            )
+    tail = (1.0 - confidence) / 2.0
+    return (
+        mean,
+        np.nanstd(draws, axis=0),
+        np.nanpercentile(draws, 100.0 * tail, axis=0),
+        np.nanpercentile(draws, 100.0 * (1.0 - tail), axis=0),
+    )
+
+
 def wavelength_km(wavenumber: np.ndarray, mean_latitude_deg: float = 40.0) -> np.ndarray:
     """Длина волны (км) для зонального волнового числа m на широте домена.
 

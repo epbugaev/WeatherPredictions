@@ -177,3 +177,18 @@ def test_bootstrap_ratio_ci_aggregates_sums_not_means() -> None:
     mean, _, low, high = ml.bootstrap_ratio_ci(num, den, n_resamples=100, seed=0)
     assert np.allclose(mean, 0.5)  # (1+3+0) / (2+6+0)
     assert np.all(low <= mean) and np.all(mean <= high)
+
+
+def test_paired_delta_ci_is_tighter_than_independent_cis() -> None:
+    # Армы считаются на ОДНИХ И ТЕХ ЖЕ сэмплах: «трудные дни» поднимают RMSE обоим.
+    # Парный бутстрап это сокращает, независимые CI — нет. Проверяем, что парный CI
+    # разницы существенно уже, чем разброс самих метрик.
+    rng = np.random.default_rng(0)
+    difficulty = rng.normal(50.0, 15.0, size=(400, 1))  # общая «трудность» сэмпла
+    base = difficulty + rng.normal(0.0, 0.5, size=(400, 1))
+    arm = 0.97 * difficulty + rng.normal(0.0, 0.5, size=(400, 1))  # арм стабильно на 3% лучше
+    mean, _, low, high = ml.bootstrap_paired_delta_ci(arm, base, n_resamples=300, seed=0)
+    assert np.allclose(mean, -3.0, atol=0.3)  # Δ% ≈ −3
+    assert high < 0.0  # разница значима: интервал не накрывает ноль
+    assert (high - low) < 1.0  # и он узкий, хотя std самих метрик огромен
+    assert np.std(base) > 10.0
