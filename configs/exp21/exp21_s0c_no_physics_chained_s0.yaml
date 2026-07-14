@@ -1,0 +1,82 @@
+experiment:
+  name: exp21-s0c-no-physics-chained-seed0
+model:
+  type: PI-SimVPv2
+  params:
+    in_shape:
+    - 12
+    - 69
+    - 32
+    - 64
+    hid_S: 16
+    hid_T: 256
+    N_S: 4
+    N_T: 4
+    model_type: gSTA
+    physics_coupling: chained
+    physics_chunk_size: 64
+    use_physics_residual_corrector: true
+    physics_residual_hidden_channels: 128
+    physics_residual_apply_to: upper_air_only
+    physics_residual_zero_init: true
+    physics_residual_lambda_l1: 0.0001
+    physics_feature_mode: no_physics
+    physics_residual_shuffle: none
+    physics_lat_start_deg: 18.28125
+    physics_dlat_deg: 5.625
+    physics_dlon_deg: 5.625
+    freeze_iam4vp_for_residual_warmup: false
+    residual_warmup_epochs: 0
+data:
+  dataset_version: v4
+  cut:
+  - - 75
+    - 107
+  - - 164
+    - 228
+  include_target: false
+  lead_time: 0
+  sample_stride: 12
+  frame_interval: 1
+  muti_target_steps: 1
+  start_time_x: 0
+  end_time_x: 11
+  start_time_y: 12
+  end_time_y: 23
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: false
+  prefetch_factor: 4
+  train:
+    start_time: '2000-01-01 00:00:00'
+    end_time: '2003-12-30 00:00:00'
+    batch_size: 64
+    shuffle: true
+  val:
+    start_time: '2004-01-01 00:00:00'
+    end_time: '2004-12-30 00:00:00'
+    batch_size: 64
+    shuffle: false
+  memmap_path: null
+training:
+  seed: 0
+  litmodel: mutiout_f
+  lr: 0.001
+  eta_min: 0.0
+  max_epoch: 40
+  loss_type: MAE
+  early_stopping_patience: 34
+  warmup_ratio: 0.05
+  warmup_start_factor: 0.001
+trainer:
+  precision: 32
+  log_every_n_steps: 50
+  static_graph: false
+  find_unused_parameters: true
+  num_sanity_val_steps: 0
+  float32_matmul_precision: high
+  val_every_n_epochs: 2
+logging:
+  checkpoint_base: ${WEATHERPRED_CHECKPOINT_BASE:-./checkpoints}
+  comet_project: ${COMET_PROJECT_NAME:-weather-plus-physics}
+  log_code_file: null
