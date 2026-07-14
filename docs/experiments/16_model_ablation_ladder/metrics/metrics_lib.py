@@ -16,6 +16,7 @@
 """
 
 import math
+from collections.abc import Callable
 
 import numpy as np
 import torch
@@ -329,6 +330,47 @@ def bootstrap_ratio_ci(
     return mean, np.nanstd(draws, axis=0), ci_low, ci_high
 
 
+def bootstrap_paired_statistic_ci(
+    statistic: Callable[[np.ndarray], np.ndarray],
+    n_samples: int,
+    n_resamples: int = 1000,
+    confidence: float = 0.95,
+    seed: int = 0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Парный бутстрап произвольной статистики: один набор индексов на все армы.
+
+    Универсальная форма: ``statistic(idx)`` сама решает, что считать — относительную
+    дельту (RMSE, W1), абсолютную разницу (ACC, CSI, FSS — ограниченные оценки, у
+    которых относительная дельта взрывается при нулевом знаменателе) или что-то
+    нелинейное (|bias|, нормированный на σ поля).
+
+    Args:
+        statistic: функция ``idx -> np.ndarray``; ``idx`` — индексы сэмплов.
+        n_samples: размер выборки (по нему ресэмплим).
+        n_resamples: число ресэмплов с возвращением.
+        confidence: ширина интервала.
+        seed: сид генератора.
+
+    Returns:
+        ``(mean, std, ci_low, ci_high)``; ``mean`` — статистика на полной выборке.
+    """
+    rng = np.random.default_rng(seed)
+    full = np.arange(n_samples)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mean = statistic(full)
+    draws = np.empty((n_resamples, *np.shape(mean)), dtype=np.float64)
+    for i in range(n_resamples):
+        with np.errstate(invalid="ignore", divide="ignore"):
+            draws[i] = statistic(rng.integers(0, n_samples, n_samples))
+    tail = (1.0 - confidence) / 2.0
+    return (
+        mean,
+        np.nanstd(draws, axis=0),
+        np.nanpercentile(draws, 100.0 * tail, axis=0),
+        np.nanpercentile(draws, 100.0 * (1.0 - tail), axis=0),
+    )
+
+
 def bootstrap_paired_delta_ci(
     arm: np.ndarray,
     base: np.ndarray,
@@ -337,6 +379,11 @@ def bootstrap_paired_delta_ci(
     seed: int = 0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Бутстрап-CI относительной разницы ``arm`` и ``base`` в процентах, **парный**.
+
+    Годится только для положительных величин без нуля (RMSE, W1). Для ограниченных
+    оценок (ACC/CSI/FSS) и знакопеременных (bias) используйте
+    `bootstrap_paired_statistic_ci` с абсолютной разницей: относительная дельта там
+    не определена (деление на ноль) либо не интерпретируется.
 
     Армы прогоняются по одним и тем же валидационным сэмплам, поэтому ресэмплить надо
     **общий** набор индексов: «трудный день» поднимает ошибку у обоих армов, и при

@@ -192,3 +192,28 @@ def test_paired_delta_ci_is_tighter_than_independent_cis() -> None:
     assert high < 0.0  # разница значима: интервал не накрывает ноль
     assert (high - low) < 1.0  # и он узкий, хотя std самих метрик огромен
     assert np.std(base) > 10.0
+
+
+def test_paired_ci_of_arbitrary_statistic() -> None:
+    # Общий парный бутстрап: статистика от ОБЩЕГО набора индексов. Проверяем на
+    # абсолютной разнице ограниченной оценки (ACC/CSI/FSS так и надо сравнивать).
+    rng = np.random.default_rng(1)
+    shared = rng.normal(0.0, 0.2, size=(300, 1))
+    base = 0.60 + shared
+    arm = 0.65 + shared  # стабильно на 0.05 выше
+    stat = lambda idx: 100.0 * (arm[idx].mean(axis=0) - base[idx].mean(axis=0))  # noqa: E731
+    mean, _, low, high = ml.bootstrap_paired_statistic_ci(stat, 300, n_resamples=300, seed=0)
+    assert np.allclose(mean, 5.0, atol=0.5)  # +5 пунктов
+    assert low > 0.0  # значимо, несмотря на большой общий разброс
+
+
+def test_relative_delta_would_explode_where_absolute_is_fine() -> None:
+    # Причина бага: у CSI знаменатель бывает нулём (нет попаданий) -> inf.
+    # Абсолютная разница на тех же данных определена.
+    base = np.array([[0.0], [0.0], [0.0]])
+    arm = np.array([[0.2], [0.1], [0.0]])
+    rel, _, _, _ = ml.bootstrap_paired_delta_ci(arm, base, n_resamples=20, seed=0)
+    assert not np.isfinite(rel).all()  # относительная — не определена
+    stat = lambda idx: 100.0 * (arm[idx].mean(axis=0) - base[idx].mean(axis=0))  # noqa: E731
+    absolute, _, _, _ = ml.bootstrap_paired_statistic_ci(stat, 3, n_resamples=20, seed=0)
+    assert np.isfinite(absolute).all()

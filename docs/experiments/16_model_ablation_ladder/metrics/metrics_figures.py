@@ -1,0 +1,271 @@
+"""Фигуры и таблицы полного набора метрик exp16 (эпоха 500, все армы на общей эпохе).
+
+Вход: ``results/metrics_<arm>.npz`` (сводки) + ``results/paired_deltas.npz`` (парные
+дельты к R0 с бутстрап-CI). Выход:
+
+  * ``fig_ci_forest.png`` — главная: дельта каждого арма к R0 по всем метрикам с 95% CI
+    (значимо ⇔ интервал не накрывает ноль);
+  * ``fig_levels_<метрика>.png`` — хитмап [уровень × шаг] к R0, строка на арм, столбец
+    на переменную; **незначимые ячейки заштрихованы** — их читать нельзя;
+  * ``fig_psd.png`` — спектр по зональному волновому числу m: прогноз против истины
+    (падение мощности на больших m = модель сглаживает мелкий масштаб);
+  * ``results/metrics_table.md`` — те же числа текстом.
+
+Запуск (локально):
+    python metrics_figures.py
+"""
+
+from __future__ import annotations
+
+import importlib.util
+from argparse import ArgumentParser
+from pathlib import Path
+
+import matplotlib
+import numpy as np
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+
+HERE = Path(__file__).resolve().parent
+_spec = importlib.util.spec_from_file_location("exp16_metrics_lib", HERE / "metrics_lib.py")
+ml = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(ml)
+
+BASELINE = "r0-no-physics"
+ARM_ORDER = (
+    "r1-legacy-hybrid",
+    "r2a-a1-pre13",
+    "r2-a2-pre13",
+    "r3-a2-exp13",
+    "r4-exp14",
+    "r5-exp15",
+    "r3a-no-diabatic",
+    "r3q-diabatic-t-only",
+)
+ARM_LABELS = {
+    "r1-legacy-hybrid": "R1 · легаси",
+    "r2a-a1-pre13": "R2a · A1 (без Q_θ)",
+    "r2-a2-pre13": "R2 · A2 (до exp13)",
+    "r3-a2-exp13": "R3 · A2 + exp13",
+    "r4-exp14": "R4 · + exp14",
+    "r5-exp15": "R5 · + exp15",
+    "r3a-no-diabatic": "R3a · R3 без Q_θ",
+    "r3q-diabatic-t-only": "R3q · Q_θ только t",
+}
+LEVEL_ARMS = ("r2-a2-pre13", "r3-a2-exp13", "r4-exp14", "r5-exp15")
+UPPER_VARS = ("z", "t", "r", "u", "v")
+VAR_BASE = {"z": 4, "t": 17, "r": 30, "u": 43, "v": 56}
+PRESSURE_HPA = (50, 100, 150, 200, 250, 300, 400, 500, 600, 700, 850, 925, 1000)
+
+# Подпись, направление («+1» = больше лучше) и единицы дельты. Единицы разные не для
+# красоты: у ограниченных оценок (ACC/CSI/FSS) относительная дельта не определена
+# (у R0 CSI бывает ровно 0), а у знакопеременного bias не интерпретируется.
+METRICS = {
+    "rmse": ("RMSE, Δ%", -1),
+    "acc": ("ACC, Δ пункта", +1),
+    "csi": ("CSI p90/95/99, Δ пункта", +1),
+    "fss": ("FSS окно 3, Δ пункта", +1),
+    "w1": ("W1 распределения, Δ%", -1),
+    "bias": ("|bias|, Δ в % от σ", -1),
+}
+INK, MUTED = "#1a1a1a", "#8a8a8a"
+plt.rcParams.update({"figure.dpi": 150, "font.size": 9, "axes.edgecolor": MUTED})
+
+
+def load(results_dir: Path) -> tuple[dict[str, np.ndarray], np.ndarray, list[str]]:
+    """Прочитать сводки армов, парные дельты и имена каналов."""
+    summaries = {}
+    for path in sorted(results_dir.glob("metrics_*.npz")):
+        data = np.load(path, allow_pickle=False)
+        arm = str(data["arm"]).replace("abl16L-", "").replace("-t12-s0", "")
+        summaries[arm] = data
+    deltas = np.load(results_dir / "paired_deltas.npz", allow_pickle=False)
+    channels = [str(c) for c in summaries[BASELINE]["channels"]]
+    return summaries, deltas, channels
+
+
+def delta_grid(deltas: np.ndarray, arm: str, metric: str, key: str) -> np.ndarray:
+    """Дельта метрики → ``(12, 69)``; CSI усредняется по порогам, FSS берётся с окном 3."""
+    values = deltas[f"{arm}__{metric}__{key}"]
+    if metric == "csi":
+        return np.nanmean(values, axis=-1)  # среднее по p90/p95/p99 = mCSI
+    if metric == "fss":
+        return np.nanmean(values[..., 1], axis=-1)  # окно 3 ячейки, среднее по порогам
+    return values
+
+
+def render_forest(deltas: np.ndarray, channels: list[str], dst: Path) -> None:
+    """Главная фигура: дельта к R0 по каждой метрике с 95% CI (значимо ⇔ CI мимо нуля)."""
+    upper = [i for i, name in enumerate(channels) if name not in ("t2", "u10", "v10", "tp")]
+    fig, axes = plt.subplots(1, len(METRICS), figsize=(3.1 * len(METRICS), 4.6), sharey=True)
+    positions = np.arange(len(ARM_ORDER))[::-1]
+    for ax, (metric, (label, better)) in zip(axes, METRICS.items(), strict=True):
+        for pos, arm in zip(positions, ARM_ORDER, strict=True):
+            mean = delta_grid(deltas, arm, metric, "delta")[:, upper].mean()
+            low = delta_grid(deltas, arm, metric, "ci_low")[:, upper].mean()
+            high = delta_grid(deltas, arm, metric, "ci_high")[:, upper].mean()
+            significant = low > 0 or high < 0
+            good = significant and (mean * better > 0)
+            color = "#0072B2" if good else ("#D55E00" if significant else MUTED)
+            ax.plot([low, high], [pos, pos], color=color, lw=2.4, solid_capstyle="round")
+            ax.plot(
+                mean,
+                pos,
+                "o" if significant else "x",
+                color=color,
+                ms=6,
+                mfc="white" if not significant else color,
+            )
+        ax.axvline(0, color=INK, lw=1.0, ls="--")
+        ax.set_title(label, fontsize=10)
+        ax.grid(True, axis="x", alpha=0.25)
+        ax.set_xlabel("Δ к R0")  # единицы — в заголовке панели: они у метрик разные
+    axes[0].set_yticks(positions, [ARM_LABELS[arm] for arm in ARM_ORDER], fontsize=9)
+    fig.suptitle(
+        "Вклад физики относительно R0 — все армы на ОБЩЕЙ эпохе 500 (парный бутстрап, 95% CI)\n"
+        "синее = значимо лучше R0 · красное = значимо хуже · серое ×  = неотличимо от R0",
+        fontsize=12,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.90))
+    fig.savefig(dst, bbox_inches="tight")
+    plt.close(fig)
+
+
+def render_levels(deltas: np.ndarray, metric: str, dst: Path, clip: float = 8.0) -> None:
+    """Хитмап [уровень × шаг] к R0: строка = арм, столбец = переменная.
+
+    Незначимые ячейки (CI накрывает ноль) заштрихованы — по ним нельзя судить.
+    """
+    label, better = METRICS[metric]
+    fig, axes = plt.subplots(
+        len(LEVEL_ARMS), len(UPPER_VARS), figsize=(3.0 * len(UPPER_VARS), 2.6 * len(LEVEL_ARMS))
+    )
+    image = None
+    for row, arm in enumerate(LEVEL_ARMS):
+        grid = delta_grid(deltas, arm, metric, "delta")
+        low = delta_grid(deltas, arm, metric, "ci_low")
+        high = delta_grid(deltas, arm, metric, "ci_high")
+        for col, var in enumerate(UPPER_VARS):
+            base = VAR_BASE[var]
+            block = grid[:, base : base + 13].T * (-better)  # знак: синее = лучше
+            insignificant = ~((low[:, base : base + 13] > 0) | (high[:, base : base + 13] < 0)).T
+            ax = axes[row, col]
+            image = ax.imshow(
+                block, cmap="RdBu_r", vmin=-clip, vmax=clip, aspect="auto", interpolation="nearest"
+            )
+            ax.contourf(
+                insignificant.astype(float),
+                levels=[0.5, 1.5],
+                colors="none",
+                hatches=["////"],
+                extend="neither",
+            )
+            if row == 0:
+                ax.set_title(var, fontsize=11)
+            if col == 0:
+                ax.set_ylabel(ARM_LABELS[arm], fontsize=8)
+                ax.set_yticks(range(13), [str(p) for p in PRESSURE_HPA], fontsize=6)
+            else:
+                ax.set_yticks([])
+            ax.set_xticks(range(0, 12, 3), [str(s + 1) for s in range(0, 12, 3)], fontsize=6)
+            if row == len(LEVEL_ARMS) - 1:
+                ax.set_xlabel("шаг", fontsize=8)
+            ax.grid(False)
+    colorbar = fig.colorbar(image, ax=axes, fraction=0.015, pad=0.01)
+    colorbar.set_label(f"выигрыш к R0, % ({label})")
+    fig.suptitle(
+        f"{label}: вклад физики по [уровень × шаг] относительно R0 (эпоха 500)\n"
+        "синее = физика лучше · штриховка = CI накрывает ноль (незначимо)",
+        fontsize=12,
+    )
+    fig.savefig(dst, bbox_inches="tight")
+    plt.close(fig)
+
+
+def render_psd(summaries: dict[str, np.ndarray], channels: list[str], dst: Path) -> None:
+    """Спектр по зональному волновому числу m: истина против прогнозов (шаг 1 и 12)."""
+    arms = (BASELINE, "r3-a2-exp13", "r1-legacy-hybrid")
+    colors = {BASELINE: "#8a8a8a", "r3-a2-exp13": "#0072B2", "r1-legacy-hybrid": "#E69F00"}
+    fig, axes = plt.subplots(2, len(UPPER_VARS), figsize=(3.1 * len(UPPER_VARS), 6.0), sharex=True)
+    wavenumbers = np.arange(summaries[BASELINE]["psd_obs"].shape[-1])
+    for row, step in enumerate((0, 11)):
+        for col, var in enumerate(UPPER_VARS):
+            channel = channels.index(f"{var}500")
+            ax = axes[row, col]
+            ax.loglog(
+                wavenumbers[1:],
+                summaries[BASELINE]["psd_obs"][step, channel, 1:],
+                color=INK,
+                lw=2.0,
+                label="ERA5 (истина)",
+            )
+            for arm in arms:
+                ax.loglog(
+                    wavenumbers[1:],
+                    summaries[arm]["psd_pred"][step, channel, 1:],
+                    color=colors[arm],
+                    lw=1.3,
+                    ls="--",
+                    label=ARM_LABELS.get(arm, "R0 · без физики"),
+                )
+            if row == 0:
+                ax.set_title(f"{var}500", fontsize=11)
+            if col == 0:
+                ax.set_ylabel(f"мощность, шаг {step + 1}", fontsize=9)
+            if row == 1:
+                ax.set_xlabel("зональное волновое число m", fontsize=9)
+            ax.grid(True, which="both", alpha=0.2)
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="lower center", ncol=4, frameon=False, fontsize=9)
+    fig.suptitle(
+        "Спектр мощности по зональному волновому числу m (сферические гармоники "
+        "на региональном кропе не определены)\nпадение прогноза ниже истины на больших m "
+        "= модель сглаживает мелкий масштаб",
+        fontsize=12,
+    )
+    fig.tight_layout(rect=(0, 0.06, 1, 0.93))
+    fig.savefig(dst, bbox_inches="tight")
+    plt.close(fig)
+
+
+def write_table(deltas: np.ndarray, channels: list[str], dst: Path) -> None:
+    """Markdown-таблица: дельта каждого арма к R0 по всем метрикам с CI."""
+    upper = [i for i, name in enumerate(channels) if name not in ("t2", "u10", "v10", "tp")]
+    lines = [
+        "# Метрики exp16 — все армы на общей эпохе 500\n",
+        "Δ% к R0, 65 upper-каналов, среднее по 12 шагам. CI — парный бутстрап (1000, 95 %).",
+        "Значимо ⇔ интервал не накрывает 0. RMSE/W1/bias: <0 лучше. ACC/CSI/FSS: >0 лучше.\n",
+        "| арм | " + " | ".join(label for label, _ in METRICS.values()) + " |",
+        "|---" * (1 + len(METRICS)) + "|",
+    ]
+    for arm in ARM_ORDER:
+        cells = []
+        for metric in METRICS:
+            mean = delta_grid(deltas, arm, metric, "delta")[:, upper].mean()
+            low = delta_grid(deltas, arm, metric, "ci_low")[:, upper].mean()
+            high = delta_grid(deltas, arm, metric, "ci_high")[:, upper].mean()
+            star = "**" if (low > 0 or high < 0) else ""
+            cells.append(f"{star}{mean:+.2f}{star} [{low:+.2f}, {high:+.2f}]")
+        lines.append(f"| {ARM_LABELS[arm]} | " + " | ".join(cells) + " |")
+    dst.write_text("\n".join(lines) + "\n")
+
+
+def main() -> None:
+    """CLI: каталог результатов → фигуры и markdown-таблица."""
+    parser = ArgumentParser(description=__doc__)
+    parser.add_argument("--results-dir", default=str(HERE / "results"))
+    args = parser.parse_args()
+    results_dir = Path(args.results_dir)
+
+    summaries, deltas, channels = load(results_dir)
+    render_forest(deltas, channels, HERE / "fig_ci_forest.png")
+    for metric in METRICS:
+        render_levels(deltas, metric, HERE / f"fig_levels_{metric}.png")
+    render_psd(summaries, channels, HERE / "fig_psd.png")
+    write_table(deltas, channels, results_dir / "metrics_table.md")
+    print(f"[metrics-figures] {len(summaries)} армов → {2 + len(METRICS)} фигур + таблица")  # noqa: T201
+
+
+if __name__ == "__main__":
+    main()
