@@ -116,6 +116,7 @@ def main() -> None:
         labels=ARM_LABELS,
         colors=ARM_COLORS,
         title=TITLE,
+        bars_path=HERE / "fig_delta_bars.png",
     )
 
 

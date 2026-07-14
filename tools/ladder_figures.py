@@ -413,6 +413,154 @@ def render_curves(
     plt.close(fig)
 
 
+def _delta_matrix(
+    parsed_by_run: dict[str, dict[str, list[tuple[int, float]]]],
+    baseline_run: str,
+    variables: list[str],
+    epochs: tuple[int, ...],
+    runs: list[str],
+) -> dict[str, list[float | None]]:
+    """Δ% к baseline, усреднённая по ``epochs``, по каждой переменной.
+
+    Числовой близнец :func:`_delta_table` (та же арифметика, но не markdown) —
+    столбчатая диаграмма и таблица обязаны показывать одни и те же числа.
+
+    Args:
+        parsed_by_run: ``{run: {var: [(epoch, value), ...]}}``.
+        baseline_run: арм-контроль (знаменатель дельты).
+        variables: переменные в нужном порядке.
+        epochs: эпохи усреднения (одна — снимок, несколько — окно).
+        runs: армы-строки (без baseline).
+
+    Returns:
+        ``{run: [Δ% на переменную]}``; ``None`` там, где точки нет.
+    """
+    base = parsed_by_run.get(baseline_run)
+    matrix: dict[str, list[float | None]] = {}
+    for run in runs:
+        row: list[float | None] = []
+        for var in variables:
+            deltas = []
+            for epoch in epochs:
+                a = value_at_epoch(base, var, epoch) if base else None
+                b = value_at_epoch(parsed_by_run[run], var, epoch)
+                if a and b:
+                    deltas.append(100 * (b - a) / a)
+            row.append(sum(deltas) / len(deltas) if deltas else None)
+        matrix[run] = row
+    return matrix
+
+
+def render_delta_bars(
+    parsed_by_run: dict[str, dict[str, list[tuple[int, float]]]],
+    variables: list[str],
+    dst: Path,
+    arm_order: tuple[str, ...],
+    labels: dict[str, str],
+    colors: dict[str, str],
+    title: str,
+    epoch: int,
+    window: tuple[int, ...],
+    clip: float = 20.0,
+) -> None:
+    """Сгруппированные столбцы Δ% к контролю: снимок эпохи и окно эпох.
+
+    Две панели специально: снимок одной эпохи по z шумит на ±5–8 п.п. (exp16
+    §8.5-а), и расхождение панелей — это и есть визуальная мера шума. Столбцы
+    ниже нуля = арм лучше контроля.
+
+    Ось Y обрезана на ``±clip``: легаси-арм уходит в сотни процентов и в общем
+    масштабе расплющивает весь полезный сигнал (единицы процентов) в линию у
+    нуля. Зашкалившие столбцы подписываются своим истинным значением, так что
+    обрезка ничего не прячет.
+
+    Args:
+        parsed_by_run: ``{run: {var: [(epoch, value), ...]}}``.
+        variables: переменные — группы столбцов.
+        dst: путь PNG.
+        arm_order: порядок арм; ``arm_order[0]`` — контроль (в столбцы не идёт).
+        labels: ``{run: подпись}``.
+        colors: ``{run: hex-цвет}``.
+        title: заголовок фигуры.
+        epoch: общая эпоха для левой панели.
+        window: эпохи усреднения для правой панели.
+        clip: предел оси Y в процентах.
+
+    Side effects:
+        Пишет PNG в ``dst``.
+    """
+    ordered_vars = order_variables(variables)
+    baseline = arm_order[0]
+    runs = [r for r in arm_order if r in parsed_by_run and r != baseline]
+    panels = (
+        (f"снимок: эпоха {epoch}", (epoch,)),
+        (f"окно: эпохи {{{', '.join(str(e) for e in window)}}}", window),
+    )
+
+    fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.4), sharey=True)
+    x_positions = list(range(len(ordered_vars)))
+    bar_width = 0.8 / max(1, len(runs))
+
+    for ax, (panel_title, epochs) in zip(axes, panels, strict=True):
+        matrix = _delta_matrix(parsed_by_run, baseline, ordered_vars, epochs, runs)
+        for run_index, run in enumerate(runs):
+            offsets = [x + (run_index - (len(runs) - 1) / 2) * bar_width for x in x_positions]
+            values = [v if v is not None else 0.0 for v in matrix[run]]
+            drawn = [max(-clip, min(clip, v)) for v in values]
+            ax.bar(
+                offsets,
+                drawn,
+                width=bar_width,
+                color=colors.get(run, MUTED),
+                label=labels.get(run, run),
+                edgecolor="white",
+                linewidth=0.4,
+            )
+            # Подпись только у зашкаливших столбцов — иначе обрезка скрыла бы масштаб вреда.
+            for offset, value in zip(offsets, values, strict=True):
+                if abs(value) <= clip:
+                    continue
+                sign = 1 if value > 0 else -1
+                ax.annotate(
+                    f"{value:+.0f}%",
+                    xy=(offset, sign * clip),
+                    xytext=(0, 3 if sign > 0 else -11),
+                    textcoords="offset points",
+                    ha="center",
+                    fontsize=7.5,
+                    color=colors.get(run, INK),
+                    fontweight="bold",
+                )
+        ax.axhline(0, color=INK, linewidth=1.0)
+        ax.set_ylim(-clip * 1.05, clip * 1.05)
+        ax.set_title(panel_title, fontsize=9, color=INK)
+        ax.set_xticks(x_positions)
+        ax.set_xticklabels(ordered_vars)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.grid(axis="y", color="#e5e5e3", linewidth=0.6)
+        ax.set_axisbelow(True)
+
+    axes[0].set_ylabel("Δ% RMSE к контролю")
+    fig.suptitle(title, fontsize=11, color=INK)
+    axes[0].legend(
+        loc="upper center",
+        bbox_to_anchor=(1.02, -0.12),
+        ncol=len(runs),
+        frameon=False,
+        fontsize=8,
+    )
+    add_caption(
+        fig,
+        "Столбец ниже нуля = ступень лучше контроля «без физики».\n"
+        f"Ось обрезана на ±{clip:.0f}%; столбцы за пределом подписаны истинным значением.\n"
+        "Две панели — мера шума: снимок одной эпохи по z гуляет на ±5–8 п.п., судить по окну.",
+        y=-0.30,
+    )
+    fig.savefig(dst, bbox_inches="tight")
+    plt.close(fig)
+
+
 def write_ladder_outputs(
     metrics_path: Path,
     figure_path: Path,
@@ -422,6 +570,7 @@ def write_ladder_outputs(
     labels: dict[str, str],
     colors: dict[str, str],
     title: str,
+    bars_path: Path | None = None,
 ) -> None:
     """Собрать фигуру и три таблицы лестницы из JSON метрик.
 
@@ -435,9 +584,11 @@ def write_ladder_outputs(
         labels: ``{run: подпись}``.
         colors: ``{run: hex-цвет}``.
         title: заголовок фигуры.
+        bars_path: куда писать столбчатую диаграмму дельт; ``None`` — не строить.
 
     Side effects:
-        Пишет PNG и три .md на диск; печатает сводку и обе дельта-таблицы в stdout.
+        Пишет PNG (кривые, опционально столбцы) и три .md на диск; печатает
+        сводку и обе дельта-таблицы в stdout.
     """
     payload = json.loads(metrics_path.read_text())
     val_every = payload["meta"]["val_every_n_epochs"]
@@ -457,6 +608,10 @@ def write_ladder_outputs(
     window = tuple(range(val_every, epoch + 1, val_every))[-4:]
     window_delta = build_window_delta_table(parsed, baseline, variables, window, arm_order, labels)
     (tables_dir / f"{table_prefix}_window_delta_table.md").write_text(window_delta)
+    if bars_path is not None:
+        render_delta_bars(
+            parsed, variables, bars_path, arm_order, labels, colors, title, epoch, window
+        )
     print(f"[figures] {len(parsed)} runs, vars={variables}, common_epoch={epoch}")
     print(delta)
     print(window_delta)

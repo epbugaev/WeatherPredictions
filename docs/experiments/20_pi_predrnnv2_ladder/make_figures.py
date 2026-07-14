@@ -59,7 +59,7 @@ TITLE = "Лестница exp 20 (PredRNNv2): val-RMSE по эпохам (сид
 
 
 def main() -> None:
-    """Собрать фигуру и три таблицы из results/exp20_metrics.json."""
+    """Собрать фигуры (кривые + столбцы дельт) и три таблицы из exp20_metrics.json."""
     write_ladder_outputs(
         metrics_path=HERE / "results" / "exp20_metrics.json",
         figure_path=HERE / "fig_val_rmse_curves.png",
@@ -69,6 +69,7 @@ def main() -> None:
         labels=ARM_LABELS,
         colors=ARM_COLORS,
         title=TITLE,
+        bars_path=HERE / "fig_delta_bars.png",
     )
 
 
