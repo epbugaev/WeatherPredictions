@@ -9,6 +9,9 @@
 Читает по-сэмпльные npz (`metrics_eval.py --out-per-sample`), пишет одну сводку с
 дельтами и их CI. По-сэмпльные файлы весят десятки МБ на арм и остаются на кластере.
 
+Скрипт общий для лестниц exp16 и exp20: контрольный арм задаётся ``--baseline``
+(канонические имена — :func:`tools.metrics_ladder.canonical_arm`).
+
 Запуск (кластер, CPU):
     python paired_deltas.py --per-sample-dir ~/abl16_metrics_e500_raw \
         --out ~/abl16_metrics_e500/paired_deltas.npz
@@ -17,6 +20,7 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 from argparse import ArgumentParser, Namespace
 from collections.abc import Callable
 from pathlib import Path
@@ -24,11 +28,15 @@ from pathlib import Path
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parents[3]))
+
+from tools.metrics_ladder import canonical_arm  # noqa: E402
+
 _spec = importlib.util.spec_from_file_location("exp16_metrics_lib", HERE / "metrics_lib.py")
 ml = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(ml)
 
-BASELINE = "r0-no-physics"
+BASELINE = "r0-no-physics"  # контроль exp16; у exp20 — свой, см. --baseline
 # Режим сравнения у каждой метрики свой — иначе получаются бессмысленные числа:
 #   * RELATIVE (%)  — положительные величины без нуля: RMSE, W1, std поля;
 #   * ABSOLUTE (пункты ×100) — ОГРАНИЧЕННЫЕ оценки: ACC, CSI, FSS. Относительная
@@ -38,12 +46,6 @@ BASELINE = "r0-no-physics"
 #     и берём АБСОЛЮТНУЮ разницу (в % от σ).
 RELATIVE_METRICS = ("rmse", "w1", "std_pred")
 ABSOLUTE_METRICS = ("acc",)
-
-
-def canonical_arm(name: str) -> str:
-    """``abl16L-r3-a2-exp13-t12-s0`` → ``r3-a2-exp13``."""
-    stem = name.removeprefix("abl16L-").removeprefix("abl16-")
-    return stem.removesuffix("-t12-s0").removesuffix("-s0")
 
 
 def load_per_sample(directory: Path) -> dict[str, dict[str, np.ndarray]]:
@@ -69,11 +71,11 @@ def _skill_ratio(numerator: np.ndarray, denominator: np.ndarray) -> np.ndarray:
 def compute_deltas(
     runs: dict[str, dict[str, np.ndarray]], args: Namespace
 ) -> dict[str, np.ndarray]:
-    """Парные дельты к R0 и их бутстрап-CI. Режим сравнения — свой у каждой метрики."""
-    base = runs[BASELINE]
+    """Парные дельты к контролю и их бутстрап-CI. Режим сравнения — свой у каждой метрики."""
+    base = runs[args.baseline]
     out: dict[str, np.ndarray] = {}
     for arm, values in sorted(runs.items()):
-        if arm == BASELINE:
+        if arm == args.baseline:
             continue
 
         # Ограниченные оценки восстанавливаем по-сэмпльно, чтобы ресэмпл шёл
@@ -159,18 +161,24 @@ def main() -> None:
     parser = ArgumentParser(description=__doc__)
     parser.add_argument("--per-sample-dir", required=True, help="каталог *_per_sample.npz")
     parser.add_argument("--out", required=True, help="выходной npz с дельтами")
+    parser.add_argument(
+        "--baseline",
+        default=BASELINE,
+        help=f"канонический ключ контрольного арма (по умолч. {BASELINE}, exp16)",
+    )
     parser.add_argument("--bootstrap", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
     runs = load_per_sample(Path(args.per_sample_dir))
-    assert BASELINE in runs, f"нет baseline {BASELINE} в {args.per_sample_dir}"
-    print(f"[paired] армов: {len(runs)}, сэмплов: {runs[BASELINE]['rmse'].shape[0]}")  # noqa: T201
+    assert args.baseline in runs, f"нет baseline {args.baseline} в {args.per_sample_dir}"
+    samples = runs[args.baseline]["rmse"].shape[0]
+    print(f"[paired] армов: {len(runs)}, сэмплов: {samples}")  # noqa: T201
 
     deltas = compute_deltas(runs, args)
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(out_path, **deltas, n_bootstrap=args.bootstrap, baseline=BASELINE)
+    np.savez_compressed(out_path, **deltas, n_bootstrap=args.bootstrap, baseline=args.baseline)
     print(f"[paired] записано {out_path}")  # noqa: T201
 
 
