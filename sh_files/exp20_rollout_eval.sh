@@ -30,14 +30,9 @@ SCRIPT="${REPO_ROOT}/docs/experiments/20_pi_predrnnv2_ladder/rollout_eval.py"
 mkdir -p "${OUT_DIR}"
 
 # Порядок = порядок лестницы (README §4): контроль, легаси, затем A-семейство.
-ARMS=(
-  p0_no_physics
-  p1_legacy_hybrid
-  p3a_no_diabatic
-  p3_a2_exp13
-  p4_exp14
-  p5_exp15
-)
+# EXP20_ARMS позволяет досчитать подмножество: один арм ~40 мин, все шесть не влезают
+# в 3-часовой лимит cpu-e-quick (джоба 4177116 упала по TIMEOUT после четырёх).
+read -r -a ARMS <<<"${EXP20_ARMS:-p0_no_physics p1_legacy_hybrid p3a_no_diabatic p3_a2_exp13 p4_exp14 p5_exp15}"
 
 for arm in "${ARMS[@]}"; do
   run_name="exp20-${arm//_/-}-s0"
