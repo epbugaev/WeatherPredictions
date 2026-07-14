@@ -320,6 +320,7 @@ class IAM4VP(nn.Module):
         diabatic_constants_path=None,
         diabatic_cut=None,
         diabatic_apply_to: str = "all_upper_air",
+        diabatic_use_geo: bool = True,
         freeze_iam4vp_for_residual_warmup=False,
         residual_warmup_epochs=0,
     ):
@@ -585,7 +586,10 @@ class IAM4VP(nn.Module):
                 zero_init=physics_residual_zero_init,
             )
             if self.use_diabatic_term:
-                geo = self._load_static_geo(diabatic_constants_path, diabatic_cut, H_data, W_data)
+                geo = self._gate_static_geo(
+                    self._load_static_geo(diabatic_constants_path, diabatic_cut, H_data, W_data),
+                    diabatic_use_geo,
+                )
                 self.register_buffer("diabatic_geo", geo)
                 self.diabatic_head = PhysicsTendencyResidualCorrector(
                     in_channels=corrected_channels + geo.shape[1],
@@ -886,6 +890,32 @@ class IAM4VP(nn.Module):
     @staticmethod
     def _rms(x: torch.Tensor) -> torch.Tensor:
         return torch.sqrt(torch.mean(x.float() * x.float()))
+
+    @staticmethod
+    def _gate_static_geo(geo: torch.Tensor, use_geo: bool) -> torch.Tensor:
+        """Zero the geography channels in place of dropping them (ladder arm X2).
+
+        Q_theta is the *only* head that reads static geography, so exp16's headline
+        ("all of the physics gain comes from Q_theta") bundles three things: the
+        t/q channel mask, a free additive source, and a geo embedding. Arm X2
+        isolates the third by withholding geography.
+
+        The withholding must cost no capacity, or the control is confounded by the
+        very thing it is meant to rule out. Zeroing keeps ``diabatic_head``'s input
+        width, and therefore its parameter count, identical to the arm that sees
+        geography: X1 and X2 then differ in *information*, not in size.
+
+        Args:
+            geo: static geography ``(1, 3, H, W)`` from :meth:`_load_static_geo`.
+            use_geo: if False, return an all-zero tensor of the same shape/dtype.
+
+        Returns:
+            ``torch.Tensor`` of shape ``(1, 3, H, W)`` — ``geo`` itself when
+            ``use_geo``, else zeros.
+        """
+        if use_geo:
+            return geo
+        return torch.zeros_like(geo)
 
     @staticmethod
     def _load_static_geo(path, cut, H, W):
