@@ -46,6 +46,13 @@ def test_canonical_arm_strips_exp16_and_exp20_decorations() -> None:
     assert canonical_arm("exp20-p0-no-physics-s0").startswith("exp20-")
 
 
+def test_canonical_arm_strips_exp21_seed_suffix() -> None:
+    # exp21-раны названы через ``-seed0`` (long-волна ещё и ``-t12``), а не ``-s0``.
+    assert canonical_arm("exp21L-s3c-a2-exp13-chained-t12-seed0") == "exp21L-s3c-a2-exp13-chained"
+    assert canonical_arm("exp21-s0-no-physics-seed0") == "exp21-s0-no-physics"
+    assert canonical_arm("exp21L-s0-no-physics-t12-seed0").startswith("exp21L-")
+
+
 def test_canonical_arm_is_idempotent() -> None:
     for name in ("abl16L-r5-exp15-t12-s0", "exp20-p5-exp15-s0"):
         once = canonical_arm(name)

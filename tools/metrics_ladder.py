@@ -73,6 +73,11 @@ plt.rcParams.update({"figure.dpi": 150, "font.size": 9, "axes.edgecolor": MUTED}
 def canonical_arm(name: str) -> str:
     """Каноническое имя арма: ``abl16L-r3-a2-exp13-t12-s0`` → ``r3-a2-exp13``.
 
+    Срезаются два стиля суффикса сида: exp16/exp20 (``-s0``, ``-t12-s0``) и exp21
+    (``-seed0``, ``-t12-seed0``). Префикс ``abl16``/``abl16L`` срезается (там арм
+    самодостаточен); ``exp20``/``exp21`` — нет: он несёт эксперимент, а не арм, и
+    без него ключи разных лестниц столкнулись бы (у всех есть арм «A2 exp13»).
+
     Args:
         name: имя рана (``experiment.name`` из конфига) или основа имени файла.
 
@@ -80,7 +85,9 @@ def canonical_arm(name: str) -> str:
         Ключ арма, которым именуются поля ``paired_deltas.npz`` и подписи фигур.
     """
     stem = name.removeprefix("abl16L-").removeprefix("abl16-")
-    return stem.removesuffix("-t12-s0").removesuffix("-s0")
+    for suffix in ("-t12-s0", "-s0", "-t12-seed0", "-seed0"):
+        stem = stem.removesuffix(suffix)
+    return stem
 
 
 @dataclass(frozen=True)
