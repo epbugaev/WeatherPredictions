@@ -29,7 +29,9 @@ training architecture.
   physics core for PI-models).
 - `train/` — small per-model wrappers for IAM4VP, SimVP and PredRNN.
 - `sh_files/` — Slurm launchers and remote-submit helpers.
-- `docs/` — retained PI-IAM4VP notes and current idea sketches.
+- `docs/` — retained PI-IAM4VP notes and current idea sketches. Start with
+  `docs/architecture.md` (how PI-IAM4VP is wired and where the physics sits),
+  then `docs/equations.md` (what the physics core actually solves).
 
 ## Running Training
 

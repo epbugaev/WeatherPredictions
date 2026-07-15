@@ -533,7 +533,7 @@ class Trainer:
         config: dict[str, Any],
         improved: bool,
     ) -> None:
-        """Save ``last.pt`` and, when ``improved``, ``best.pt`` and a tagged copy.
+        """Save ``last.pt`` and, when ``improved``, ``best.pt``.
 
         Strategy: snapshot the state-dicts on CPU synchronously (~1-3 s
         — this is what blocks rank 0), then offload the actual
@@ -561,19 +561,10 @@ class Trainer:
             config=config,
         )
 
-        last_path = os.path.join(self.cfg.checkpoint_dir, "last.pt")
-        paths: list[str] = [last_path]
-        if improved:
-            paths.append(os.path.join(self.cfg.checkpoint_dir, "best.pt"))
-            paths.append(
-                os.path.join(
-                    self.cfg.checkpoint_dir,
-                    f"epoch={epoch:02d}-val_loss={val_loss:.4f}.pt",
-                )
-            )
+        paths = _checkpoint_paths(self.cfg.checkpoint_dir, improved)
 
-        # All three paths share the same payload (single CPU snapshot),
-        # so the background thread does N torch.save calls in sequence.
+        # Both paths share the same payload (single CPU snapshot), so the
+        # background thread does N torch.save calls in sequence.
         assert self._ckpt_pool is not None
         self._pending_ckpt = self._ckpt_pool.submit(_write_checkpoint_payload, payload, paths)
 
@@ -644,6 +635,27 @@ def _take_checkpoint_snapshot(
     if scaler is not None:
         payload["scaler"] = scaler.state_dict()
     return payload
+
+
+def _checkpoint_paths(checkpoint_dir: str, improved: bool) -> list[str]:
+    """Destinations for one checkpoint write: ``last.pt``, plus ``best.pt`` if improved.
+
+    Per-epoch tagged copies (``epoch=NN-val_loss=X.pt``) are deliberately not
+    written: on long runs they cost one full payload per improvement (~470 MB
+    each, tens of GB per wave) while the training curves already live in Comet.
+    A run's final state is ``last.pt`` and its selected state is ``best.pt``.
+
+    Args:
+        checkpoint_dir: Directory the run writes its checkpoints to.
+        improved: Whether the monitored metric improved this validation epoch.
+
+    Returns:
+        Absolute-or-relative paths to write the same payload to, in order.
+    """
+    paths = [os.path.join(checkpoint_dir, "last.pt")]
+    if improved:
+        paths.append(os.path.join(checkpoint_dir, "best.pt"))
+    return paths
 
 
 def _write_checkpoint_payload(payload: dict[str, Any], paths: list[str]) -> None:
