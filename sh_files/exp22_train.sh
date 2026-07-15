@@ -13,6 +13,11 @@
 #     exp22_simvpv2_a2_npac exp22_simvpv2_legacy_npac" bash sh_files/exp22_train.sh
 set -euo pipefail
 
+# Дефолтный env контракта (weatherpred-gft-fix) сломан (GLIBC_2.28); pi-iamvp несёт
+# весь train-стек (torch 2.6 + comet + Data/Models/strategies). Экспортим, чтобы
+# sbatch пробросил его в джобу (--export=ALL) → _shell_contract активирует его.
+export WEATHERPRED_CONDA_ENV_NAME="${WEATHERPRED_CONDA_ENV_NAME:-pi-iamvp}"
+
 REPO_ROOT="${REPO_ROOT:-${HOME}/wt_exp21}"
 MEMMAP_DIR="${MEMMAP_DIR:-${HOME}/era5_memmap}"
 ACCOUNT="${ACCOUNT:-proj_1715}"
