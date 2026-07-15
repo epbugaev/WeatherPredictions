@@ -87,6 +87,10 @@ class RolloutSpec:
             При ``True`` :func:`render_delta_steps` рисует одну панель (free),
             а не вырожденную пару free/TF. Авторегрессивные лестницы (exp16/exp20)
             оставляют ``False`` — обе панели содержательны.
+        arm_filename_prefix: префикс, срезаемый из ИМЕНИ пер-армовых PNG
+            (``fig_rollout_{heatmap,levels}_<арм>.png``) — чтобы имена были чистыми
+            как у exp16 (``..._r3-a2-exp13.png``). Ключ арма не меняется. Пусто →
+            имя = ключ (exp16/exp20).
     """
 
     baseline: str
@@ -99,6 +103,7 @@ class RolloutSpec:
     run_prefixes: tuple[str, ...]
     run_suffixes: tuple[str, ...]
     single_mode: bool = False
+    arm_filename_prefix: str = ""
 
     def __post_init__(self) -> None:
         assert self.arm_order[0] == self.baseline, (
@@ -757,10 +762,12 @@ def write_rollout_outputs(
     heatmap_arms = [arm for arm in spec.heatmap_arms if arm in runs]
     level_arms = [arm for arm in spec.level_arms if arm in runs]
     for arm in heatmap_arms:
-        render_arm_heatmap(runs, arm, spec, figures_dir / f"fig_rollout_heatmap_{arm}{suffix}.png")
+        slug = arm.removeprefix(spec.arm_filename_prefix)
+        render_arm_heatmap(runs, arm, spec, figures_dir / f"fig_rollout_heatmap_{slug}{suffix}.png")
     for arm in level_arms:
+        slug = arm.removeprefix(spec.arm_filename_prefix)
         render_arm_level_heatmap(
-            runs, arm, spec, figures_dir / f"fig_rollout_levels_{arm}{suffix}.png"
+            runs, arm, spec, figures_dir / f"fig_rollout_levels_{slug}{suffix}.png"
         )
     write_level_step_table(runs, level_arms, spec, rollout_dir / "level_step_table.md")
     index = {arm: {"n_samples": data["n_samples"]} for arm, data in sorted(runs.items())}

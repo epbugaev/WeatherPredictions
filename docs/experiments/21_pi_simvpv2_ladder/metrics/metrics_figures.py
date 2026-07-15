@@ -84,6 +84,9 @@ SPEC = LadderSpec(
     },
     epoch=500,
     table_title="# Метрики exp21 — все армы на общей эпохе 500",
+    # Имена пер-армовых PNG — чистые, как у exp16 (`results/fss3/s3-a2-exp13.png`),
+    # без служебного префикса `exp21L-`. Ключ арма в дельтах при этом не меняется.
+    arm_filename_prefix="exp21L-",
 )
 
 

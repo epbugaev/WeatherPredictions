@@ -104,6 +104,10 @@ class LadderSpec:
         psd_colors: цвет линии на арм для ``fig_psd.png``.
         epoch: общая эпоха чекпоинтов всех армов (подписи фигур).
         table_title: заголовок ``results/metrics_table.md``.
+        arm_filename_prefix: префикс, срезаемый из ИМЕНИ пер-армового PNG
+            (``<метрика>/<арм>.png``), чтобы имена были чистыми как у exp16
+            (``r3-a2-exp13.png``). Ключ арма в npz и подписях не меняется — режется
+            только имя файла. Пусто → имя = ключ (exp16/exp20).
     """
 
     baseline: str
@@ -115,6 +119,7 @@ class LadderSpec:
     psd_colors: dict[str, str]
     epoch: int
     table_title: str
+    arm_filename_prefix: str = ""
 
 
 def load(
@@ -443,7 +448,8 @@ def write_metric_outputs(
         metric_dir = heatmaps_dir / metric
         metric_dir.mkdir(parents=True, exist_ok=True)
         for arm in spec.arm_order:
-            render_arm_metric_heatmap(deltas, arm, metric, spec, metric_dir / f"{arm}.png")
+            slug = arm.removeprefix(spec.arm_filename_prefix)
+            render_arm_metric_heatmap(deltas, arm, metric, spec, metric_dir / f"{slug}.png")
             written += 1
     print(  # noqa: T201
         f"[metrics-figures] {len(summaries)} армов → {2 + len(METRICS)} сводных фигур, "

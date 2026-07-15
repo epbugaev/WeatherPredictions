@@ -89,6 +89,8 @@ SPEC = RolloutSpec(
     run_prefixes=(),  # префикс exp21L несёт эксперимент — не срезаем (иначе ключи столкнутся)
     run_suffixes=("-t12-seed0", "-seed0"),
     single_mode=True,
+    # Имена пер-армовых PNG — чистые, как у exp16 (`fig_rollout_levels_s3-a2-exp13_t12.png`).
+    arm_filename_prefix="exp21L-",
 )
 
 
