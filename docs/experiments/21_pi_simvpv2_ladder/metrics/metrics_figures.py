@@ -11,8 +11,10 @@
   * ``results/metrics_table.md`` — те же числа текстом.
 
 Вся отрисовка общая с exp16/exp20 и живёт в :mod:`tools.metrics_ladder`; здесь — только
-специфика exp21: армы, подписи, эпоха, пути. Порядок и цвета — как на кривых val-RMSE
-(`../make_figures.py`): baseline серый, легаси оранжевый, пара chained (S0c/S3c) яркая.
+специфика exp21: армы, подписи, эпоха, пути. Дельты — из склейки
+``merge_physics_baselines.py``: каждый арм меряется к контролю «без физики» СВОЕЙ
+связки (batched → S0, S3c → S0c), поэтому форест изолирует вклад физики, как у exp16,
+и не тонет в эффекте связки `chained` (см. `SPEC` ниже и §8.5 README).
 
 Запуск (локально):
     python docs/experiments/21_pi_simvpv2_ladder/metrics/metrics_figures.py
@@ -31,36 +33,40 @@ from tools.metrics_ladder import LadderSpec, write_metric_outputs  # noqa: E402
 
 # Ключи — канонические (`tools.metrics_ladder.canonical_arm`): суффикс сида срезан,
 # ``exp21L-s0-no-physics-t12-seed0`` → ``exp21L-s0-no-physics``.
+#
+# ВАЖНО — два контроля «без физики». Дельты берутся из склейки
+# ``merge_physics_baselines.py``: batched-армы меряны к S0, а S3c — к S0c (контролю
+# СВОЕЙ связки). Так форест показывает только вклад физики, как у exp16, и связка
+# `chained` (−14.7 % сама по себе, §8.5) не топит лестницу. Поэтому S0/S0c — контроли,
+# а не армы фореста: в `arm_order`/`level_arms` их нет (как нет R0 у exp16).
 SPEC = LadderSpec(
     baseline="exp21L-s0-no-physics",
-    baseline_label="S0",
+    baseline_label="без физики",
     arm_order=(
         "exp21L-s1-legacy-hybrid",
         "exp21L-s3a-no-diabatic",
         "exp21L-s3-a2-exp13",
         "exp21L-s4-exp14",
         "exp21L-s5-exp15",
-        "exp21L-s0c-no-physics-chained",
         "exp21L-s3c-a2-exp13-chained",
     ),
     labels={
         "exp21L-s0-no-physics": "S0 · без физики",
-        "exp21L-s1-legacy-hybrid": "S1 · легаси-hybrid",
-        "exp21L-s3a-no-diabatic": "S3a · A2 без Q_θ",
-        "exp21L-s3-a2-exp13": "S3 · A2 (exp13)",
-        "exp21L-s4-exp14": "S4 · +exp14",
-        "exp21L-s5-exp15": "S5 · +exp15",
-        "exp21L-s0c-no-physics-chained": "S0c · chained без физики",
-        "exp21L-s3c-a2-exp13-chained": "S3c · A2 chained",
+        "exp21L-s1-legacy-hybrid": "S1 · легаси-hybrid (к S0)",
+        "exp21L-s3a-no-diabatic": "S3a · A2 без Q_θ (к S0)",
+        "exp21L-s3-a2-exp13": "S3 · A2 exp13 (к S0)",
+        "exp21L-s4-exp14": "S4 · +exp14 (к S0)",
+        "exp21L-s5-exp15": "S5 · +exp15 (к S0)",
+        "exp21L-s3c-a2-exp13-chained": "S3c · A2 chained (к S0c)",
     },
-    # Хитмапы [уровень × шаг] — по всем физ-армам и обоим chained-контролям,
-    # чтобы был виден и разброс batched-лестницы, и глубокий выигрыш связки.
+    # Хитмапы [уровень × шаг] — физическая лестница: batched-армы (к S0) и
+    # изолированная физика на chained (S3c к S0c). Легаси и контроли исключены,
+    # как r2..r5 без R1/R0 у exp16.
     level_arms=(
         "exp21L-s3a-no-diabatic",
         "exp21L-s3-a2-exp13",
         "exp21L-s4-exp14",
         "exp21L-s5-exp15",
-        "exp21L-s0c-no-physics-chained",
         "exp21L-s3c-a2-exp13-chained",
     ),
     # PSD: baseline, лучший batched (S3), лучший связочный (S3c), легаси — контраст.

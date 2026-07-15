@@ -42,7 +42,16 @@
   `batched` — ничего (+0.4 %), легаси вредит (+8.9 %). Диабатик Q_θ, несущий в
   exp16, на MIMO не помогает. Чанкование физвызова (`physics_chunk_size: 64`) —
   обход лимита CUDA-грида `reflection_pad1d` (batched подавал B·T=768 → 159744
-  строк при потолке 65535); бит-точно для passthrough-арм.
+  строк при потолке 65535); бит-точно для passthrough-арм. **Полный набор метрик
+  (RMSE/ACC/mCSI/FSS/W1/bias/дисперсия, парный бутстрап, эпоха 500)** — тот же
+  харнесс, что exp16/exp20 (`sh_files/exp21_metrics_eval.sh`, `metrics/metrics_eval.py`,
+  фигуры `metrics/metrics_figures.py`). Отличие: у SimVPv2 контроль «без физики»
+  ДВА (`S0` batched, `S0c` chained), поэтому физика изолируется сравнением каждого
+  арма с контролем СВОЕЙ связки (batched→S0, S3c→S0c) — два прогона `paired_deltas.py`
+  склеивает `metrics/merge_physics_baselines.py`. Изолированный вклад физики на
+  chained: RMSE −5.9 %, значим и по-уровнево (t/u/v); на batched — ноль по всем
+  скилл-метрикам; легаси хуже везде (+17.5 % RMSE). Контракт склейки —
+  `tests/test_exp20_metrics.py`.
 - **Модель-агностичный v4-лончер** — `sh_files/train_v4_memmap.sh`: модель берётся
   из `model.type` конфига, конфиг — позиционный аргумент. `train_pi_predrnnv2.sh`
   (exp20) имеет идентичное тело и должен быть выведен из обращения в его пользу.

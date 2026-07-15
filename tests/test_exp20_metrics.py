@@ -20,9 +20,13 @@ from tools.metrics_ladder import METRICS, LadderSpec, canonical_arm
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXP16_FIGURES = REPO_ROOT / "docs/experiments/16_model_ablation_ladder/metrics/metrics_figures.py"
 EXP20_FIGURES = REPO_ROOT / "docs/experiments/20_pi_predrnnv2_ladder/metrics/metrics_figures.py"
+EXP21_FIGURES = REPO_ROOT / "docs/experiments/21_pi_simvpv2_ladder/metrics/metrics_figures.py"
 EXP20_CONFIGS = REPO_ROOT / "configs/exp20"
 EXP16_DELTAS = (
     REPO_ROOT / "docs/experiments/16_model_ablation_ladder/metrics/results/paired_deltas.npz"
+)
+EXP21_DELTAS = (
+    REPO_ROOT / "docs/experiments/21_pi_simvpv2_ladder/metrics/results/paired_deltas.npz"
 )
 
 
@@ -87,3 +91,24 @@ def test_exp16_spec_keys_match_the_committed_paired_deltas() -> None:
             assert f"{arm}__{metric}__ci_low" in deltas.files
             assert f"{arm}__{metric}__ci_high" in deltas.files
     assert str(deltas["baseline"]) == spec.baseline
+
+
+def test_exp21_spec_keys_match_the_merged_paired_deltas() -> None:
+    """Регрессия на exp21: склейка двух контролей должна содержать каждый арм SPEC.
+
+    Форест exp21 мерит физику к контролю СВОЕЙ связки (batched→S0, S3c→S0c), поэтому
+    `paired_deltas.npz` — результат `merge_physics_baselines.py`. Контроли S0/S0c в
+    `arm_order` не входят (как R0 у exp16), а S3c обязан присутствовать (взят из vs-S0c).
+    """
+    spec = _spec(EXP21_FIGURES)
+    deltas = np.load(EXP21_DELTAS, allow_pickle=False)
+    for arm in spec.arm_order:
+        for metric in METRICS:
+            assert f"{arm}__{metric}__delta" in deltas.files
+            assert f"{arm}__{metric}__ci_low" in deltas.files
+            assert f"{arm}__{metric}__ci_high" in deltas.files
+    assert "exp21L-s3c-a2-exp13-chained__rmse__delta" in deltas.files
+    assert not any(field.startswith("exp21L-s0c") for field in deltas.files)
+    assert set(spec.level_arms) <= set(spec.arm_order)
+    assert set(spec.labels) >= {spec.baseline, *spec.arm_order}
+    assert set(spec.psd_colors) == set(spec.psd_arms)

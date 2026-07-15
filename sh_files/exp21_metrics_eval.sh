@@ -81,9 +81,19 @@ done
 
 # Парные дельты: один набор бутстрап-индексов на все армы (они прогнаны по ОДНИМ И ТЕМ
 # ЖЕ сэмплам, поэтому независимые CI переоценили бы неопределённость разницы).
-python "${EXP16_METRICS}/paired_deltas.py" \
-  --per-sample-dir "${RAW_DIR}" \
-  --baseline "${BASELINE}" \
-  --out "${OUT_DIR}/paired_deltas.npz"
+#
+# У SimVPv2 контроль «без физики» ДВА (§8.5): S0 = batched, S0c = chained. Связка
+# `chained` двигает скилл на порядок сильнее физики, поэтому меряем физику к контролю
+# СВОЕЙ связки — считаем дельты дважды (оба прогона seed 0 на 727 сэмплах → одни и те же
+# бутстрап-индексы, парность сохраняется). Локально их склеивает merge_physics_baselines.py
+# (batched-армы из vs-s0, S3c из vs-s0c) в paired_deltas.npz, который читают фигуры.
+for base in "${BASELINE}" "exp21L-s0c-no-physics-chained"; do
+  tag="${base##*exp21L-}"; tag="${tag%%-no-physics*}"; tag="${tag%%-*}"
+  python "${EXP16_METRICS}/paired_deltas.py" \
+    --per-sample-dir "${RAW_DIR}" \
+    --baseline "${base}" \
+    --out "${OUT_DIR}/paired_deltas_vs_${tag}.npz"
+done
 
-echo "[exp21-metrics] all arms done -> ${OUT_DIR} (сводки + paired_deltas.npz), ${RAW_DIR} (по-сэмпльно)"
+echo "[exp21-metrics] all arms done -> ${OUT_DIR} (сводки + paired_deltas_vs_{s0,s0c}.npz), ${RAW_DIR} (по-сэмпльно)"
+echo "[exp21-metrics] локально: merge_physics_baselines.py --vs-s0 ... --vs-s0c ... --out paired_deltas.npz, затем metrics_figures.py"
