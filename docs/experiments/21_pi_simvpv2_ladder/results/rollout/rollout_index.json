@@ -1,0 +1,26 @@
+{
+  "exp21L-s0-no-physics": {
+    "n_samples": 727
+  },
+  "exp21L-s0c-no-physics-chained": {
+    "n_samples": 727
+  },
+  "exp21L-s1-legacy-hybrid": {
+    "n_samples": 727
+  },
+  "exp21L-s3-a2-exp13": {
+    "n_samples": 727
+  },
+  "exp21L-s3a-no-diabatic": {
+    "n_samples": 727
+  },
+  "exp21L-s3c-a2-exp13-chained": {
+    "n_samples": 727
+  },
+  "exp21L-s4-exp14": {
+    "n_samples": 727
+  },
+  "exp21L-s5-exp15": {
+    "n_samples": 727
+  }
+}

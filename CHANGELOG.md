@@ -51,7 +51,16 @@
   склеивает `metrics/merge_physics_baselines.py`. Изолированный вклад физики на
   chained: RMSE −5.9 %, значим и по-уровнево (t/u/v); на batched — ноль по всем
   скилл-метрикам; легаси хуже везде (+17.5 % RMSE). Контракт склейки —
-  `tests/test_exp20_metrics.py`.
+  `tests/test_exp20_metrics.py`. **Rollout-диагностика (эпоха 500)** — тот же
+  формат exp16/exp20 (общий core `tools/rollout_ladder.py`, вынесенный на этой
+  ветке; `rollout_eval.py` MIMO-форвардом, `rollout_figures.py`-обёртка). У MIMO
+  free-running ≡ teacher-forced (нет подачи промежуточных кадров), поэтому новый
+  `RolloutSpec.single_mode` рисует одну панель delta_steps вместо вырожденной пары.
+  Rollout вскрывает лид-таймовый размен, скрытый в усреднённом форесте: связка
+  `chained` на шаге 1 ХУЖE S0 (+20 %), но с шага 2 глубоко лучше (−30 %), к шагу
+  12 −6 %; физика на chained (S3c) срезает штраф первого шага втрое (+6.7 vs
+  +20.3 %) и углубляет длинный лид. Имена пер-армовых PNG приведены к стилю exp16
+  (без префикса `exp21L-`) через `arm_filename_prefix` в Ladder/RolloutSpec.
 - **Модель-агностичный v4-лончер** — `sh_files/train_v4_memmap.sh`: модель берётся
   из `model.type` конфига, конфиг — позиционный аргумент. `train_pi_predrnnv2.sh`
   (exp20) имеет идентичное тело и должен быть выведен из обращения в его пользу.
