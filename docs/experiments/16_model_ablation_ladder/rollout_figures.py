@@ -1,610 +1,127 @@
 """Фигуры 12-шагового rollout exp16 из npz-файлов ``rollout_eval.py``.
 
-Вход: ``results/rollout/rollout_<arm>.npz`` (rmse_free/rmse_forced (12, 69),
-channels, n_samples). Выход — три фигуры в стиле инференс-диагностики
-предыдущего поколения абляции:
+Вход: ``results/rollout*/rollout_<arm>.npz`` (rmse_free/rmse_forced (12, 69),
+channels, n_samples). Выход — фигуры в стиле инференс-диагностики предыдущего
+поколения абляции: ``fig_rollout_ratio_r0.png``, ``fig_rollout_delta_steps.png``,
+``fig_rollout_heatmap.png`` плюс пер-армовые ``fig_rollout_heatmap_<arm>.png`` и
+``fig_rollout_levels_<arm>.png``.
 
-  * ``fig_rollout_ratio_r0.png`` — RMSE арма относительно R0 (÷R0, среднее по 13
-    уровням) по шагам 1..12, панель на переменную, линия на арм (R0 = 1.0);
-  * ``fig_rollout_delta_steps.png`` — средняя по всем 69 каналам Δ% к R0 по
-    шагам, free-running vs teacher-forced;
-  * ``fig_rollout_heatmap.png`` — Δ% к R0 (free-running) по
-    [уровень давления × шаг × арм], панель на переменную.
+Вся отрисовка общая с экспериментом 20 и живёт в :mod:`tools.rollout_ladder`;
+здесь — только специфика exp16: имена армов, подписи, цвета (Okabe-Ito), правило
+канонизации имён ранов (волны t=6 ``abl16-`` и t=12 ``abl16L-``) и пути.
 
-Оформление зеркалит make_figures.py: Okabe-Ito, врезка-пояснение.
+Функции ниже — тонкие обёртки, фиксирующие арм-константы exp16 в общих функциях
+ядра. Именно их (с этими сигнатурами) пинит ``tests/test_exp16_rollout.py``.
 """
 
-import json
+import sys
 from argparse import ArgumentParser
 from pathlib import Path
 
-import matplotlib
 import numpy as np
 
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parents[2]))
+
+from tools.rollout_ladder import (  # noqa: E402
+    RolloutSpec,
+    delta_percent,
+    epoch_label,
+    level_matrix,
+    mean_delta_over_channels,
+    write_rollout_outputs,
+)
+from tools.rollout_ladder import level_step_delta as _level_step_delta  # noqa: E402
+from tools.rollout_ladder import window_boundary as _window_boundary  # noqa: E402
+
+__all__ = [
+    "canonical_arm",
+    "delta_percent",
+    "epoch_label",
+    "level_matrix",
+    "level_step_delta",
+    "main",
+    "mean_delta_over_channels",
+    "window_boundary",
+]
+
 ROLLOUT_DIR = HERE / "results" / "rollout"
 
 # Реестр канонический: ключ независим от волны (t=6 ``abl16-<arm>-s0`` и
 # t=12 ``abl16L-<arm>-t12-s0`` сводятся к одному стему ``canonical_arm``).
-ARM_ORDER = (
-    "r0-no-physics",
-    "r1-legacy-hybrid",
-    "r2a-a1-pre13",
-    "r2-a2-pre13",
-    "r3-a2-exp13",
-    "r4-exp14",
-    "r5-exp15",
-    "r3a-no-diabatic",
-    "r3q-diabatic-t-only",
+SPEC = RolloutSpec(
+    baseline="r0-no-physics",
+    baseline_label="R0",
+    arm_order=(
+        "r0-no-physics",
+        "r1-legacy-hybrid",
+        "r2a-a1-pre13",
+        "r2-a2-pre13",
+        "r3-a2-exp13",
+        "r4-exp14",
+        "r5-exp15",
+        "r3a-no-diabatic",
+        "r3q-diabatic-t-only",
+    ),
+    labels={
+        "r0-no-physics": "R0 · без физики",
+        "r1-legacy-hybrid": "R1 · легаси-hybrid",
+        "r2a-a1-pre13": "R2a · A1 (до exp13)",
+        "r2-a2-pre13": "R2 · A2 (до exp13)",
+        "r3-a2-exp13": "R3 · A2 (exp13)",
+        "r4-exp14": "R4 · +exp14",
+        "r5-exp15": "R5 · +exp15",
+        "r3a-no-diabatic": "R3a · R3 без Q_θ",
+        "r3q-diabatic-t-only": "R3q · Q_θ только t",
+    },
+    colors={
+        "r0-no-physics": "#8a8a8a",
+        "r1-legacy-hybrid": "#E69F00",
+        "r2a-a1-pre13": "#56B4E9",
+        "r2-a2-pre13": "#009E73",
+        "r3-a2-exp13": "#0072B2",
+        "r4-exp14": "#D55E00",
+        "r5-exp15": "#CC79A7",
+        "r3a-no-diabatic": "#000000",
+        "r3q-diabatic-t-only": "#AA4499",
+    },
+    # армы лестницы в общем хитмапе (без R0): отдельная фигура на каждый
+    heatmap_arms=(
+        "r1-legacy-hybrid",
+        "r2a-a1-pre13",
+        "r2-a2-pre13",
+        "r3-a2-exp13",
+        "r4-exp14",
+        "r5-exp15",
+    ),
+    # армы с исправленными уравнениями: markdown-таблица по уровням + аннотированный хитмап
+    level_arms=("r2-a2-pre13", "r3-a2-exp13", "r4-exp14", "r5-exp15"),
+    run_prefixes=("abl16L-", "abl16-"),
+    run_suffixes=("-t12-s0", "-s0"),
 )
-ARM_LABELS = {
-    "r0-no-physics": "R0 · без физики",
-    "r1-legacy-hybrid": "R1 · легаси-hybrid",
-    "r2a-a1-pre13": "R2a · A1 (до exp13)",
-    "r2-a2-pre13": "R2 · A2 (до exp13)",
-    "r3-a2-exp13": "R3 · A2 (exp13)",
-    "r4-exp14": "R4 · +exp14",
-    "r5-exp15": "R5 · +exp15",
-    "r3a-no-diabatic": "R3a · R3 без Q_θ",
-    "r3q-diabatic-t-only": "R3q · Q_θ только t",
-}
-ARM_COLORS = {
-    "r0-no-physics": "#8a8a8a",
-    "r1-legacy-hybrid": "#E69F00",
-    "r2a-a1-pre13": "#56B4E9",
-    "r2-a2-pre13": "#009E73",
-    "r3-a2-exp13": "#0072B2",
-    "r4-exp14": "#D55E00",
-    "r5-exp15": "#CC79A7",
-    "r3a-no-diabatic": "#000000",
-    "r3q-diabatic-t-only": "#AA4499",
-}
-BASELINE = ARM_ORDER[0]
 
 
 def canonical_arm(name: str) -> str:
-    """Свести имя рана к волно-независимому стему (``abl16L-r0-…-t12-s0`` → ``r0-no-physics``).
+    """Свести имя рана exp16 к волно-независимому стему (``abl16L-r0-…-t12-s0`` → ``r0-no-physics``).
 
     Args:
         name: имя эксперимента из npz (t=6 ``abl16-<arm>-s0`` или t=12
             ``abl16L-<arm>-t12-s0``).
 
     Returns:
-        Канонический ключ арма (совпадает с ключами ``ARM_ORDER``).
+        Канонический ключ арма (совпадает с ключами ``SPEC.arm_order``).
     """
-    stem = name
-    for prefix in ("abl16L-", "abl16-"):
-        if stem.startswith(prefix):
-            stem = stem[len(prefix) :]
-            break
-    for suffix in ("-t12-s0", "-s0"):
-        if stem.endswith(suffix):
-            stem = stem[: -len(suffix)]
-            break
-    return stem
-
-
-UPPER_VARS = ("z", "t", "r", "u", "v")
-VAR_UNITS = {"z": "м²/с²", "t": "K", "r": "%", "u": "м/с", "v": "м/с"}
-# Армы лестницы в общем хитмапе (без R0): отдельная фигура на каждый.
-LADDER_ARMS = (
-    "r1-legacy-hybrid",
-    "r2a-a1-pre13",
-    "r2-a2-pre13",
-    "r3-a2-exp13",
-    "r4-exp14",
-    "r5-exp15",
-)
-# Армы с исправленными уравнениями: markdown-таблица по уровням + аннотированный хитмап.
-EQUATION_ARMS = ("r2-a2-pre13", "r3-a2-exp13", "r4-exp14", "r5-exp15")
-TABLE_STEPS = (1, 6, 12)  # шаги прогноза (1-индексация) в markdown-таблице по уровням
-INK, MUTED = "#1a1a1a", "#8a8a8a"
-CAPTION_BG = "#f4f4f2"
-
-plt.rcParams.update(
-    {
-        "figure.dpi": 150,
-        "font.size": 9,
-        "axes.edgecolor": MUTED,
-        "axes.labelcolor": INK,
-        "text.color": INK,
-        "axes.grid": True,
-        "grid.color": "#e3e3e0",
-        "grid.linewidth": 0.6,
-    }
-)
-
-
-def delta_percent(arm_rmse: np.ndarray, base_rmse: np.ndarray) -> np.ndarray:
-    """Поэлементная Δ% RMSE арма к baseline (− = арм лучше).
-
-    Args:
-        arm_rmse: RMSE арма, форма ``(steps, C)``.
-        base_rmse: RMSE baseline той же формы.
-
-    Returns:
-        ``(steps, C)`` в процентах.
-    """
-    return 100.0 * (arm_rmse - base_rmse) / base_rmse
-
-
-def level_matrix(
-    rmse: np.ndarray, channels: list[str], base_var: str
-) -> tuple[np.ndarray, list[int]]:
-    """Срез по-уровневых каналов переменной → матрица [уровень × шаг].
-
-    Args:
-        rmse: ``(steps, C)`` — RMSE или Δ%.
-        channels: имена C каналов (``z500``, ``t2``, ...).
-        base_var: базовая переменная (``z``/``t``/``r``/``u``/``v``);
-            поверхностные каналы (``t2``, ``u10``...) не включаются.
-
-    Returns:
-        ``(матрица (levels, steps), уровни по возрастанию гПа)``.
-    """
-    pairs = []
-    for idx, name in enumerate(channels):
-        prefix = name.rstrip("0123456789")
-        if prefix != base_var or name == base_var:
-            continue
-        level = int(name[len(prefix) :])
-        # поверхностные t2/u10/v10 маскируются под уровневые: их «уровень»
-        # не входит в сетку давления 50..1000 из 13 значений ≥ 50
-        if level < 50:
-            continue
-        pairs.append((level, idx))
-    pairs.sort()
-    levels = [level for level, _ in pairs]
-    matrix = np.stack([rmse[:, idx] for _, idx in pairs], axis=0)
-    return matrix, levels
-
-
-def mean_delta_over_channels(delta: np.ndarray) -> np.ndarray:
-    """Средняя по каналам Δ% на каждом шаге: ``(steps, C)`` → ``(steps,)``."""
-    return delta.mean(axis=1)
-
-
-def load_runs(rollout_dir: Path) -> dict[str, dict]:
-    """Прочитать все rollout_<arm>.npz в ``{canonical_arm: {rmse_free, ...}}``.
-
-    Ключ — канонический (волно-независимый). ``native_horizon`` (граница окон)
-    и ``checkpoint_epoch`` берутся из npz; для старых t=6-файлов без
-    ``native_horizon`` он выводится как половина числа шагов (двухоконный режим).
-    """
-    runs: dict[str, dict] = {}
-    for path in sorted(rollout_dir.glob("rollout_*.npz")):
-        data = np.load(path, allow_pickle=False)
-        n_steps = int(data["rmse_free"].shape[0])
-        runs[canonical_arm(str(data["arm"]))] = {
-            "rmse_free": data["rmse_free"],
-            "rmse_forced": data["rmse_forced"],
-            "channels": [str(name) for name in data["channels"]],
-            "n_samples": int(data["n_samples"]),
-            "native_horizon": int(data["native_horizon"])
-            if "native_horizon" in data
-            else n_steps // 2,
-            "checkpoint_epoch": int(data["checkpoint_epoch"]) if "checkpoint_epoch" in data else -1,
-        }
-    return runs
+    return SPEC.canonical(name)
 
 
 def window_boundary(runs: dict[str, dict]) -> int | None:
-    """Шаг границы окон (для пунктира) или ``None``, если прогноз одним окном.
-
-    Граница = нативный горизонт, если он меньше полного числа шагов (t=6 → 6);
-    для нативного одноконного прогноза (t=12 → 12 шагов из 12) границы нет.
-    """
-    base = runs[BASELINE]
-    n_steps = base["rmse_free"].shape[0]
-    horizon = base["native_horizon"]
-    return horizon if 0 < horizon < n_steps else None
-
-
-def epoch_label(runs: dict[str, dict]) -> str:
-    """Подпись чекпоинтов для заголовков.
-
-    Волна с общего тега эпохи → ``эпоха N``. При отборе по валидации (``best.pt``)
-    эпохи армов разные, и подпись обязана показать диапазон: эпоха одного baseline
-    соврала бы про остальные армы.
-    """
-    epochs = sorted(
-        {run["checkpoint_epoch"] + 1 for run in runs.values() if run["checkpoint_epoch"] >= 0}
-    )
-    if not epochs:
-        return "эпоха ?"
-    if len(epochs) == 1:
-        return f"эпоха {epochs[0]}"
-    return f"лучший val, эпохи {epochs[0]}–{epochs[-1]}"
-
-
-def add_caption(fig, text: str, y: float = -0.02) -> None:
-    """Врезка-пояснение под фигурой (попадает в PNG через bbox_inches='tight')."""
-    fig.text(
-        0.5,
-        y,
-        text,
-        ha="center",
-        va="top",
-        ma="left",
-        fontsize=8,
-        color=INK,
-        bbox={"boxstyle": "round,pad=0.6", "facecolor": CAPTION_BG, "edgecolor": "#d5d5d2"},
-    )
-
-
-def render_ratio_r0(runs: dict[str, dict], dst: Path) -> None:
-    """Панель на переменную: RMSE арма относительно R0 (÷R0) по шагам rollout.
-
-    Абсолютный RMSE в t/r/u/v почти не различает армы (спред 1–2 % тонет в росте
-    ошибки с лидом), поэтому нормируем на арм без физики: ``RMSE_arm / RMSE_R0``.
-    R0 — линия 1.0; автомасштаб отношения магнифицирует вклад каждого арма.
-    """
-    if BASELINE not in runs:
-        return
-    arms = [arm for arm in ARM_ORDER if arm in runs]
-    n_steps = runs[BASELINE]["rmse_free"].shape[0]
-    boundary = window_boundary(runs)
-    epoch = epoch_label(runs)
-    fig, axes = plt.subplots(1, len(UPPER_VARS), figsize=(3.6 * len(UPPER_VARS), 3.2))
-    steps = np.arange(1, n_steps + 1)
-    base = {
-        var: level_matrix(runs[BASELINE]["rmse_free"], runs[BASELINE]["channels"], var)[0].mean(
-            axis=0
-        )
-        for var in UPPER_VARS
-    }
-    for ax, var in zip(axes, UPPER_VARS, strict=True):
-        for arm in arms:
-            matrix, _ = level_matrix(runs[arm]["rmse_free"], runs[arm]["channels"], var)
-            ax.plot(
-                steps,
-                matrix.mean(axis=0) / base[var],
-                color=ARM_COLORS[arm],
-                lw=1.7,
-                marker="o",
-                ms=3,
-                label=ARM_LABELS[arm],
-            )
-        ax.axhline(1.0, color=MUTED, lw=0.9, ls="--")
-        if boundary is not None:
-            ax.axvline(boundary + 0.5, color=MUTED, lw=0.9, ls=":")
-        ax.set_title(f"{var} [{VAR_UNITS[var]}]", fontsize=10)
-        ax.set_xlabel("шаг прогноза t+N")
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        ax.grid(True, axis="y", alpha=0.25)
-    axes[0].set_ylabel("RMSE / RMSE(R0)   (÷R0; <1 — лучше R0)")
-    fig.suptitle(
-        f"Вклад физики к R0 (÷R0) по шагам {n_steps}-шагового free-running rollout "
-        f"(полная вал-2004, сид 0, {epoch})",
-        fontsize=12,
-        y=1.12,
-    )
-    handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(
-        handles,
-        labels,
-        frameon=False,
-        fontsize=8,
-        loc="upper center",
-        bbox_to_anchor=(0.5, 1.05),
-        ncol=len(arms),
-    )
-    fig.tight_layout(rect=(0, 0, 1, 0.93))
-    window_note = (
-        f"шаги {boundary + 1}–{n_steps} — второе окно (вход = собственные прогнозы, пунктир —\n"
-        f"граница окон {boundary}→{boundary})"
-        if boundary is not None
-        else f"весь прогноз — одно нативное окно из {n_steps} шагов"
-    )
-    add_caption(
-        fig,
-        "Что показано: RMSE каждого арма, делённый на RMSE R0 (÷R0, среднее по 13 уровням),\n"
-        f"по шагам free-running rollout; {window_note}. Пунктир 1.0 = R0. Ниже — лучше R0.",
-    )
-    fig.savefig(dst, bbox_inches="tight")
-    plt.close(fig)
-
-
-def render_delta_steps(runs: dict[str, dict], dst: Path) -> None:
-    """Два режима rollout: средняя по 69 каналам Δ% к R0 по шагам."""
-    arms = [arm for arm in ARM_ORDER if arm in runs and arm != BASELINE]
-    base = runs[BASELINE]
-    n_steps = base["rmse_free"].shape[0]
-    boundary = window_boundary(runs)
-    epoch = epoch_label(runs)
-    fig, axes = plt.subplots(1, 2, figsize=(11.2, 3.8), sharey=True)
-    steps = np.arange(1, n_steps + 1)
-    win = "окно 2" if boundary is not None else "нативно"
-    modes = (
-        ("rmse_free", f"Free-running ({win}: собственные прогнозы)"),
-        ("rmse_forced", f"Teacher-forced ({win}: реальные кадры)"),
-    )
-    for ax, (key, title) in zip(axes, modes, strict=True):
-        for arm in arms:
-            delta = delta_percent(runs[arm][key], base[key])
-            ax.plot(
-                steps,
-                mean_delta_over_channels(delta),
-                color=ARM_COLORS[arm],
-                lw=1.7,
-                marker="o",
-                ms=3,
-                label=ARM_LABELS[arm],
-            )
-        ax.axhline(0.0, color=INK, lw=0.9, ls="--")
-        if boundary is not None:
-            ax.axvline(boundary + 0.5, color=MUTED, lw=0.9, ls=":")
-        ax.set_title(title, fontsize=10)
-        ax.set_xlabel("шаг прогноза t+N")
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-    axes[0].set_ylabel("средняя Δ% RMSE к R0 (69 каналов)")
-    mode_word = "скользящим окном" if boundary is not None else "нативным окном"
-    fig.suptitle(
-        f"{n_steps}-шаговый rollout {mode_word}: Δ% к R0 «без физики» (вал-2004, {epoch})",
-        fontsize=12,
-        y=1.14,
-    )
-    handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(
-        handles,
-        labels,
-        frameon=False,
-        fontsize=8,
-        loc="upper center",
-        bbox_to_anchor=(0.5, 1.06),
-        ncol=(len(arms) + 1) // 2,
-    )
-    fig.tight_layout(rect=(0, 0, 1, 0.92))
-    tf_note = (
-        "teacher-forced изолирует по-оконную ошибку от накопления дрейфа (шаги 1–"
-        f"{boundary} совпадают)."
-        if boundary is not None
-        else "teacher-forced подаёт в историю реальные кадры → изолирует дрейф (шаг 1 совпадает)."
-    )
-    add_caption(
-        fig,
-        "Что показано: Δ% lat-weighted RMSE к R0, усреднённая по всем 69 каналам, на каждом шаге\n"
-        f"rollout. Ниже нуля — арм лучше R0. Free-running — реальный {n_steps}-шаговый прогноз;\n"
-        f"{tf_note}",
-    )
-    fig.savefig(dst, bbox_inches="tight")
-    plt.close(fig)
-
-
-def render_heatmap(runs: dict[str, dict], dst: Path, clip: float = 12.0) -> None:
-    """Δ% к R0 (free-running): [уровень × (арм × шаг)] панель на переменную."""
-    arms = [arm for arm in ARM_ORDER if arm in runs and arm != BASELINE]
-    base = runs[BASELINE]
-    n_steps = base["rmse_free"].shape[0]
-    boundary = window_boundary(runs)
-    epoch = epoch_label(runs)
-    mid = boundary - 1 if boundary is not None else n_steps // 2 - 1
-    tick_offsets = sorted({0, mid, n_steps - 1})
-    tick_labels = [str(off + 1) for off in tick_offsets]
-    fig, axes = plt.subplots(1, len(UPPER_VARS), figsize=(3.4 * len(UPPER_VARS), 4.2), sharey=True)
-    image = None
-    for ax, var in zip(axes, UPPER_VARS, strict=True):
-        base_matrix, levels = level_matrix(base["rmse_free"], base["channels"], var)
-        blocks = []
-        for arm in arms:
-            arm_matrix, _ = level_matrix(runs[arm]["rmse_free"], runs[arm]["channels"], var)
-            blocks.append(100.0 * (arm_matrix - base_matrix) / base_matrix)
-        stacked = np.concatenate(blocks, axis=1)  # (levels, arms*steps)
-        image = ax.imshow(
-            stacked,
-            cmap="RdBu_r",
-            vmin=-clip,
-            vmax=clip,
-            aspect="auto",
-            interpolation="nearest",
-        )
-        for arm_idx in range(1, len(arms)):
-            ax.axvline(arm_idx * n_steps - 0.5, color=INK, lw=1.2)
-        if boundary is not None:
-            for arm_idx in range(len(arms)):
-                ax.axvline(arm_idx * n_steps + boundary - 0.5, color=MUTED, lw=0.7, ls=":")
-        ax.set_title(f"{var}", fontsize=10)
-        ax.set_xticks(
-            [arm_idx * n_steps + off for arm_idx in range(len(arms)) for off in tick_offsets],
-            tick_labels * len(arms),
-            fontsize=6,
-        )
-        ax.set_xlabel("шаг (блок = арм)")
-        ax.grid(False)
-    axes[0].set_yticks(range(len(levels)), [str(level) for level in levels], fontsize=7)
-    axes[0].set_ylabel("уровень давления, гПа")
-    fig.suptitle(
-        f"Δ% RMSE к R0 по уровням и шагам free-running rollout (вал-2004, {epoch}): "
-        "синее = лучше R0, красное = хуже",
-        fontsize=12,
-        y=1.06,
-    )
-    handles = [
-        plt.Line2D([0], [0], color=ARM_COLORS[arm], lw=4, label=ARM_LABELS[arm]) for arm in arms
-    ]
-    fig.legend(
-        handles=handles,
-        frameon=False,
-        fontsize=8,
-        loc="upper center",
-        bbox_to_anchor=(0.5, 1.0),
-        ncol=(len(arms) + 1) // 2,
-    )
-    colorbar = fig.colorbar(image, ax=axes, fraction=0.012, pad=0.01)
-    colorbar.set_label("Δ% RMSE к R0")
-    block_note = (
-        f"в блоке {n_steps} шагов free-running (пунктир — граница окон {boundary}→{boundary})"
-        if boundary is not None
-        else f"в блоке {n_steps} шагов нативного free-running прогноза"
-    )
-    add_caption(
-        fig,
-        "Что показано: Δ% lat-weighted RMSE к R0 на каждом [уровень давления × шаг rollout];\n"
-        f"внутри панели блоки слева направо — армы лестницы (порядок легенды), {block_note}.\n"
-        f"Синее — арм лучше R0 (шкала ±{clip:.0f} %).",
-        y=-0.06,
-    )
-    fig.savefig(dst, bbox_inches="tight")
-    plt.close(fig)
+    """Шаг границы окон exp16 (или ``None``, если прогноз одним нативным окном)."""
+    return _window_boundary(runs, SPEC.baseline)
 
 
 def level_step_delta(runs: dict[str, dict], arm: str, var: str) -> tuple[np.ndarray, list[int]]:
-    """Δ% RMSE арма к R0 (free-running) на сетке [уровень давления × шаг].
-
-    Args:
-        runs: словарь прогонов из ``load_runs``.
-        arm: канонический ключ арма.
-        var: переменная из ``UPPER_VARS``.
-
-    Returns:
-        ``(delta (13, steps), levels)`` — Δ% (<0 — арм лучше R0) и уровни в гПа
-        по возрастанию (порядок строк).
-    """
-    arm_matrix, levels = level_matrix(runs[arm]["rmse_free"], runs[arm]["channels"], var)
-    base_matrix, _ = level_matrix(runs[BASELINE]["rmse_free"], runs[BASELINE]["channels"], var)
-    return delta_percent(arm_matrix, base_matrix), levels
-
-
-def render_arm_heatmap(runs: dict[str, dict], arm: str, dst: Path, clip: float = 12.0) -> None:
-    """Один арм в стиле ``render_heatmap``: Δ% к R0, [уровень × шаг], без подписей в ячейках."""
-    n_steps = runs[arm]["rmse_free"].shape[0]
-    boundary = window_boundary(runs)
-    epoch = epoch_label(runs)
-    mid = boundary - 1 if boundary is not None else n_steps // 2 - 1
-    tick_offsets = sorted({0, mid, n_steps - 1})
-    tick_labels = [str(off + 1) for off in tick_offsets]
-    fig, axes = plt.subplots(1, len(UPPER_VARS), figsize=(3.4 * len(UPPER_VARS), 4.2), sharey=True)
-    image = None
-    for ax, var in zip(axes, UPPER_VARS, strict=True):
-        delta, levels = level_step_delta(runs, arm, var)
-        image = ax.imshow(
-            delta, cmap="RdBu_r", vmin=-clip, vmax=clip, aspect="auto", interpolation="nearest"
-        )
-        if boundary is not None:
-            ax.axvline(boundary - 0.5, color=MUTED, lw=0.7, ls=":")
-        ax.set_title(f"{var}", fontsize=10)
-        ax.set_xticks(tick_offsets, tick_labels, fontsize=6)
-        ax.set_xlabel("шаг прогноза")
-        ax.grid(False)
-    axes[0].set_yticks(range(len(levels)), [str(level) for level in levels], fontsize=7)
-    axes[0].set_ylabel("уровень давления, гПа")
-    fig.suptitle(
-        f"{ARM_LABELS[arm]}: Δ% RMSE к R0 по уровням и шагам free-running rollout "
-        f"(вал-2004, {epoch}); синее = лучше R0",
-        fontsize=12,
-        y=1.06,
-    )
-    colorbar = fig.colorbar(image, ax=axes, fraction=0.012, pad=0.01)
-    colorbar.set_label("Δ% RMSE к R0")
-    window_note = (
-        f"пунктир — граница окон {boundary}→{boundary}"
-        if boundary is not None
-        else f"нативный {n_steps}-шаговый прогноз"
-    )
-    add_caption(
-        fig,
-        "Что показано: Δ% lat-weighted RMSE к R0 на каждом [уровень давления × шаг rollout];\n"
-        f"{window_note}. Синее — арм лучше R0 (шкала ±{clip:.0f} %).",
-        y=-0.06,
-    )
-    fig.savefig(dst, bbox_inches="tight")
-    plt.close(fig)
-
-
-def render_arm_level_heatmap(
-    runs: dict[str, dict], arm: str, dst: Path, clip: float = 12.0
-) -> None:
-    """Хитмап одного арма: Δ% к R0 по [уровень × шаг], панель на переменную.
-
-    В отличие от ``render_heatmap`` (все армы в одной панели блоками) — фигура на
-    один арм, с числами в ячейках. Подпись несёт эпохи чекпоинтов: сравнение
-    честно, только если эпоха арма совпадает с эпохой R0.
-    """
-    n_steps = runs[arm]["rmse_free"].shape[0]
-    arm_epoch, base_epoch = (
-        runs[arm]["checkpoint_epoch"] + 1,
-        runs[BASELINE]["checkpoint_epoch"] + 1,
-    )
-    fig, axes = plt.subplots(1, len(UPPER_VARS), figsize=(4.0 * len(UPPER_VARS), 4.4), sharey=True)
-    image = None
-    for ax, var in zip(axes, UPPER_VARS, strict=True):
-        delta, levels = level_step_delta(runs, arm, var)
-        image = ax.imshow(
-            delta, cmap="RdBu_r", vmin=-clip, vmax=clip, aspect="auto", interpolation="nearest"
-        )
-        for row in range(delta.shape[0]):
-            for col in range(delta.shape[1]):
-                value = delta[row, col]
-                ax.text(
-                    col,
-                    row,
-                    f"{value:+.0f}",
-                    ha="center",
-                    va="center",
-                    fontsize=5.5,
-                    color="white" if abs(value) > 0.62 * clip else INK,
-                )
-        ax.set_title(var, fontsize=11)
-        ax.set_xticks(range(n_steps), [str(step + 1) for step in range(n_steps)], fontsize=6)
-        ax.set_xlabel("шаг прогноза")
-        ax.grid(False)
-    axes[0].set_yticks(range(len(levels)), [str(level) for level in levels], fontsize=7)
-    axes[0].set_ylabel("уровень давления, гПа")
-    matched = "эпоха совпадает с R0 — сравнение без конфаунда"
-    mismatched = f"эпоха НЕ совпадает с R0 ({base_epoch}) — сравнение конфаундировано глубиной"
-    fig.suptitle(
-        f"{ARM_LABELS[arm]} против R0: Δ% RMSE по уровням и шагам free-running "
-        f"(вал-2004, эпоха {arm_epoch}); синее = физика лучше",
-        fontsize=12,
-        y=1.02,
-    )
-    colorbar = fig.colorbar(image, ax=axes, fraction=0.012, pad=0.01)
-    colorbar.set_label("Δ% RMSE к R0")
-    add_caption(
-        fig,
-        f"Что показано: Δ% lat-weighted RMSE арма к R0 на каждом [уровень × шаг]\n"
-        f"{n_steps}-шагового free-running прогноза. Синее — физика лучше R0, красное — хуже "
-        f"(шкала ±{clip:.0f} %).\n"
-        f"Чекпоинт арма — эпоха {arm_epoch}, R0 — эпоха {base_epoch}: "
-        f"{matched if arm_epoch == base_epoch else mismatched}.",
-        y=-0.08,
-    )
-    fig.savefig(dst, bbox_inches="tight")
-    plt.close(fig)
-
-
-def write_level_step_table(runs: dict[str, dict], arms: list[str], dst: Path) -> None:
-    """Markdown-таблица Δ% к R0 по [уровень × шаг ``TABLE_STEPS``] для каждого арма."""
-    lines: list[str] = [
-        f"# Δ% RMSE к R0 по уровням давления (free-running, {epoch_label(runs)})\n",
-        "Отрицательное — физика лучше R0. Шаги прогноза: "
-        + ", ".join(str(step) for step in TABLE_STEPS)
-        + ".\n",
-        "**Конфаунд:** сравнивать с R0 без поправки можно только арм с ТОЙ ЖЕ эпохой "
-        f"чекпоинта (R0 — эпоха {runs[BASELINE]['checkpoint_epoch'] + 1}).\n",
-    ]
-    for arm in arms:
-        lines.append(f"\n## {ARM_LABELS[arm]} — эпоха {runs[arm]['checkpoint_epoch'] + 1}\n")
-        header = "| гПа | " + " | ".join(
-            f"{var} ш{step}" for var in UPPER_VARS for step in TABLE_STEPS
-        )
-        lines.append(header + " |")
-        lines.append("|---" * (1 + len(UPPER_VARS) * len(TABLE_STEPS)) + "|")
-        deltas = {var: level_step_delta(runs, arm, var) for var in UPPER_VARS}
-        levels = deltas[UPPER_VARS[0]][1]
-        for row, level in enumerate(levels):
-            cells = [
-                f"{deltas[var][0][row, step - 1]:+.1f}"
-                for var in UPPER_VARS
-                for step in TABLE_STEPS
-            ]
-            lines.append(f"| {level} | " + " | ".join(cells) + " |")
-    dst.write_text("\n".join(lines) + "\n")
+    """Δ% RMSE арма к R0 (free-running) на сетке [уровень давления × шаг]."""
+    return _level_step_delta(runs, arm, var, SPEC.baseline)
 
 
 def main() -> None:
@@ -619,26 +136,11 @@ def main() -> None:
     parser.add_argument("--suffix", default="", help="суффикс имён PNG (напр. _t12)")
     args = parser.parse_args()
 
-    rollout_dir = Path(args.rollout_dir)
-    runs = load_runs(rollout_dir)
-    if BASELINE not in runs:
-        raise SystemExit(f"нет baseline {BASELINE} в {rollout_dir}")
-    render_ratio_r0(runs, HERE / f"fig_rollout_ratio_r0{args.suffix}.png")
-    render_delta_steps(runs, HERE / f"fig_rollout_delta_steps{args.suffix}.png")
-    render_heatmap(runs, HERE / f"fig_rollout_heatmap{args.suffix}.png")
-    ladder_arms = [arm for arm in LADDER_ARMS if arm in runs]
-    equation_arms = [arm for arm in EQUATION_ARMS if arm in runs]
-    for arm in ladder_arms:
-        render_arm_heatmap(runs, arm, HERE / f"fig_rollout_heatmap_{arm}{args.suffix}.png")
-    for arm in equation_arms:
-        render_arm_level_heatmap(runs, arm, HERE / f"fig_rollout_levels_{arm}{args.suffix}.png")
-    write_level_step_table(runs, equation_arms, rollout_dir / "level_step_table.md")
-    index = {arm: {"n_samples": data["n_samples"]} for arm, data in sorted(runs.items())}
-    (rollout_dir / "rollout_index.json").write_text(json.dumps(index, indent=2))
-    print(  # noqa: T201
-        f"[rollout-figures] {len(runs)} runs -> 3 figures{args.suffix} "
-        f"+ {len(ladder_arms)} пер-армовых heatmap + {len(equation_arms)} levels-хитмапов "
-        f"+ level_step_table.md"
+    write_rollout_outputs(
+        spec=SPEC,
+        rollout_dir=Path(args.rollout_dir),
+        figures_dir=HERE,
+        suffix=args.suffix,
     )
 
 
