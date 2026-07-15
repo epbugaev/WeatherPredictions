@@ -60,8 +60,12 @@ BASE_CONFIGS: dict[tuple[str, str], str] = {
     ("simvpv2", "legacy"): "configs/exp21/exp21_s1_legacy_hybrid_s0.yaml",
 }
 
-MAX_EPOCH = 150
-EARLY_STOP_DISABLED = 100_000  # никогда не срабатывает -> все армы доходят до 150
+# Бюджет эпох — пер-семейный. PredRNNv2 на 150 эпох не влезает в дедлайн аллокации
+# кластера (~27 ч, ресюма нет; ~16 мин/эпоху у физ-арма → 150 эп ≈ 40 ч), поэтому у
+# него общая эпоха 40 (как exp20). Внутрисемейное сравнение честно (все 3 арма на 40);
+# кросс-семейное — по относительной Δ к no_physics, разные эпохи между семействами ОК.
+MAX_EPOCH_BY_FAMILY = {"iam4vp": 150, "simvpv2": 150, "predrnnv2": 40}
+EARLY_STOP_DISABLED = 100_000  # никогда не срабатывает -> все армы доходят до бюджета
 
 
 def regionalize(config: dict, family: str, arm: str, region_key: str, region: dict) -> dict:
@@ -87,7 +91,7 @@ def regionalize(config: dict, family: str, arm: str, region_key: str, region: di
         params["diabatic_cut"] = list(region["cut_flat"])
 
     training = config["training"]
-    training["max_epoch"] = MAX_EPOCH
+    training["max_epoch"] = MAX_EPOCH_BY_FAMILY[family]
     training["seed"] = 0
     if "early_stopping_patience" in training:
         training["early_stopping_patience"] = EARLY_STOP_DISABLED

@@ -79,7 +79,7 @@ training:
   litmodel: mutiout_predrnn
   lr: 0.0001
   eta_min: 0.0
-  max_epoch: 150
+  max_epoch: 40
   loss_type: MAE
   early_stopping_patience: 100000
   extra_kwargs:
