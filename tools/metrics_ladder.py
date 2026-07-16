@@ -258,7 +258,8 @@ def render_levels(deltas: np.ndarray, metric: str, spec: LadderSpec, dst: Path) 
                 ax.set_yticks(range(13), [str(p) for p in PRESSURE_HPA], fontsize=6)
             else:
                 ax.set_yticks([])
-            ax.set_xticks(range(0, 12, 3), [str(s + 1) for s in range(0, 12, 3)], fontsize=6)
+            xticks = range(0, block.shape[1], max(1, block.shape[1] // 4))
+            ax.set_xticks(list(xticks), [str(s + 1) for s in xticks], fontsize=6)
             if row == len(level_arms) - 1:
                 ax.set_xlabel("шаг", fontsize=8)
             ax.grid(False)
@@ -312,7 +313,9 @@ def render_arm_metric_heatmap(
                     color="white" if abs(value) > 0.62 * clip else INK,
                 )
         ax.set_title(var, fontsize=11)
-        ax.set_xticks(range(12), [str(step + 1) for step in range(12)], fontsize=6)
+        ax.set_xticks(
+            range(gain.shape[1]), [str(step + 1) for step in range(gain.shape[1])], fontsize=6
+        )
         ax.set_xlabel("шаг прогноза")
         ax.grid(False)
     axes[0].set_yticks(range(13), [str(p) for p in PRESSURE_HPA], fontsize=7)
@@ -358,7 +361,9 @@ def render_psd(
     """Спектр по зональному волновому числу m: истина против прогнозов (шаг 1 и 12)."""
     fig, axes = plt.subplots(2, len(UPPER_VARS), figsize=(3.1 * len(UPPER_VARS), 6.0), sharex=True)
     wavenumbers = np.arange(summaries[spec.baseline]["psd_obs"].shape[-1])
-    for row, step in enumerate((0, 11)):
+    # Шаг 1 и последний: у 12-шаговых носителей это (0, 11), у 6-шагового IAM4VP (0, 5).
+    last_step = summaries[spec.baseline]["psd_obs"].shape[0] - 1
+    for row, step in enumerate((0, last_step)):
         for col, var in enumerate(UPPER_VARS):
             channel = channels.index(f"{var}500")
             ax = axes[row, col]
