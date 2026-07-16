@@ -17,6 +17,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from Models.IAM4VP import IAM4VP  # noqa: E402
 from Models.SimVP import PI_SimVP_Model, SimVP_Model  # noqa: E402
 from utils.physics_residual import PhysicsResidualMixin  # noqa: E402
 from utils.static_input import (  # noqa: E402
@@ -256,6 +257,48 @@ class TestSimVPStaticInput(StaticInputFileMixin):
             y = model(x)
         self.assertEqual(y.shape, (1, 2, 69, GRID_H, GRID_W))
         self.assertIn("static_input", model.state_dict())
+
+
+class TestIAM4VPStaticInput(StaticInputFileMixin):
+    def _build(self, **kwargs) -> IAM4VP:
+        torch.manual_seed(0)
+        # hid_S=64 (not 8): Models/IAM4VP_utils.py ConvNeXt_block/_bottle hardcode
+        # nn.Linear(64, dim) for the time embedding, so Time_MLP's output width
+        # must be 64 regardless of hid_S — a pre-existing constraint, unrelated
+        # to static-input channels.
+        model = IAM4VP(
+            T_data=2, C_data=69, H_data=GRID_H, W_data=GRID_W,
+            hid_S=64, N_S=4, N_T=2, use_physics=False, **kwargs,
+        )
+        model.eval()
+        return model
+
+    def test_forward_shape_with_static(self) -> None:
+        model = self._build(
+            static_input_fields=["orography", "lsm"],
+            static_constants_path=self.nc_path,
+            static_cut=FULL_CUT,
+        )
+        x = torch.randn(2, 2, 69, GRID_H, GRID_W)
+        t = torch.full((2,), 100.0)
+        with torch.no_grad():
+            first = model(x, None, t)
+            second = model(x, [first], t)
+        self.assertEqual(first.shape, (2, 69, GRID_H, GRID_W))
+        self.assertEqual(second.shape, (2, 69, GRID_H, GRID_W))
+
+    def test_disabled_matches_param_absence_bitexact(self) -> None:
+        plain = self._build()
+        disabled = self._build(static_input_fields=None)
+        self.assertEqual(
+            list(plain.state_dict().keys()), list(disabled.state_dict().keys())
+        )
+        x = torch.randn(1, 2, 69, GRID_H, GRID_W)
+        t = torch.full((1,), 100.0)
+        with torch.no_grad():
+            torch.testing.assert_close(
+                plain(x, None, t), disabled(x, None, t), rtol=0, atol=0
+            )
 
 
 if __name__ == "__main__":

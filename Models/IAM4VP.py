@@ -4,6 +4,7 @@ import torch
 from torch import nn
 
 from utils.physics_residual import PhysicsResidualMixin
+from utils.static_input import StaticInputMixin
 
 from .IAM4VP_utils import Attention, CircularConvSC, ConvNeXt_block, ConvNeXt_bottle
 
@@ -226,7 +227,7 @@ class Predictor(nn.Module):
         return y
 
 
-class IAM4VP(PhysicsResidualMixin, nn.Module):
+class IAM4VP(StaticInputMixin, PhysicsResidualMixin, nn.Module):
     """Iterative Auto-regressive Model for Video Prediction + опциональный physics-prior.
 
     На каждом шаге `t` модель видит `(x_raw, pred_list, t)` — начальное
@@ -247,6 +248,10 @@ class IAM4VP(PhysicsResidualMixin, nn.Module):
         hid_S, N_S, N_T: ширина скрытого слоя и глубины encoder/predictor/decoder
             (ширина Predictor'а определяется ``T_data * hid_S``).
         use_physics: если True, включён латентный legacy-путь (`AI + physics_correction`).
+        static_input_fields: список статических полей (например, `["orography", "lsm"]`)
+            или `None` = выключено, см. :class:`utils.static_input.StaticInputMixin`.
+        static_constants_path: путь к constants-NetCDF (обязателен при включённой статике).
+        static_cut: окно кропа `[lat0, lat1, lon0, lon1]` (обязателен при включённой статике).
         **physics_kwargs: параметры residual-пути, см.
             :meth:`utils.physics_residual.PhysicsResidualMixin.init_physics_residual`.
     """
@@ -261,11 +266,17 @@ class IAM4VP(PhysicsResidualMixin, nn.Module):
         N_S: int = 4,
         N_T: int = 6,
         use_physics: bool = True,
+        static_input_fields: list[str] | None = None,
+        static_constants_path: str | None = None,
+        static_cut: list[int] | None = None,
         **physics_kwargs,
     ):
         super().__init__()
+        num_static = self.init_static_input(
+            static_input_fields, static_constants_path, static_cut, H_data, W_data
+        )
         self.time_mlp = Time_MLP(dim=hid_S)
-        self.enc = Encoder(C_data, hid_S, N_S)
+        self.enc = Encoder(C_data + num_static, hid_S, N_S)
         self.hid = Predictor(T_data * hid_S, N_T)
         self.dec = Decoder(hid_S, N_S, T_data)
         self.attn = Attention(hid_S)
@@ -273,8 +284,8 @@ class IAM4VP(PhysicsResidualMixin, nn.Module):
         self.mask_token = nn.Parameter(
             torch.zeros(T_data, hid_S, H_data // 4, W_data // 4)
         )  # for 1_4 and 5_6
-        self.lp = Encoder(C_data, hid_S, N_S)
-        self.lp_phys = Encoder(C_data, hid_S, N_S)
+        self.lp = Encoder(C_data + num_static, hid_S, N_S)
+        self.lp_phys = Encoder(C_data + num_static, hid_S, N_S)
 
         self.skip_mask_token = nn.Parameter(torch.zeros(T_data, hid_S, H_data, W_data))
         self.embed_1_mask_token = nn.Parameter(torch.zeros(T_data, hid_S, H_data // 2, W_data // 2))
@@ -311,6 +322,7 @@ class IAM4VP(PhysicsResidualMixin, nn.Module):
             y_raw = []
         B, T, C, H, W = x_raw.shape
         x = x_raw.view(B * T, C, H, W)
+        x = self.append_static_input(x)
         time_emb = self.time_mlp(t)
 
         embed, skip, embed_1, embed_2 = self.enc(x)
@@ -322,7 +334,7 @@ class IAM4VP(PhysicsResidualMixin, nn.Module):
 
         use_legacy_latent_physics = self.use_physics and not self.use_physics_residual_corrector
         for idx, pred in enumerate(y_raw):
-            embed2, skip_lp, embed_1_lp, embed_2_lp = self.lp(pred)
+            embed2, skip_lp, embed_1_lp, embed_2_lp = self.lp(self.append_static_input(pred))
 
             if use_legacy_latent_physics:
                 if idx == 0:
@@ -347,7 +359,7 @@ class IAM4VP(PhysicsResidualMixin, nn.Module):
                 pred_to_hybrid = torch.cat([pred[:, :4, :, :], pred_phys], dim=1)
 
                 embed2_phys, skip_lp_phys, embed_1_lp_phys, embed_2_lp_phys = self.lp_phys(
-                    pred_to_hybrid
+                    self.append_static_input(pred_to_hybrid)
                 )
 
                 mask_token[:, idx, :, :, :] = embed2 + 0.1 * embed2_phys
