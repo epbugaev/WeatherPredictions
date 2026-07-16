@@ -18,7 +18,7 @@
         --climatology ~/era5_memmap/climatology_france_2000_2003.npz \
         --thresholds ~/era5_memmap/thresholds_france_2004.npz \
         --out ~/exp22_metrics/metrics_exp22-iam4vp-a2-france-s0.npz \
-        --out-per-sample ~/exp22_metrics_raw/iam4vp_france/metrics_exp22-iam4vp-a2-france-s0_per_sample.npz
+        --out-per-sample ~/exp22_metrics_raw/iam4vp_france/metrics_..._per_sample.npz
 """
 
 from __future__ import annotations
