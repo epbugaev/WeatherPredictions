@@ -11,6 +11,7 @@ from pathlib import Path
 import h5netcdf
 import numpy as np
 import torch
+import yaml
 from torch import nn
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -380,6 +381,52 @@ class TestPredRNNv2StaticInput(StaticInputFileMixin):
             out, aux = model(frames, mask)
         self.assertEqual(out.shape, (2, 3, GRID_H, GRID_W, 69))
         self.assertIn("static_input", model.state_dict())
+
+
+REPO_ROOT_CONFIG = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT_CONFIG / "docs" / "experiments" / "24_static_inputs"))
+import make_configs  # noqa: E402
+
+
+class TestMakeConfigsExp24(unittest.TestCase):
+    def test_staticize_adds_static_block_and_renames(self) -> None:
+        base = yaml.safe_load(
+            (REPO_ROOT / "configs/abl16_long/abl16_r0_no_physics_t12.yaml").read_text()
+        )
+        cfg = make_configs.staticize(base, "iam4vp", "nophys")
+        params = cfg["model"]["params"]
+        self.assertEqual(params["static_input_fields"], ["orography", "lsm"])
+        self.assertEqual(params["static_cut"], [75, 107, 164, 228])
+        self.assertTrue(params["static_constants_path"].endswith("constants_1.40625deg.nc"))
+        self.assertEqual(cfg["experiment"]["name"], "exp24-iam4vp-nophys-static-usa-s0")
+
+    def test_staticize_keeps_budget_and_physics(self) -> None:
+        base_path = REPO_ROOT / "configs/exp21_long/exp21_s3_a2_exp13_t12_s0.yaml"
+        base = yaml.safe_load(base_path.read_text())
+        expected_epoch = base["training"]["max_epoch"]
+        expected_mode = base["model"]["params"]["physics_feature_mode"]
+        cfg = make_configs.staticize(base, "simvpv2", "a2")
+        self.assertEqual(cfg["training"]["max_epoch"], expected_epoch)
+        self.assertEqual(cfg["model"]["params"]["physics_feature_mode"], expected_mode)
+        self.assertEqual(cfg["data"]["cut"], [[75, 107], [164, 228]])
+
+    def test_staticize_rejects_non_usa_parent(self) -> None:
+        base = yaml.safe_load(
+            (REPO_ROOT / "configs/exp22/exp22_iam4vp_a2_npac.yaml").read_text()
+        )
+        with self.assertRaises(ValueError):
+            make_configs.staticize(base, "iam4vp", "a2")
+
+    def test_generated_configs_match_generator(self) -> None:
+        """Все 6 закоммиченных YAML — ровно то, что выдаёт генератор."""
+        for (family, arm), base_rel in make_configs.BASE_CONFIGS.items():
+            base = yaml.safe_load((REPO_ROOT / base_rel).read_text())
+            expected = make_configs.staticize(base, family, arm)
+            out_path = (
+                REPO_ROOT / "configs/exp24" / f"exp24_{family}_{arm}_static_usa.yaml"
+            )
+            self.assertTrue(out_path.exists(), f"нет {out_path} — прогони make_configs")
+            self.assertEqual(yaml.safe_load(out_path.read_text()), expected)
 
 
 if __name__ == "__main__":
