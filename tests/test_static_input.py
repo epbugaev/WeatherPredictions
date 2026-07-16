@@ -18,7 +18,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from utils.static_input import (  # noqa: E402
-    STATIC_INPUT_FIELDS,  # noqa: F401
+    STATIC_INPUT_FIELDS,
     StaticInputMixin,
     load_static_input_fields,
     read_constant_fields,
@@ -96,8 +96,11 @@ class TestLoadStaticInputFields(StaticInputFileMixin):
         torch.testing.assert_close(ab[0], ba[1], rtol=0, atol=0)
 
     def test_rejects_unknown_field(self) -> None:
+        self.assertEqual(STATIC_INPUT_FIELDS, ("orography", "lsm"))
         with self.assertRaises(ValueError):
-            load_static_input_fields(self.nc_path, ["orography", "slt"], FULL_CUT, GRID_H, GRID_W)
+            load_static_input_fields(
+                self.nc_path, ["orography", "slt"], FULL_CUT, GRID_H, GRID_W
+            )
 
     def test_rejects_empty_fields(self) -> None:
         with self.assertRaises(ValueError):
