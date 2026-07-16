@@ -86,6 +86,7 @@ class PhysicsResidualMixin:
         physics_residual_humidity_mode: str = "as_is",
         physics_residual_tendency_clip: float = 0.0,
         physics_w_diagnostic: str = "plain",
+        physics_vertical_quadrature: str = "rectangle",
         physics_horizon_seconds: float = 3600.0,
         physics_lat_start_deg: float = -70.0,
         physics_dlat_deg: float = 20.0,
@@ -161,6 +162,16 @@ class PhysicsResidualMixin:
                 ``'relative_to_specific'`` (r -> q around the kernel).
             physics_residual_tendency_clip: symmetric clip of the normalized
                 physics tendency; ``0`` disables it.
+            physics_vertical_quadrature: ``'rectangle'`` (default, bit-for-bit)
+                or ``'trapezoid'``. Rule for the cumulative-integral matrix
+                ``M_z`` (hydrostatic ``z_t`` and ``get_w``). ``'rectangle'``
+                overcounts column mass by +6.5% and breaks the surface anchor
+                Φ_t(p_s)=0. ``'trapezoid'`` uses half-weight edges (top 25,
+                surface 37.5 hPa) so the full-column integral (top row of
+                ``M_z``) equals the exact depth p_s−p_top=950 hPa, while the
+                surface ROW of ``M_z`` is all-zero so the anchor
+                ``integral_z(f)[surface]=0`` holds exactly. The ``d_z`` divisor
+                (=pixel_z) is unchanged. See docs/physics_dimensional_audit_ru.md.
             physics_w_diagnostic: ``'plain'`` or ``'mass_consistent'`` vertical
                 velocity diagnostic.
             physics_horizon_seconds: model step horizon, split across
@@ -210,12 +221,18 @@ class PhysicsResidualMixin:
             about the humidity-channel semantics and the legacy latent grid.
         """
         self.C_data = C_data
-        if physics_w_diagnostic not in ("plain", "mass_consistent"):
+        if physics_w_diagnostic not in ("plain", "mass_consistent", "obrien"):
             raise ValueError(
-                "physics_w_diagnostic must be 'plain' or 'mass_consistent', "
-                f"got {physics_w_diagnostic!r}"
+                "physics_w_diagnostic must be 'plain', 'mass_consistent' or "
+                f"'obrien', got {physics_w_diagnostic!r}"
             )
         self.physics_w_diagnostic = physics_w_diagnostic
+        if physics_vertical_quadrature not in ("rectangle", "trapezoid"):
+            raise ValueError(
+                "physics_vertical_quadrature must be 'rectangle' or 'trapezoid', "
+                f"got {physics_vertical_quadrature!r}"
+            )
+        self.physics_vertical_quadrature = physics_vertical_quadrature
         # exp 16 (порт exp 14/15): opt-in термы hybrid-ядра; валидация значений —
         # в PDE_kernel (fail-fast на конструкторе ниже). Дефолты бит-в-бит.
         self.physics_advection_form = physics_advection_form
@@ -391,6 +408,7 @@ class PhysicsResidualMixin:
             physics_level_mask_learnable=self.physics_level_mask_learnable,
             ekman_K_profile=self.physics_ekman_K_profile,
             humidity_evolution=self.physics_humidity_evolution,
+            vertical_quadrature=self.physics_vertical_quadrature,
         )
         # Optimizer-poisoning guard. When the hybrid forward produces масked
         # nonfinite values (physics_residual_nonfinite_ratio > 0), the raw

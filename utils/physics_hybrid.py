@@ -52,13 +52,71 @@ for M_z_i in range(pressure_level_num):
             M_z[M_z_i, M_z_j] = pixel_z[0, M_z_j, 0, 0]
 
 
-def integral_z(input_tensor):
-    # Вертикальное интегрирование по давлению
+def integral_z(input_tensor, M_z_mat=None):
+    # Вертикальное интегрирование по давлению. M_z_mat=None → модуль-глобаль
+    # (легаси, метод прямоугольников); иначе — переданная матрица квадратуры.
+    mat = M_z if M_z_mat is None else M_z_mat
     B, pressure_level_num, H, W = input_tensor.shape
     input_tensor = input_tensor.reshape(B, pressure_level_num, H * W)
-    output = M_z.to(input_tensor.dtype).to(input_tensor.device) @ input_tensor
+    output = mat.to(input_tensor.dtype).to(input_tensor.device) @ input_tensor
     output = output.reshape(B, pressure_level_num, H, W)
     return output
+
+
+# Давления уровней (гПа) — для построения трапецеидальной квадратуры.
+_pressure_hpa = torch.tensor(
+    [50, 100, 150, 200, 250, 300, 400, 500, 600, 700, 850, 925, 1000], dtype=torch.float32
+)
+
+
+def build_vertical_quadrature(quadrature: str):
+    """Строит (M_z, w_int) для заданного правила вертикального интегрирования.
+
+    ``'rectangle'`` (легаси, бит-в-бит): каждый уровень вносит полную толщину
+    ``pixel_z[j]``; ``w_int`` = ``pixel_z``.
+    ``'trapezoid'``: краевые толщины половинные (топ 25, поверхность 37.5 гПа),
+    поэтому полный интеграл (верхняя строка ``M_z``) = точной глубине p_s−p_top;
+    приземная СТРОКА ``M_z`` нулевая → якорь ``integral_z(f)[surf]=0`` точен.
+    ``w_int`` = центрированная полутолщина уровня (сумма = p_s−p_top).
+
+    Затрагивает ТОЛЬКО интеграл; делитель производной ``d_z`` (=``pixel_z``,
+    локальный шаг) не меняется. См. docs/physics_dimensional_audit_ru.
+    """
+    if quadrature not in ("rectangle", "trapezoid"):
+        raise ValueError(
+            f"vertical_quadrature must be 'rectangle' or 'trapezoid', got {quadrature!r}."
+        )
+    P = pressure_level_num
+    mat = torch.zeros(P, P)
+    if quadrature == "rectangle":
+        for i in range(P):
+            for j in range(P):
+                if i <= j:
+                    mat[i, j] = pixel_z[0, j, 0, 0]
+        return mat, pixel_z.clone()
+    dp = _pressure_hpa[1:] - _pressure_hpa[:-1]  # (P-1,) hПа, >0
+    for i in range(P):
+        for j in range(i, P):
+            if i == P - 1:
+                w = 0.0
+            elif j == i:
+                w = dp[i] / 2.0
+            elif j == P - 1:
+                w = dp[P - 2] / 2.0
+            else:
+                w = (dp[j - 1] + dp[j]) / 2.0
+            mat[i, j] = w
+    centered = torch.zeros(P)
+    for i in range(P):
+        below = dp[i - 1] if i > 0 else None
+        above = dp[i] if i < P - 1 else None
+        if below is None:
+            centered[i] = above / 2.0
+        elif above is None:
+            centered[i] = below / 2.0
+        else:
+            centered[i] = (below + above) / 2.0
+    return mat, centered.reshape(1, P, 1, 1)
 
 
 # ===== Реализация WENO 5-го порядка для вычисления производных =====
@@ -281,6 +339,7 @@ class PDE_kernel(nn.Module):
         physics_level_mask_learnable: bool = False,
         ekman_K_profile: tuple[float, ...] | None = None,
         humidity_evolution: str = "as_is",
+        vertical_quadrature: str = "rectangle",
     ):
         """Инициализирует ядро с crop-aware геометрией и переключателями физики.
 
@@ -340,6 +399,15 @@ class PDE_kernel(nn.Module):
                 под изменением температуры (``self.t_t`` — полный кэш из
                 ``t_evolution``, доступен благодаря порядку вызовов в
                 ``_evolve_fields``).
+            vertical_quadrature: правило вертикального интегрирования ``M_z``
+                (используется в ``z_t`` гидростатике и ``get_w``).
+                ``'rectangle'`` (дефолт, бит-в-бит) — метод прямоугольников:
+                завышает массу столба на +6.5% и нарушает приземный якорь
+                Φ_t(p_s)=0. ``'trapezoid'`` — половинные краевые толщины (топ 25,
+                поверхность 37.5 гПа): полный интеграл столба = p_s−p_top, при
+                нулевой приземной строке ``M_z`` (точный якорь). Делитель
+                ``d_z`` (=``pixel_z``) не меняется. См.
+                docs/physics_dimensional_audit_ru.md. Дефолт ``'rectangle'``.
 
         Raises:
             ValueError: при недопустимом значении любого строкового флага
@@ -351,9 +419,10 @@ class PDE_kernel(nn.Module):
                 или если ``ekman_K_profile`` задан с длиной ≠ ``variable_dim``.
         """
         super().__init__()
-        if w_diagnostic not in ("plain", "mass_consistent"):
+        if w_diagnostic not in ("plain", "mass_consistent", "obrien"):
             raise ValueError(
-                f"Unknown w_diagnostic {w_diagnostic!r}; expected 'plain' or 'mass_consistent'"
+                f"Unknown w_diagnostic {w_diagnostic!r}; expected 'plain', "
+                "'mass_consistent' or 'obrien'"
             )
         if coriolis_formulation not in ("spherical", "beta_plane"):
             raise ValueError(
@@ -376,6 +445,13 @@ class PDE_kernel(nn.Module):
                 "expected 'as_is' or 'cc_bridge'"
             )
         self.humidity_evolution = humidity_evolution
+
+        # Вертикальная квадратура: буферы M_z/w_int инстанса. Под 'rectangle'
+        # равны модуль-глобалям бит-в-бит; под 'trapezoid' — исправленные веса.
+        self.vertical_quadrature = vertical_quadrature
+        mz_inst, wint_inst = build_vertical_quadrature(vertical_quadrature)
+        self.register_buffer("M_z_quad", mz_inst)
+        self.register_buffer("w_int", wint_inst)
 
         self.norm = norm
         self.eddy_viscosity = eddy_viscosity
@@ -736,7 +812,7 @@ class PDE_kernel(nn.Module):
 
     def get_z_t(self):
         z_zt = self.get_z_zt()
-        self.z_t = integral_z(z_zt)
+        self.z_t = integral_z(z_zt, self.M_z_quad)
         return self.z_t
 
     def z_evolution(self, z):
@@ -760,13 +836,26 @@ class PDE_kernel(nn.Module):
         if self.spherical_divergence:
             # ∇·V на сфере: меридиональный метрический член −v·tanφ/a (exp 14)
             div = div - v * self.tan_phi_over_a
-        if getattr(self, "w_diagnostic", "plain") == "mass_consistent":
+        wd = getattr(self, "w_diagnostic", "plain")
+        if wd == "mass_consistent":
             # p-weighted column-mean divergence removed so int(div) dp ~ 0 per column
-            pz = pixel_z.reshape(1, -1, 1, 1).to(div.dtype).to(div.device)
+            pz = self.w_int.reshape(1, -1, 1, 1).to(div.dtype).to(div.device)
             div_bar = (div * pz).sum(dim=1, keepdim=True) / pz.sum()
             div = div - div_bar
         w_z = -div
-        return integral_z(w_z).detach()
+        w = integral_z(w_z, self.M_z_quad)
+        if wd == "obrien":
+            # O'Brien (1970): гипотеза «ошибка дивергенции линейна по p» даёт
+            # квадратичный по массе вес — w(p_top) зануляется точно, у
+            # поверхности поправка нулевая (анкер w(p_s)=0 не трогается).
+            # Поправка сосредоточена наверху, а не размазана по столбу (в
+            # отличие от mass_consistent). См. PurePDEKernel.get_w.
+            p_hpa = pressure.to(w.dtype).to(w.device)  # (1,P,1,1) гПа
+            p_s = p_hpa[:, -1:]
+            p_top = p_hpa[:, :1]
+            weight = ((p_s - p_hpa) / (p_s - p_top)) ** 2
+            w = w - w[:, :1] * weight
+        return w.detach()
 
     ################################################################
 
@@ -986,6 +1075,7 @@ class PDE_block(nn.Module):
         physics_level_mask_learnable: bool = False,
         ekman_K_profile: tuple[float, ...] | None = None,
         humidity_evolution: str = "as_is",
+        vertical_quadrature: str = "rectangle",
     ):
         """Собирает стек ядер, прокидывая геометрию и флаги физики в каждое.
 
@@ -1055,6 +1145,7 @@ class PDE_block(nn.Module):
                     physics_level_mask_learnable=physics_level_mask_learnable,
                     ekman_K_profile=ekman_K_profile,
                     humidity_evolution=humidity_evolution,
+                    vertical_quadrature=vertical_quadrature,
                 )
             )
 
@@ -1132,6 +1223,7 @@ class HybridBlock(nn.Module):
         physics_level_mask_learnable: bool = False,
         ekman_K_profile: tuple[float, ...] | None = None,
         humidity_evolution: str = "as_is",
+        vertical_quadrature: str = "rectangle",
     ):
         """Строит стек ``PDE_block`` и обучаемый роутер-вес.
 
@@ -1202,6 +1294,7 @@ class HybridBlock(nn.Module):
             physics_level_mask_learnable=physics_level_mask_learnable,
             ekman_K_profile=ekman_K_profile,
             humidity_evolution=humidity_evolution,
+            vertical_quadrature=vertical_quadrature,
         )
         self.router_weight = nn.Parameter(torch.zeros(1, 1, 1, dim), requires_grad=True)
 

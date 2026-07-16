@@ -85,6 +85,18 @@ class GridConfig:
             долготы) она завышает шаг в 360/(W·Δλ) раз — ×4 для USA, что
             занижало ∂Φ/∂x и диагностическую ω в 4 раза (баг найден в
             эксперименте 14). Дефолт ``None`` — легаси-формула бит-в-бит.
+        vertical_quadrature: правило построения матрицы вертикального
+            интегрирования ``M_z``. ``'rectangle'`` (дефолт, бит-в-бит) —
+            метод прямоугольников: каждый уровень вносит полную толщину
+            ``pixel_z[j]``, что завышает массу столба на +6.5% и нарушает
+            приземный якорь Φ_t(p_s)=0 (см. docs/physics_dimensional_audit_ru).
+            ``'trapezoid'`` — метод трапеций: краевые толщины половинные (топ 25,
+            поверхность 37.5 гПа), поэтому полный интеграл столба (верхняя строка
+            ``M_z``) = точной глубине p_s−p_top=950 гПа; при этом приземная СТРОКА
+            ``M_z`` нулевая, так что якорь ``integral_z(f)[surface]=0`` точен.
+            Затрагивает ТОЛЬКО интеграл (``M_z`` и колоночное усреднение в
+            ``get_w`` mass_consistent); делитель производной ``d_z`` (=``pixel_z``,
+            локальный шаг) НЕ меняется. Дефолт ``'rectangle'``.
     """
 
     H: int
@@ -109,6 +121,7 @@ class GridConfig:
     lat_range_deg: tuple[float, float] = (-90.0, 90.0)
     latitudes_deg: tuple[float, ...] | None = None
     lon_step_deg: float | None = None
+    vertical_quadrature: str = "rectangle"
 
 
 class Grid(nn.Module):
@@ -177,11 +190,56 @@ class Grid(nn.Module):
         pixel_z = torch.tensor(config.pixel_z_values, dtype=torch.float32).reshape(1, -1, 1, 1)
 
         P = pixel_z.shape[1]
+        quad = getattr(config, "vertical_quadrature", "rectangle")
+        if quad not in ("rectangle", "trapezoid"):
+            raise ValueError(
+                f"vertical_quadrature must be 'rectangle' or 'trapezoid', got {quad!r}."
+            )
         M_z = torch.zeros(P, P)
-        for i in range(P):
-            for j in range(P):
-                if i <= j:
-                    M_z[i, j] = pixel_z[0, j, 0, 0]
+        if quad == "rectangle":
+            # Метод прямоугольников (легаси, бит-в-бит): каждый уровень вносит
+            # полную толщину pixel_z[j].
+            for i in range(P):
+                for j in range(P):
+                    if i <= j:
+                        M_z[i, j] = pixel_z[0, j, 0, 0]
+        else:
+            # Метод трапеций: вес уровня в кумулятивном интеграле от i к
+            # поверхности = центрированная полутолщина соседних Δp. Крайние
+            # уровни (топ, поверхность) — половинные краевые веса; приземный
+            # уровень (i=P-1) даёт нулевой интеграл (якорь ∫_{p_s}^{p_s}=0).
+            dp = pressure_hpa[1:] - pressure_hpa[:-1]  # (P-1,) hПа, >0
+            for i in range(P):
+                for j in range(i, P):
+                    if i == P - 1:
+                        w = 0.0                      # приземный якорь
+                    elif j == i:
+                        w = dp[i] / 2.0              # половина нижнего сегмента
+                    elif j == P - 1:
+                        w = dp[P - 2] / 2.0          # половина последнего сегмента
+                    else:
+                        w = (dp[j - 1] + dp[j]) / 2.0
+                    M_z[i, j] = w
+
+        # Веса колоночного интегрирования (для mass_consistent усреднения в
+        # get_w). Под 'rectangle' равны pixel_z бит-в-бит; под 'trapezoid' —
+        # центрированная полутолщина (сумма = p_s − p_top), т.е. диагональ
+        # согласована с M_z.
+        if quad == "rectangle":
+            w_int = pixel_z.clone()
+        else:
+            dp = pressure_hpa[1:] - pressure_hpa[:-1]
+            centered = torch.zeros(P)
+            for i in range(P):
+                below = dp[i - 1] if i > 0 else None
+                above = dp[i] if i < P - 1 else None
+                if below is None:
+                    centered[i] = above / 2.0
+                elif above is None:
+                    centered[i] = below / 2.0
+                else:
+                    centered[i] = (below + above) / 2.0
+            w_int = centered.reshape(1, -1, 1, 1)
 
         # Coriolis variants. Все используют один и тот же `omega`; во всех
         # вариантах множитель 2 присутствует (f = 2Ω·sin(φ) с разными
@@ -200,6 +258,7 @@ class Grid(nn.Module):
         self.register_buffer("pixel_y", pixel_y)
         self.register_buffer("pressure", pressure)
         self.register_buffer("pixel_z", pixel_z)
+        self.register_buffer("w_int", w_int)
         self.register_buffer("M_z", M_z)
         self.register_buffer("f_constant", f_constant)
         self.register_buffer("f_beta_plane", f_beta_plane)
@@ -232,6 +291,61 @@ def integral_z(field: torch.Tensor, M_z: torch.Tensor) -> torch.Tensor:
     flat = field.reshape(B, P, H * W)
     out = M_z.to(flat.dtype) @ flat
     return out.reshape(B, P, H, W)
+
+
+def latent_heating_profile(
+    precip_rate: torch.Tensor,
+    pixel_z_hpa: torch.Tensor,
+    consts: "PhysicsConstants",
+    pressure_hpa: torch.Tensor | None = None,
+    profile: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Наблюдаемое латентное тепло осадков как T-источник (эксперимент 23).
+
+    Колоночное выделение тепла при осадках интенсивности ``precip_rate``
+    (м/с водного эквивалента): мощность на единицу площади
+    ``Q_col = L_v·ρ_w·P`` [Вт/м²]. Распределяется по столбу нормированным
+    вертикальным профилем ``η(p)`` (пик в средней тропосфере), так что
+    колоночный интеграл T-тенденции ``∫ (Q/c_p)·(dp/g)`` в точности равен
+    ``L_v·ρ_w·P/c_p`` (сохранение энергии; Yanai et al. 1973, Q₁).
+
+    Args:
+        precip_rate: (B, 1, H, W) или (B, H, W), м/с в.э. (≥ 0).
+        pixel_z_hpa: (P,) толщины слоёв Δp в гПа (``grid.pixel_z``).
+        consts: :class:`PhysicsConstants` (L, c_p, g, rho_w).
+        pressure_hpa: (P,) уровни давления в гПа (``grid.pressure/100``);
+            нужны для дефолтного профиля с пиком в средней тропосфере.
+        profile: (P,) ненормированный вес η(p). ``None`` → каноническая
+            форма кучевого нагрева η(σ)=sin(π·σ), σ=p/p_s, с максимумом в
+            средней тропосфере (~500 гПа); ноль у поверхности (σ=1) и малый
+            у топа (на 50 гПа σ≈0.05 ⇒ η≈0.16 от пика) — Yanai et al. 1973,
+            структура Q₁; полулагранжев профиль кучевого тепла. При
+            отсутствии ``pressure_hpa`` — равномерный вес (fallback).
+
+    Returns:
+        (B, P, H, W) — T-источник, К/с. P>0 ⇒ колоночный интеграл >0.
+    """
+    pz = pixel_z_hpa.reshape(-1)
+    P = pz.numel()
+    if profile is None:
+        if pressure_hpa is not None:
+            # η(σ)=sin(π·σ), σ=p/p_s: 0 у топа и поверхности, пик ~середина
+            # тропосферы — каноническая форма кучевого нагрева (Yanai 1973).
+            p_hpa = pressure_hpa.reshape(P).to(pz.dtype)
+            sigma = p_hpa / p_hpa.max().clamp_min(1e-6)
+            profile = torch.sin(torch.pi * sigma).clamp_min(0.0)
+        else:
+            profile = torch.ones(P, dtype=pz.dtype)
+    eta = profile.reshape(P).clamp_min(0.0).to(pz.dtype)
+    # нормировка на массовый вес dp/g так, что ∫ η_n·(dp/g) = 1 ⇒ колоночный
+    # интеграл T-тенденции равен Q_col/c_p независимо от формы η.
+    dp_pa = pz * 100.0  # гПа → Па
+    mass_w = dp_pa / consts.g  # (P,), кг/м²
+    denom = (eta * mass_w).sum().clamp_min(1e-30)
+    eta_n = eta / denom  # 1/(кг/м²)
+    p_flat = precip_rate.reshape(precip_rate.shape[0], 1, *precip_rate.shape[-2:])
+    q_col = consts.L * consts.rho_w * p_flat.clamp_min(0.0)  # (B,1,H,W), Вт/м²
+    return (q_col * eta_n.reshape(1, P, 1, 1)) / consts.c_p  # К/с
 
 
 def _lagrange3_dz_matrix(pressure_hpa: torch.Tensor) -> torch.Tensor:
@@ -568,6 +682,8 @@ class PhysicsConstants:
     R_v: float = 461.5  # Дж/(кг·К), водяной пар
     c_p: float = 1005.0  # Дж/(кг·К), теплоёмкость
     diff_ratio: float = 0.05  # scale_diff coefficient
+    g: float = 9.80665  # м/с², ускорение свободного падения (стандартное)
+    rho_w: float = 1000.0  # кг/м³, плотность жидкой воды (для осадков→тепло)
 
 
 class PurePDEKernel(nn.Module):
@@ -687,6 +803,10 @@ class PurePDEKernel(nn.Module):
         latent_heating_coupling: bool = False,
         z_anchor: Literal["fixed", "kinematic_ps"] = "fixed",
         omega_free: tuple[str, ...] = (),
+        virtual_temperature: bool = False,
+        bulk_drag: bool = False,
+        bulk_drag_cd: float = 1.5e-3,
+        bulk_drag_sigma_b: float = 0.7,
     ):
         super().__init__()
         self.grid = grid
@@ -773,6 +893,43 @@ class PurePDEKernel(nn.Module):
         if not set(omega_free) <= {"u", "v", "t", "q"}:
             raise ValueError(f"omega_free must be a subset of u,v,t,q; got {omega_free!r}")
         self.omega_free = tuple(omega_free)
+
+        # Эксперимент 23 (opt-in, дефолт — бит-в-бит прежнее поведение).
+        # virtual_temperature — гидростатика по виртуальной температуре
+        # T_v = T·(1+0.608·q) (Holton & Hakim, ур. 3.13; Wallace & Hobbs,
+        # ур. 3.16). Влажный воздух легче сухого при том же T ⇒ интегранд
+        # гидростатики берёт (T_v)_t = (1+0.608·q)·T_t + 0.608·T·q_t вместо
+        # T_t. Приземный/тропический сигнал; q≡0 ⇒ бит-в-бит сухой z_t.
+        self.virtual_temperature = virtual_temperature
+        # bulk_drag — квадратичное bulk-трение пограничного слоя
+        # F = −C_D·|V|·V·(g/Δp_bl) на σ>σ_b, |V| берётся из НИЖНЕГО уровня
+        # (1000 гПа как прокси приземного ветра 10 м; Stull 1988, гл. 9;
+        # C_D≈1.5e-3 над сушей/морем). Замена линейного трения Held–Suarez
+        # (rayleigh_friction), которое слишком грубо для экмановского слоя.
+        # Реализовано в физических единицах через колоночную толщину слоя.
+        self.bulk_drag = bulk_drag
+        if bulk_drag and rayleigh_friction:
+            raise ValueError(
+                "bulk_drag and rayleigh_friction are mutually exclusive "
+                "(both parameterize boundary-layer momentum sink)"
+            )
+        self.bulk_drag_cd = bulk_drag_cd
+        if bulk_drag:
+            sigma = grid.pressure / 1.0e5  # (1,P,1,1), p₀ = 1000 гПа
+            # маска пограничного слоя: линейный рост от 0 на σ_b до 1 у земли,
+            # согласована по форме с rayleigh_friction (Held & Suarez).
+            bl = torch.clamp(
+                (sigma - bulk_drag_sigma_b) / (1.0 - bulk_drag_sigma_b), min=0.0
+            )
+            self.register_buffer("bulk_drag_mask", bl)  # (1,P,1,1), безразм.
+            # эфф. обратная толщина слоя g/Δp_bl [м²/(с²·Па)·... ] в виде 1/Δp
+            # по столбу пограничного слоя (Δp = p_s − p(σ_b·p₀)); const по столбу.
+            p_pa = grid.pressure.reshape(-1)
+            dp_bl = float((p_pa[-1] - bulk_drag_sigma_b * 1.0e5).clamp_min(1.0))
+            self.bulk_drag_inv_dp = 1.0 / dp_bl  # 1/Па
+        else:
+            self.bulk_drag_mask = None
+            self.bulk_drag_inv_dp = 0.0
 
         # Вертикальная производная на НЕРАВНОМЕРНОЙ сетке уровней давления.
         # 'stencil' (дефолт) — легаси FD-4 с делением на локальный Δp (несёт
@@ -1011,7 +1168,7 @@ class PurePDEKernel(nn.Module):
         if self.spherical_divergence:
             div = div - v * self.tan_phi_over_a
         if self.w_diagnostic == "mass_consistent":
-            pz = self.grid.pixel_z  # (1,P,1,1) hPa
+            pz = self.grid.w_int  # (1,P,1,1) hPa — веса интегрирования
             div_bar = (div * pz).sum(dim=1, keepdim=True) / pz.sum()
             div = div - div_bar
         w = integral_z(-div, self.grid.M_z)
@@ -1275,6 +1432,35 @@ class PurePDEKernel(nn.Module):
                 out[k] = self._apply_polar_filter(out[k])
         return out
 
+    def _bulk_drag(
+        self, u: torch.Tensor, v: torch.Tensor, t: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Квадратичное bulk-трение пограничного слоя (эксперимент 23).
+
+        F = −C_D·|V_s|·V·(g·ρ/Δp_bl)·mask(σ), где |V_s| — модуль ветра
+        НИЖНЕГО уровня (прокси приземного 10 м), ρ = p/(R_d·T) — плотность,
+        mask линейно растёт от 0 на σ_b до 1 у земли. Возвращает добавки к
+        (u_t, v_t) в м/с². Трение антипараллельно ветру ⇒ du·u ≤ 0.
+
+        Args:
+            u, v: ветер (B, P, H, W), м/с. t: температура, K.
+
+        Returns:
+            (du, dv) — тенденции трения (B, P, H, W), м/с².
+        """
+        speed_s = torch.sqrt(u[:, -1:] ** 2 + v[:, -1:] ** 2)  # (B,1,H,W)
+        rho = self.grid.pressure / (self.consts.R_d * t)  # (B,P,H,W), кг/м³
+        g = self.consts.g
+        coef = (
+            self.bulk_drag_cd
+            * speed_s
+            * g
+            * rho
+            * self.bulk_drag_mask
+            * self.bulk_drag_inv_dp
+        )  # ≥ 0, 1/с
+        return -coef * u, -coef * v
+
     def rhs(
         self,
         u: torch.Tensor,
@@ -1308,6 +1494,10 @@ class PurePDEKernel(nn.Module):
         z_y = self.diff.d_y(z)
         z_z = self._d_z(z)
         u_t, v_t = self.get_uv_dt(u, v, w, z_x, z_y)
+        if self.bulk_drag:
+            du, dv = self._bulk_drag(u, v, t)
+            u_t = u_t + du
+            v_t = v_t + dv
         t_t = self.get_t_t(u, v, w, t, z_z)
         if self.latent_heating_coupling:
             cond = self._condensation_source(t, q, w)
@@ -1320,8 +1510,15 @@ class PurePDEKernel(nn.Module):
             baro = self.consts.R_d * t[:, -1:] / self.grid.pressure[:, -1:] * dps_dt
         # z ВСЕГДА интегрирует полный t_t (адиабата в колоночном интеграле
         # полезна: ω-шум усредняется); ω-члены убираются только из ВЫХОДНОЙ
-        # T-тенденции (omega_free).
-        z_t = self.get_z_t(t_t, baro=baro)
+        # T-тенденции (omega_free). virtual_temperature (exp23): гидростатика
+        # берёт виртуально-температурную тенденцию (T_v)_t = (1+0.608q)·t_t +
+        # 0.608·T·q_t вместо t_t; q≡0 ⇒ бит-в-бит сухой z_t.
+        if self.virtual_temperature:
+            q_t_for_z = self.get_q_dt(u, v, t, w, q)
+            tv_t = (1.0 + 0.608 * q) * t_t + 0.608 * t * q_t_for_z
+            z_t = self.get_z_t(tv_t, baro=baro)
+        else:
+            z_t = self.get_z_t(t_t, baro=baro)
         if "t" in self.omega_free:
             omega_pa = -100.0 * w
             adia = self.consts.R_d * t * omega_pa / (self.consts.c_p * self.grid.pressure)

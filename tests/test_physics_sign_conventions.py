@@ -494,5 +494,158 @@ class Exp15EquationVariants(unittest.TestCase):
         self.assertTrue(torch.equal(rhs1["z_t"], rhs0["z_t"]))
 
 
+class Exp23EquationVariants(unittest.TestCase):
+    """Знаки, размерности, бит-стабильность членов эксперимента 23.
+
+    Новые уравнения — наблюдаемый форсинг: виртуальная температура в
+    гидростатике (``virtual_temperature``), квадратичное bulk-трение
+    пограничного слоя (``bulk_drag``) и латентное тепло осадков
+    (:func:`latent_heating_profile`, вход через ``sources``). Дефолтный путь
+    по-прежнему запинен ``Exp14MomentumVariants.test_default_rhs_is_byte_stable``.
+    """
+
+    @staticmethod
+    def _kernel(**kwargs) -> PurePDEKernel:
+        grid = Grid(GridConfig(H=H, W=W, lat_range_deg=(16.17, 59.77)))
+        return PurePDEKernel(grid, boundary_x="replicate", coriolis="spherical", **kwargs)
+
+    @staticmethod
+    def _pinned_state() -> dict[str, torch.Tensor]:
+        gen = torch.Generator().manual_seed(23)
+        phi = PHI_STD.expand(1, P, H, W).clone()
+        return {
+            "u": 10 + 5 * torch.randn(1, P, H, W, generator=gen),
+            "v": 5 * torch.randn(1, P, H, W, generator=gen),
+            "t": 250 + 10 * torch.randn(1, P, H, W, generator=gen),
+            "q": (3e-3 * (1 + 0.3 * torch.randn(1, P, H, W, generator=gen))).clamp_min(1e-8),
+            "z": phi + 300 * torch.randn(1, P, H, W, generator=gen),
+        }
+
+    def test_exp23_flags_off_are_byte_stable(self) -> None:
+        """Явные дефолты новых флагов exp23 не меняют rhs бит-в-бит."""
+        base = self._kernel()
+        off = self._kernel(virtual_temperature=False, bulk_drag=False)
+        state = self._pinned_state()
+        rhs_b = base.rhs(**state)
+        rhs_o = off.rhs(**state)
+        for key in ("u_t", "v_t", "t_t", "q_t", "z_t", "w"):
+            self.assertTrue(torch.equal(rhs_b[key], rhs_o[key]), key)
+
+    # ----- E23-B: виртуальная температура в гидростатике -----
+
+    def test_virtual_temperature_is_dry_zt_when_q_zero(self) -> None:
+        """Golden: q≡0 ⇒ z_t виртуально-температурного ядра = сухому бит-в-бит."""
+        base = self._kernel()
+        vt = self._kernel(virtual_temperature=True)
+        state = self._pinned_state()
+        state["q"] = torch.zeros(1, P, H, W)
+        self.assertTrue(torch.equal(vt.rhs(**state)["z_t"], base.rhs(**state)["z_t"]))
+
+    def test_virtual_temperature_raises_z_tendency_in_moist_warming(self) -> None:
+        """T_v = T(1+0.608q) > T при q>0 ⇒ |интегранд| и z_t растут при прогреве.
+
+        Чистый прогрев (t_t>0) без адвекции: столб с влажностью даёт
+        z_t выше сухого на положительную величину 0.608·(вклад q·t_t + T·q_t).
+        """
+        base = self._kernel()
+        vt = self._kernel(virtual_temperature=True)
+        # источник тепла у поверхности через sources ⇒ t_t>0, q фикс. большой.
+        state = self._pinned_state()
+        state["q"] = torch.full((1, P, H, W), 8e-3)
+        src = {"t": torch.full((1, P, H, W), 1e-3)}  # равномерный прогрев К/с
+        z_dry = base.rhs(**state, sources=src)["z_t"]
+        z_vt = vt.rhs(**state, sources=src)["z_t"]
+        # z_t собирается от уровня к поверхности; прогрев столба поднимает
+        # геопотенциал сильнее во влажном случае на верхних уровнях.
+        self.assertGreater(float(interior((z_vt - z_dry)[:, 0]).mean()), 0.0)
+
+    # ----- E23-D: bulk-трение пограничного слоя -----
+
+    def test_bulk_drag_is_antiparallel_to_wind(self) -> None:
+        """Трение тормозит ветер: (u_t_drag)·u ≤ 0 и (v_t)·v ≤ 0 поточечно."""
+        base = self._kernel()
+        drag = self._kernel(bulk_drag=True)
+        state = self._pinned_state()
+        du = drag.rhs(**state)["u_t"] - base.rhs(**state)["u_t"]
+        dv = drag.rhs(**state)["v_t"] - base.rhs(**state)["v_t"]
+        mask = (drag.bulk_drag_mask > 0).expand(1, P, H, W)
+        self.assertLessEqual(float((du * state["u"])[mask].max()), 1e-12)
+        self.assertLessEqual(float((dv * state["v"])[mask].max()), 1e-12)
+
+    def test_bulk_drag_confined_to_boundary_layer(self) -> None:
+        """Выше σ_b=0.7 (уровни ≤700 гПа) добавка трения строго нулевая."""
+        base = self._kernel()
+        drag = self._kernel(bulk_drag=True)
+        state = self._pinned_state()
+        du = drag.rhs(**state)["u_t"] - base.rhs(**state)["u_t"]
+        # уровни 0..9 = 50..700 гПа: σ ≤ 0.7 ⇒ маска 0.
+        self.assertEqual(float(du[:, :10].abs().max()), 0.0)
+        self.assertGreater(float(du[:, 12].abs().max()), 0.0)  # 1000 гПа
+
+    def test_bulk_drag_zero_for_zero_wind(self) -> None:
+        """Нулевой ветер ⇒ нулевое трение (квадратично по скорости)."""
+        drag = self._kernel(bulk_drag=True)
+        state = self._pinned_state()
+        state["u"] = torch.zeros(1, P, H, W)
+        state["v"] = torch.zeros(1, P, H, W)
+        du, dv = drag._bulk_drag(state["u"], state["v"], state["t"])
+        self.assertEqual(float(du.abs().max()), 0.0)
+        self.assertEqual(float(dv.abs().max()), 0.0)
+
+    def test_bulk_drag_mutually_exclusive_with_rayleigh(self) -> None:
+        """bulk_drag и rayleigh_friction вместе — явная ошибка конфигурации."""
+        with self.assertRaises(ValueError):
+            self._kernel(bulk_drag=True, rayleigh_friction=True)
+
+    # ----- E23-C: латентное тепло осадков -----
+
+    def test_latent_heating_conserves_column_energy(self) -> None:
+        """∫(Q/c_p)·(dp/g) по столбу = L·ρ_w·P/c_p (сохранение энергии)."""
+        from utils.physics import PhysicsConstants, latent_heating_profile
+
+        kernel = self._kernel()
+        consts = PhysicsConstants()
+        precip = torch.zeros(1, 1, H, W)
+        precip[0, 0, 3, 7] = 1e-6  # ~3.6 мм/ч
+        pz = kernel.grid.pixel_z
+        p_hpa = kernel.grid.pressure.reshape(-1) / 100.0
+        q_t = latent_heating_profile(precip, pz, consts, pressure_hpa=p_hpa)
+        dp_pa = pz.reshape(-1) * 100.0
+        col = float((q_t[0, :, 3, 7] * consts.c_p * dp_pa / consts.g).sum())
+        expect = consts.L * consts.rho_w * 1e-6
+        self.assertAlmostEqual(col / expect, 1.0, delta=1e-4)
+
+    def test_latent_heating_zero_without_precip_and_positive_with(self) -> None:
+        """P=0 ⇒ нулевой источник; P>0 ⇒ строго положительный прогрев столба."""
+        from utils.physics import PhysicsConstants, latent_heating_profile
+
+        kernel = self._kernel()
+        consts = PhysicsConstants()
+        pz = kernel.grid.pixel_z
+        p_hpa = kernel.grid.pressure.reshape(-1) / 100.0
+        precip = torch.zeros(1, 1, H, W)
+        precip[0, 0, 3, 7] = 2e-6
+        q_t = latent_heating_profile(precip, pz, consts, pressure_hpa=p_hpa)
+        self.assertEqual(float(q_t[0, :, 0, 0].abs().max()), 0.0)  # нет осадков
+        self.assertGreater(float(q_t[0, :, 3, 7].sum()), 0.0)  # есть осадки
+
+    def test_latent_heating_default_profile_peaks_mid_troposphere(self) -> None:
+        """Дефолтный η(σ)=sin(πσ): максимум в средней тропосфере, нули по краям."""
+        from utils.physics import PhysicsConstants, latent_heating_profile
+
+        kernel = self._kernel()
+        consts = PhysicsConstants()
+        pz = kernel.grid.pixel_z
+        p_hpa = kernel.grid.pressure.reshape(-1) / 100.0
+        precip = torch.zeros(1, 1, H, W)
+        precip[0, 0, 3, 7] = 1e-6
+        q_t = latent_heating_profile(precip, pz, consts, pressure_hpa=p_hpa)
+        col = q_t[0, :, 3, 7]
+        # максимум не на верхнем (50 гПа) и не на приземном (1000 гПа) уровне.
+        self.assertNotIn(int(col.argmax()), (0, P - 1))
+        self.assertGreater(float(col[6]), float(col[0]))  # 400 гПа > 50 гПа
+        self.assertGreater(float(col[6]), float(col[12]))  # 400 гПа > 1000 гПа
+
+
 if __name__ == "__main__":
     unittest.main()
