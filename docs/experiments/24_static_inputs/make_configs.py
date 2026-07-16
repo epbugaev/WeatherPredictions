@@ -22,9 +22,7 @@ OUT_DIR = REPO_ROOT / "configs" / "exp24"
 USA_CUT = [[75, 107], [164, 228]]
 USA_CUT_FLAT = [75, 107, 164, 228]
 STATIC_FIELDS = ["orography", "lsm"]
-CONSTANTS_PATH = (
-    "/home/fratnikov/weather_bench/1.40625deg/constants/constants_1.40625deg.nc"
-)
+CONSTANTS_PATH = "/home/fratnikov/weather_bench/1.40625deg/constants/constants_1.40625deg.nc"
 
 # (семейство, арм) -> базовый USA-конфиг (он же — бюджет эпох и весь харнесс).
 BASE_CONFIGS: dict[tuple[str, str], str] = {
@@ -52,9 +50,7 @@ def staticize(config: dict, family: str, arm: str) -> dict:
         ValueError: родительский конфиг не USA (гард от неверной базы).
     """
     if config["data"]["cut"] != USA_CUT:
-        raise ValueError(
-            f"Родитель не USA: data.cut={config['data']['cut']}, ожидался {USA_CUT}"
-        )
+        raise ValueError(f"Родитель не USA: data.cut={config['data']['cut']}, ожидался {USA_CUT}")
     config["experiment"]["name"] = f"exp24-{family}-{arm}-static-usa-s0"
     params = config["model"]["params"]
     params["static_input_fields"] = list(STATIC_FIELDS)
@@ -77,9 +73,7 @@ def main() -> None:
             f"from {base_rel}.\n# Do not edit by hand — regenerate. "
             f"Arm={arm}, family={family}, region=usa.\n"
         )
-        body = yaml.safe_dump(
-            config, sort_keys=False, allow_unicode=True, default_flow_style=False
-        )
+        body = yaml.safe_dump(config, sort_keys=False, allow_unicode=True, default_flow_style=False)
         out_path.write_text(header + body)
         written += 1
     print(f"[make_configs] {written} конфигов -> {OUT_DIR}")  # noqa: T201

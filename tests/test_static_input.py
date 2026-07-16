@@ -223,6 +223,7 @@ class TestSimVPStaticInput(StaticInputFileMixin):
         self.assertEqual(y.shape, (2, 2, 69, GRID_H, GRID_W))
 
     def test_disabled_matches_param_absence_bitexact(self) -> None:
+        """None-ветка консистентна (SimVP); кросс-версия — голдены exp16 + harness-приёмка."""
         torch.manual_seed(0)
         plain = SimVP_Model(in_shape=SIMVP_SHAPE, hid_S=8, hid_T=32, N_S=4, N_T=2)
         torch.manual_seed(0)
@@ -269,8 +270,15 @@ class TestIAM4VPStaticInput(StaticInputFileMixin):
         # must be 64 regardless of hid_S — a pre-existing constraint, unrelated
         # to static-input channels.
         model = IAM4VP(
-            T_data=2, C_data=69, H_data=GRID_H, W_data=GRID_W,
-            hid_S=64, N_S=4, N_T=2, use_physics=False, **kwargs,
+            T_data=2,
+            C_data=69,
+            H_data=GRID_H,
+            W_data=GRID_W,
+            hid_S=64,
+            N_S=4,
+            N_T=2,
+            use_physics=False,
+            **kwargs,
         )
         model.eval()
         return model
@@ -290,17 +298,14 @@ class TestIAM4VPStaticInput(StaticInputFileMixin):
         self.assertEqual(second.shape, (2, 69, GRID_H, GRID_W))
 
     def test_disabled_matches_param_absence_bitexact(self) -> None:
+        """None-ветка консистентна (IAM4VP); кросс-версия — голдены exp16 + harness-приёмка."""
         plain = self._build()
         disabled = self._build(static_input_fields=None)
-        self.assertEqual(
-            list(plain.state_dict().keys()), list(disabled.state_dict().keys())
-        )
+        self.assertEqual(list(plain.state_dict().keys()), list(disabled.state_dict().keys()))
         x = torch.randn(1, 2, 69, GRID_H, GRID_W)
         t = torch.full((1,), 100.0)
         with torch.no_grad():
-            torch.testing.assert_close(
-                plain(x, None, t), disabled(x, None, t), rtol=0, atol=0
-            )
+            torch.testing.assert_close(plain(x, None, t), disabled(x, None, t), rtol=0, atol=0)
 
 
 def _predrnn_configs(patch_size: int) -> dict:
@@ -354,13 +359,12 @@ class TestPredRNNv2StaticInput(StaticInputFileMixin):
         self.assertEqual(out.shape, (2, 3, GRID_H, GRID_W, 69))
 
     def test_disabled_matches_param_absence_bitexact(self) -> None:
+        """None-ветка консистентна (PredRNNv2); кросс-версия — голдены exp16 + harness-приёмка."""
         torch.manual_seed(0)
         plain = PredRNNv2_Model(2, (8, 8), _predrnn_configs(1))
         torch.manual_seed(0)
         disabled = PredRNNv2_Model(2, (8, 8), _predrnn_configs(1), static_input_fields=None)
-        self.assertEqual(
-            list(plain.state_dict().keys()), list(disabled.state_dict().keys())
-        )
+        self.assertEqual(list(plain.state_dict().keys()), list(disabled.state_dict().keys()))
         plain.eval()
         disabled.eval()
         frames, mask = self._inputs()
@@ -383,8 +387,7 @@ class TestPredRNNv2StaticInput(StaticInputFileMixin):
         self.assertIn("static_input", model.state_dict())
 
 
-REPO_ROOT_CONFIG = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT_CONFIG / "docs" / "experiments" / "24_static_inputs"))
+sys.path.insert(0, str(REPO_ROOT / "docs" / "experiments" / "24_static_inputs"))
 import make_configs  # noqa: E402
 
 
@@ -411,9 +414,7 @@ class TestMakeConfigsExp24(unittest.TestCase):
         self.assertEqual(cfg["data"]["cut"], [[75, 107], [164, 228]])
 
     def test_staticize_rejects_non_usa_parent(self) -> None:
-        base = yaml.safe_load(
-            (REPO_ROOT / "configs/exp22/exp22_iam4vp_a2_npac.yaml").read_text()
-        )
+        base = yaml.safe_load((REPO_ROOT / "configs/exp22/exp22_iam4vp_a2_npac.yaml").read_text())
         with self.assertRaises(ValueError):
             make_configs.staticize(base, "iam4vp", "a2")
 
@@ -422,9 +423,7 @@ class TestMakeConfigsExp24(unittest.TestCase):
         for (family, arm), base_rel in make_configs.BASE_CONFIGS.items():
             base = yaml.safe_load((REPO_ROOT / base_rel).read_text())
             expected = make_configs.staticize(base, family, arm)
-            out_path = (
-                REPO_ROOT / "configs/exp24" / f"exp24_{family}_{arm}_static_usa.yaml"
-            )
+            out_path = REPO_ROOT / "configs/exp24" / f"exp24_{family}_{arm}_static_usa.yaml"
             self.assertTrue(out_path.exists(), f"нет {out_path} — прогони make_configs")
             self.assertEqual(yaml.safe_load(out_path.read_text()), expected)
 

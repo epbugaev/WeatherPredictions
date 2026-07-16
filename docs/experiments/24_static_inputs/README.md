@@ -33,6 +33,9 @@ Spec: [docs/superpowers/specs/2026-07-16-exp24-static-inputs-design.md](../../su
 У PredRNNv2 статика приклеивается после scheduled-sampling-смешивания;
 при patch_size>1 буфер патчится тем же патчем.
 
+Буфер статики персистентен в чекпоинте, но конструирование static-модели всегда
+читает constants-файл — при офлайн-eval вне кластера подмени `static_constants_path`.
+
 ## Запуск
 
 ```bash
