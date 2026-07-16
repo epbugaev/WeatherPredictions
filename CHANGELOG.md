@@ -120,6 +120,11 @@
   Пины контракта ключей — `tests/test_exp20_metrics.py`; выходы exp16 (56 хитмапов,
   9 фигур, таблица) регенерируются байт-в-байт.
 
+- **exp24: optional static input channels (orography + land-sea mask) for
+  IAM4VP, PredRNNv2 and SimVP families** (`utils/static_input.py`,
+  `static_input_fields` / `static_constants_path` / `static_cut` model params);
+  6 USA configs in `configs/exp24/` + generator.
+
 - **Карта архитектуры PI-IAM4VP** — [docs/architecture.md](docs/architecture.md):
   mermaid-схема одного шага прогноза и схема PDE-ядра, формы тензоров, раскладка
   69 каналов, знаковые конвенции вертикальной оси. Ключевое, что документ
