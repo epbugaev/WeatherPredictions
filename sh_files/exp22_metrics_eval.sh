@@ -38,7 +38,9 @@ mkdir -p "${OUT_DIR}" "${RAW_DIR}"
 case "${FAMILY}" in
   simvpv2) EVAL="${REPO_ROOT}/docs/experiments/21_pi_simvpv2_ladder/metrics/metrics_eval.py" ;;
   predrnnv2) EVAL="${REPO_ROOT}/docs/experiments/20_pi_predrnnv2_ladder/metrics/metrics_eval.py" ;;
-  iam4vp) EVAL="${REPO_ROOT}/docs/experiments/16_model_ablation_ladder/metrics/metrics_eval.py" ;;
+  # IAM4VP exp22 — 6-native (time_prediction=6); нативный горизонт, без 2x-раскатки
+  # (exp16-обёртка катит до 12 и падает на mask_token размера 6).
+  iam4vp) EVAL="${REPO_ROOT}/docs/experiments/22_cross_region_physics/metrics/metrics_eval_iam4vp.py" ;;
   *) echo "[exp22-metrics] неизвестное семейство ${FAMILY}" >&2; exit 2 ;;
 esac
 
