@@ -33,6 +33,19 @@ def read_constant_fields(path: str, names: list[str], cut: list[int]) -> dict[st
     return fields
 
 
+def standardize_field(field: np.ndarray) -> np.ndarray:
+    """Z-score a 2-D field over its own crop: ``(x - mean) / (std + 1e-6)``.
+
+    Args:
+        field: 2-D array to standardize (e.g. orography, cropped).
+
+    Returns:
+        ``np.ndarray`` of the same shape and dtype, zero-mean, unit-variance
+        (up to the ``1e-6`` stabilizer added to the denominator).
+    """
+    return (field - field.mean()) / (field.std() + 1e-6)
+
+
 def load_static_input_fields(
     path: str, fields: list[str], cut: list[int], H: int, W: int
 ) -> torch.Tensor:
@@ -66,7 +79,7 @@ def load_static_input_fields(
                 f"static field {name!r} crop {field.shape} != ({H}, {W}); check cut {cut}"
             )
         if name == "orography":
-            field = (field - field.mean()) / (field.std() + 1e-6)
+            field = standardize_field(field)
         layers.append(field)
     return torch.from_numpy(np.stack(layers, axis=0)).float()
 

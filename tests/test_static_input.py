@@ -17,6 +17,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from utils.physics_residual import PhysicsResidualMixin  # noqa: E402
 from utils.static_input import (  # noqa: E402
     STATIC_INPUT_FIELDS,
     StaticInputMixin,
@@ -98,9 +99,7 @@ class TestLoadStaticInputFields(StaticInputFileMixin):
     def test_rejects_unknown_field(self) -> None:
         self.assertEqual(STATIC_INPUT_FIELDS, ("orography", "lsm"))
         with self.assertRaises(ValueError):
-            load_static_input_fields(
-                self.nc_path, ["orography", "slt"], FULL_CUT, GRID_H, GRID_W
-            )
+            load_static_input_fields(self.nc_path, ["orography", "slt"], FULL_CUT, GRID_H, GRID_W)
 
     def test_rejects_empty_fields(self) -> None:
         with self.assertRaises(ValueError):
@@ -155,6 +154,28 @@ class TestStaticInputMixin(StaticInputFileMixin):
         _ToyModel(None, None)
         state_after_disabled = torch.get_rng_state()
         self.assertTrue(torch.equal(state_after_enabled, state_after_disabled))
+
+
+class TestLoadStaticGeoUnchanged(StaticInputFileMixin):
+    """Регресс-гард рефакторинга: _load_static_geo бит-в-бит как старая формула."""
+
+    def test_matches_legacy_formula(self) -> None:
+        geo = PhysicsResidualMixin._load_static_geo(self.nc_path, FULL_CUT, GRID_H, GRID_W)
+        orog = self.fields["orography"]
+        expected = np.stack(
+            [
+                (orog - orog.mean()) / (orog.std() + 1e-6),
+                np.abs(self.fields["lat2d"]) / 90.0,
+                self.fields["lsm"],
+            ],
+            axis=0,
+        )[None]
+        self.assertEqual(geo.shape, (1, 3, GRID_H, GRID_W))
+        torch.testing.assert_close(geo, torch.from_numpy(expected).float(), rtol=0, atol=0)
+
+    def test_requires_path(self) -> None:
+        with self.assertRaises(ValueError):
+            PhysicsResidualMixin._load_static_geo(None, FULL_CUT, GRID_H, GRID_W)
 
 
 if __name__ == "__main__":

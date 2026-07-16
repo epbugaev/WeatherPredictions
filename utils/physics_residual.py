@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import warnings
 
-import h5netcdf
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -40,6 +39,7 @@ from utils.physics_hybrid import (
     relative_to_specific_humidity,
     specific_to_relative_humidity,
 )
+from utils.static_input import read_constant_fields, standardize_field
 
 PRESSURE_LEVELS_HPA: tuple[int, ...] = (
     50,
@@ -782,14 +782,11 @@ class PhysicsResidualMixin:
             raise ValueError("use_diabatic_term=True requires diabatic_constants_path")
         if cut is None:
             cut = [75, 107, 164, 228]
-        la0, la1, lo0, lo1 = cut
-        with h5netcdf.File(path, "r") as f:
-            orog = np.asarray(f.variables["orography"], dtype=np.float32)[la0:la1, lo0:lo1]
-            lsm = np.asarray(f.variables["lsm"], dtype=np.float32)[la0:la1, lo0:lo1]
-            lat2d = np.asarray(f.variables["lat2d"], dtype=np.float32)[la0:la1, lo0:lo1]
+        raw = read_constant_fields(path, ["orography", "lsm", "lat2d"], cut)
+        orog, lsm, lat2d = raw["orography"], raw["lsm"], raw["lat2d"]
         if orog.shape != (H, W):
             raise ValueError(f"geo crop {orog.shape} != ({H},{W}); check diabatic_cut {cut}")
-        orog_n = (orog - orog.mean()) / (orog.std() + 1e-6)
+        orog_n = standardize_field(orog)
         abslat_n = np.abs(lat2d) / 90.0
         geo = np.stack([orog_n, abslat_n, lsm], axis=0)[None]
         return torch.from_numpy(geo).float()
