@@ -17,6 +17,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from Models.SimVP import PI_SimVP_Model, SimVP_Model  # noqa: E402
 from utils.physics_residual import PhysicsResidualMixin  # noqa: E402
 from utils.static_input import (  # noqa: E402
     STATIC_INPUT_FIELDS,
@@ -176,6 +177,85 @@ class TestLoadStaticGeoUnchanged(StaticInputFileMixin):
     def test_requires_path(self) -> None:
         with self.assertRaises(ValueError):
             PhysicsResidualMixin._load_static_geo(None, FULL_CUT, GRID_H, GRID_W)
+
+
+SIMVP_SHAPE = (2, 69, GRID_H, GRID_W)
+
+PHYSICS_NOPHYS = {
+    "use_physics_residual_corrector": True,
+    "physics_residual_hidden_channels": 16,
+    "physics_residual_apply_to": "upper_air_only",
+    "physics_residual_zero_init": True,
+    "physics_residual_lambda_l1": 1e-4,
+    "physics_feature_mode": "no_physics",
+    "physics_residual_shuffle": "none",
+    "physics_lat_start_deg": 18.28125,
+    "physics_dlat_deg": 5.625,
+    "physics_dlon_deg": 5.625,
+}
+
+
+class TestSimVPStaticInput(StaticInputFileMixin):
+    def _static_kwargs(self) -> dict:
+        return {
+            "static_input_fields": ["orography", "lsm"],
+            "static_constants_path": self.nc_path,
+            "static_cut": FULL_CUT,
+        }
+
+    def test_backbone_forward_shape_unchanged(self) -> None:
+        torch.manual_seed(0)
+        model = SimVP_Model(
+            in_shape=SIMVP_SHAPE,
+            hid_S=8,
+            hid_T=32,
+            N_S=4,
+            N_T=2,
+            **self._static_kwargs(),
+        )
+        model.eval()
+        x = torch.randn(2, 2, 69, GRID_H, GRID_W)
+        with torch.no_grad():
+            y = model(x)
+        self.assertEqual(y.shape, (2, 2, 69, GRID_H, GRID_W))
+
+    def test_disabled_matches_param_absence_bitexact(self) -> None:
+        torch.manual_seed(0)
+        plain = SimVP_Model(in_shape=SIMVP_SHAPE, hid_S=8, hid_T=32, N_S=4, N_T=2)
+        torch.manual_seed(0)
+        disabled = SimVP_Model(
+            in_shape=SIMVP_SHAPE,
+            hid_S=8,
+            hid_T=32,
+            N_S=4,
+            N_T=2,
+            static_input_fields=None,
+        )
+        self.assertEqual(list(plain.state_dict().keys()), list(disabled.state_dict().keys()))
+        plain.eval()
+        disabled.eval()
+        x = torch.randn(1, 2, 69, GRID_H, GRID_W)
+        with torch.no_grad():
+            torch.testing.assert_close(plain(x), disabled(x), rtol=0, atol=0)
+
+    def test_pi_model_with_static_and_physics(self) -> None:
+        torch.manual_seed(0)
+        model = PI_SimVP_Model(
+            in_shape=SIMVP_SHAPE,
+            hid_S=8,
+            hid_T=32,
+            N_S=4,
+            N_T=2,
+            **self._static_kwargs(),
+            **PHYSICS_NOPHYS,
+        )
+        model.eval()
+        model.set_physics_normalization(torch.zeros(69), torch.ones(69))
+        x = torch.randn(1, 2, 69, GRID_H, GRID_W)
+        with torch.no_grad():
+            y = model(x)
+        self.assertEqual(y.shape, (1, 2, 69, GRID_H, GRID_W))
+        self.assertIn("static_input", model.state_dict())
 
 
 if __name__ == "__main__":

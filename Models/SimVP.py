@@ -18,11 +18,12 @@ from Models.SimVP_utils import (
     gInception_ST,
 )
 from utils.physics_residual import PhysicsResidualMixin
+from utils.static_input import StaticInputMixin
 
 PHYSICS_COUPLINGS = ("batched", "chained")
 
 
-class SimVP_Model(nn.Module):
+class SimVP_Model(StaticInputMixin, nn.Module):
     r"""Видеопредиктор SimVP: encoder → mid → decoder с U-Net skip-connection’ами.
 
     Реализация `SimVP: Simpler yet Better Video Prediction
@@ -38,6 +39,13 @@ class SimVP_Model(nn.Module):
         mlp_ratio, drop, drop_path: типичные dropout/MLP-параметры.
         spatio_kernel_enc/dec: kernel-size для spatial-сверток.
         act_inplace: использовать ли in-place активации (для torch.compile = False).
+        static_input_fields: опциональный список статических полей (exp24),
+            например ``["orography", "lsm"]``; ``None`` = выключено (дефолт,
+            бит-в-бит прежнее поведение).
+        static_constants_path: путь к constants-NetCDF; обязателен при
+            включённой статике.
+        static_cut: окно кропа ``[lat0, lat1, lon0, lon1]``; обязателен при
+            включённой статике.
     """
 
     def __init__(
@@ -54,13 +62,19 @@ class SimVP_Model(nn.Module):
         spatio_kernel_enc=3,
         spatio_kernel_dec=3,
         act_inplace=True,
+        static_input_fields=None,
+        static_constants_path=None,
+        static_cut=None,
         **kwargs,
     ):
         super().__init__()
         T, C, H, W = in_shape  # T is pre_seq_length
+        num_static = self.init_static_input(
+            static_input_fields, static_constants_path, static_cut, H, W
+        )
         H, W = int(H / 2 ** (N_S / 2)), int(W / 2 ** (N_S / 2))  # downsample 1 / 2**(N_S/2)
         act_inplace = False
-        self.enc = Encoder(C, hid_S, N_S, spatio_kernel_enc, act_inplace=act_inplace)
+        self.enc = Encoder(C + num_static, hid_S, N_S, spatio_kernel_enc, act_inplace=act_inplace)
         self.dec = Decoder(hid_S, C, N_S, spatio_kernel_dec, act_inplace=act_inplace)
 
         model_type = "gsta" if model_type is None else model_type.lower()
@@ -89,6 +103,7 @@ class SimVP_Model(nn.Module):
         """
         B, T, C, H, W = x_raw.shape
         x = x_raw.view(B * T, C, H, W)
+        x = self.append_static_input(x)
 
         embed, skip = self.enc(x)
         _, C_, H_, W_ = embed.shape
@@ -135,6 +150,8 @@ class PI_SimVP_Model(PhysicsResidualMixin, SimVP_Model):
             spatio_kernel_enc, spatio_kernel_dec, act_inplace: параметры бэкбона
             :class:`SimVP_Model`; дефолтный ``model_type="gSTA"`` — это v2.
         physics_coupling: ``"batched"`` или ``"chained"`` (см. выше).
+        static_input_fields, static_constants_path, static_cut: опциональные
+            статические входные каналы (exp24), см. :class:`SimVP_Model`.
         **physics_kwargs: параметры физветки, пробрасываются дословно в
             :meth:`utils.physics_residual.PhysicsResidualMixin.init_physics_residual`.
     """
@@ -155,6 +172,9 @@ class PI_SimVP_Model(PhysicsResidualMixin, SimVP_Model):
         act_inplace=True,
         physics_coupling: str = "batched",
         physics_chunk_size: int = 256,
+        static_input_fields=None,
+        static_constants_path=None,
+        static_cut=None,
         **physics_kwargs,
     ) -> None:
         super().__init__(
@@ -170,6 +190,9 @@ class PI_SimVP_Model(PhysicsResidualMixin, SimVP_Model):
             spatio_kernel_enc=spatio_kernel_enc,
             spatio_kernel_dec=spatio_kernel_dec,
             act_inplace=act_inplace,
+            static_input_fields=static_input_fields,
+            static_constants_path=static_constants_path,
+            static_cut=static_cut,
         )
         if physics_coupling not in PHYSICS_COUPLINGS:
             raise ValueError(
