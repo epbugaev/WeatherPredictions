@@ -30,6 +30,7 @@ from torch import nn
 
 from Models.PredRNN_utils import SpatioTemporalLSTMCell, SpatioTemporalLSTMCellv2
 from utils.physics_residual import PhysicsResidualMixin
+from utils.static_input import StaticInputMixin
 
 
 def _reshape_patch(frames: torch.Tensor, patch_size: int) -> torch.Tensor:
@@ -198,7 +199,7 @@ class PredRNN_Model(nn.Module):
         return next_frames, {}
 
 
-class PredRNNv2_Model(nn.Module):
+class PredRNNv2_Model(StaticInputMixin, nn.Module):
     """PredRNN-V2 with memory decoupling (TPAMI 2022).
 
     Adds the shared 1x1 ``adapter`` and the cosine-similarity decoupling
@@ -209,9 +210,24 @@ class PredRNNv2_Model(nn.Module):
         num_hidden: Per-layer hidden channel counts, length ``num_layers``.
         configs: Geometry/config dict (see :func:`_parse_configs`);
             ``decouple_beta`` weights the decoupling loss (default ``0.1``).
+        static_input_fields: Optional list of static field names (exp 24);
+            ``None``/empty disables the feature (bit-exact with the prior
+            behavior).
+        static_constants_path: Path to the constants NetCDF; required when
+            ``static_input_fields`` is set.
+        static_cut: Crop window ``[lat0, lat1, lon0, lon1]``; required when
+            ``static_input_fields`` is set.
     """
 
-    def __init__(self, num_layers: int, num_hidden, configs: dict) -> None:
+    def __init__(
+        self,
+        num_layers: int,
+        num_hidden,
+        configs: dict,
+        static_input_fields: list[str] | None = None,
+        static_constants_path: str | None = None,
+        static_cut: list[int] | None = None,
+    ) -> None:
         super().__init__()
         cfg = _parse_configs(configs)
         self.img_channel = cfg["img_channel"]
@@ -223,9 +239,23 @@ class PredRNNv2_Model(nn.Module):
         self.num_layers = num_layers
         self.num_hidden = list(num_hidden)
 
+        _, _, img_height, img_width = tuple(configs["in_shape"])
+        num_static = self.init_static_input(
+            static_input_fields, static_constants_path, static_cut, img_height, img_width
+        )
+        # Кадры патчатся внутри forward, поэтому буфер статики хранится уже
+        # пропатченным: (1, S, H, W) -> (1, S*p^2, H/p, W/p).
+        self.static_channel = num_static * self.patch_size**2
+        if num_static > 0:
+            static_channels_last = self.static_input.permute(0, 2, 3, 1).unsqueeze(1)
+            patched = _reshape_patch(static_channels_last, self.patch_size)
+            self.static_input = patched[0].permute(0, 3, 1, 2).contiguous()
+
         cell_list = []
         for i in range(num_layers):
-            in_channel = self.frame_channel if i == 0 else self.num_hidden[i - 1]
+            in_channel = (
+                self.frame_channel + self.static_channel if i == 0 else self.num_hidden[i - 1]
+            )
             cell_list.append(
                 SpatioTemporalLSTMCellv2(
                     in_channel,
@@ -322,7 +352,7 @@ class PredRNNv2_Model(nn.Module):
                     )
 
             h_t[0], c_t[0], memory, delta_c, delta_m = self.cell_list[0](
-                net, h_t[0], c_t[0], memory
+                self.append_static_input(net), h_t[0], c_t[0], memory
             )
             delta_c_list[0] = F.normalize(
                 self.adapter(delta_c).view(delta_c.shape[0], delta_c.shape[1], -1), dim=2
@@ -376,12 +406,35 @@ class PI_PredRNNv2_Model(PhysicsResidualMixin, PredRNNv2_Model):
         num_layers: number of stacked :class:`SpatioTemporalLSTMCellv2` layers.
         num_hidden: per-layer hidden channel counts, length ``num_layers``.
         configs: geometry/config dict (see :func:`_parse_configs`).
+        static_input_fields: Optional list of static field names (exp 24);
+            ``None``/empty disables the feature (bit-exact with the prior
+            behavior).
+        static_constants_path: Path to the constants NetCDF; required when
+            ``static_input_fields`` is set.
+        static_cut: Crop window ``[lat0, lat1, lon0, lon1]``; required when
+            ``static_input_fields`` is set.
         **physics_kwargs: physics-branch parameters, forwarded verbatim to
             :meth:`utils.physics_residual.PhysicsResidualMixin.init_physics_residual`.
     """
 
-    def __init__(self, num_layers: int, num_hidden, configs: dict, **physics_kwargs) -> None:
-        super().__init__(num_layers, num_hidden, configs)
+    def __init__(
+        self,
+        num_layers: int,
+        num_hidden,
+        configs: dict,
+        static_input_fields: list[str] | None = None,
+        static_constants_path: str | None = None,
+        static_cut: list[int] | None = None,
+        **physics_kwargs,
+    ) -> None:
+        super().__init__(
+            num_layers,
+            num_hidden,
+            configs,
+            static_input_fields=static_input_fields,
+            static_constants_path=static_constants_path,
+            static_cut=static_cut,
+        )
         if self.patch_size != 1:
             raise ValueError(
                 "PI-PredRNNv2 requires patch_size=1: the physics kernel consumes the raw "

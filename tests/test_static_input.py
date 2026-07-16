@@ -18,6 +18,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from Models.IAM4VP import IAM4VP  # noqa: E402
+from Models.PredRNN import PI_PredRNNv2_Model, PredRNNv2_Model  # noqa: E402
 from Models.SimVP import PI_SimVP_Model, SimVP_Model  # noqa: E402
 from utils.physics_residual import PhysicsResidualMixin  # noqa: E402
 from utils.static_input import (  # noqa: E402
@@ -299,6 +300,86 @@ class TestIAM4VPStaticInput(StaticInputFileMixin):
             torch.testing.assert_close(
                 plain(x, None, t), disabled(x, None, t), rtol=0, atol=0
             )
+
+
+def _predrnn_configs(patch_size: int) -> dict:
+    return {
+        "in_shape": (2, 69, GRID_H, GRID_W),
+        "patch_size": patch_size,
+        "filter_size": 3,
+        "stride": 1,
+        "layer_norm": True,
+        "pre_seq_length": 2,
+        "aft_seq_length": 2,
+        "reverse_scheduled_sampling": 0,
+        "decouple_beta": 0.1,
+    }
+
+
+class TestPredRNNv2StaticInput(StaticInputFileMixin):
+    def _static_kwargs(self) -> dict:
+        return {
+            "static_input_fields": ["orography", "lsm"],
+            "static_constants_path": self.nc_path,
+            "static_cut": FULL_CUT,
+        }
+
+    def _inputs(self) -> tuple[torch.Tensor, torch.Tensor]:
+        torch.manual_seed(1)
+        frames = torch.randn(2, 4, GRID_H, GRID_W, 69)
+        mask = torch.zeros(1, 1, 1, 1, 1)
+        return frames, mask
+
+    def test_forward_shape_patch1(self) -> None:
+        torch.manual_seed(0)
+        model = PredRNNv2_Model(2, (8, 8), _predrnn_configs(1), **self._static_kwargs())
+        model.eval()
+        frames, mask = self._inputs()
+        with torch.no_grad():
+            out, aux = model(frames, mask)
+        self.assertEqual(out.shape, (2, 3, GRID_H, GRID_W, 69))
+        self.assertIn("decouple", aux)
+
+    def test_forward_shape_patch2_static_is_patched(self) -> None:
+        """patch_size=2: буфер статики патчится, канальная арифметика сходится."""
+        torch.manual_seed(0)
+        model = PredRNNv2_Model(2, (8, 8), _predrnn_configs(2), **self._static_kwargs())
+        model.eval()
+        # frame_channel = 4*69, статика = 4*2 канала на латентной сетке H/2 x W/2.
+        self.assertEqual(model.static_input.shape, (1, 8, GRID_H // 2, GRID_W // 2))
+        frames, mask = self._inputs()
+        with torch.no_grad():
+            out, _ = model(frames, mask)
+        self.assertEqual(out.shape, (2, 3, GRID_H, GRID_W, 69))
+
+    def test_disabled_matches_param_absence_bitexact(self) -> None:
+        torch.manual_seed(0)
+        plain = PredRNNv2_Model(2, (8, 8), _predrnn_configs(1))
+        torch.manual_seed(0)
+        disabled = PredRNNv2_Model(2, (8, 8), _predrnn_configs(1), static_input_fields=None)
+        self.assertEqual(
+            list(plain.state_dict().keys()), list(disabled.state_dict().keys())
+        )
+        plain.eval()
+        disabled.eval()
+        frames, mask = self._inputs()
+        with torch.no_grad():
+            torch.testing.assert_close(
+                plain(frames, mask)[0], disabled(frames, mask)[0], rtol=0, atol=0
+            )
+
+    def test_pi_model_with_static_and_physics(self) -> None:
+        torch.manual_seed(0)
+        model = PI_PredRNNv2_Model(
+            2, (8, 8), _predrnn_configs(1), **self._static_kwargs(), **PHYSICS_NOPHYS
+        )
+        model.eval()
+        model.set_physics_normalization(torch.zeros(69), torch.ones(69))
+        frames, mask = self._inputs()
+        with torch.no_grad():
+            out, aux = model(frames, mask)
+        self.assertEqual(out.shape, (2, 3, GRID_H, GRID_W, 69))
+        self.assertIn("static_input", model.state_dict())
 
 
 if __name__ == "__main__":
