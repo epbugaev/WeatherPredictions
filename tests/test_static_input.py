@@ -182,6 +182,50 @@ class TestLoadStaticGeoUnchanged(StaticInputFileMixin):
             PhysicsResidualMixin._load_static_geo(None, FULL_CUT, GRID_H, GRID_W)
 
 
+class TestLoadStaticGeoFields(StaticInputFileMixin):
+    """Подмножество geo-полей диабатики (exp25: изоляция маршрута орографии)."""
+
+    def test_default_none_is_full_three(self) -> None:
+        """fields=None ⇒ прежние 3 канала [orography, lat, lsm] бит-в-бит."""
+        default = PhysicsResidualMixin._load_static_geo(self.nc_path, FULL_CUT, GRID_H, GRID_W)
+        explicit = PhysicsResidualMixin._load_static_geo(
+            self.nc_path, FULL_CUT, GRID_H, GRID_W, ["orography", "lat", "lsm"]
+        )
+        torch.testing.assert_close(default, explicit, rtol=0, atol=0)
+
+    def test_drop_orography_keeps_lat_lsm(self) -> None:
+        """fields=[lat, lsm] ⇒ 2 канала без орографии, в каноническом порядке."""
+        geo = PhysicsResidualMixin._load_static_geo(
+            self.nc_path, FULL_CUT, GRID_H, GRID_W, ["lat", "lsm"]
+        )
+        expected = np.stack(
+            [np.abs(self.fields["lat2d"]) / 90.0, self.fields["lsm"]], axis=0
+        )[None]
+        self.assertEqual(geo.shape, (1, 2, GRID_H, GRID_W))
+        torch.testing.assert_close(geo, torch.from_numpy(expected).float(), rtol=0, atol=0)
+
+    def test_canonical_order_independent_of_input_order(self) -> None:
+        """Порядок каналов канонический (orography, lat, lsm) независимо от порядка в списке."""
+        a = PhysicsResidualMixin._load_static_geo(
+            self.nc_path, FULL_CUT, GRID_H, GRID_W, ["lsm", "orography"]
+        )
+        b = PhysicsResidualMixin._load_static_geo(
+            self.nc_path, FULL_CUT, GRID_H, GRID_W, ["orography", "lsm"]
+        )
+        torch.testing.assert_close(a, b, rtol=0, atol=0)
+        self.assertEqual(a.shape, (1, 2, GRID_H, GRID_W))
+
+    def test_empty_fields_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            PhysicsResidualMixin._load_static_geo(self.nc_path, FULL_CUT, GRID_H, GRID_W, [])
+
+    def test_unknown_field_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            PhysicsResidualMixin._load_static_geo(
+                self.nc_path, FULL_CUT, GRID_H, GRID_W, ["orography", "slt"]
+            )
+
+
 SIMVP_SHAPE = (2, 69, GRID_H, GRID_W)
 
 PHYSICS_NOPHYS = {

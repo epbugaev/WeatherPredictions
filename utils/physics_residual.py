@@ -116,6 +116,7 @@ class PhysicsResidualMixin:
         diabatic_constants_path: str | None = None,
         diabatic_cut: list[int] | None = None,
         diabatic_apply_to: str = "all_upper_air",
+        diabatic_geo_fields: list[str] | None = None,
         freeze_iam4vp_for_residual_warmup: bool = False,
         residual_warmup_epochs: int = 0,
     ) -> None:
@@ -208,6 +209,9 @@ class PhysicsResidualMixin:
             diabatic_lambda_l1: L1 weight of ``Q_theta`` in the aux loss.
             diabatic_constants_path: NetCDF with orography / lsm / lat2d.
             diabatic_cut: ``[lat0, lat1, lon0, lon1]`` crop of those constants.
+            diabatic_geo_fields: subset of ``('orography', 'lat', 'lsm')`` fed to
+                the Q_theta head; ``None`` = all three (bit-exact). Used by exp25
+                to isolate orography's diabatic route (drop it -> ``['lat', 'lsm']``).
             diabatic_apply_to: ``'all_upper_air'``, ``'t_and_q'`` or ``'t_only'``.
             freeze_iam4vp_for_residual_warmup: freeze the host backbone while the
                 residual head warms up (read by the training strategy).
@@ -473,7 +477,9 @@ class PhysicsResidualMixin:
                 zero_init=physics_residual_zero_init,
             )
             if self.use_diabatic_term:
-                geo = self._load_static_geo(diabatic_constants_path, diabatic_cut, H_data, W_data)
+                geo = self._load_static_geo(
+                    diabatic_constants_path, diabatic_cut, H_data, W_data, diabatic_geo_fields
+                )
                 self.register_buffer("diabatic_geo", geo)
                 self.diabatic_head = PhysicsTendencyResidualCorrector(
                     in_channels=corrected_channels + geo.shape[1],
@@ -782,31 +788,61 @@ class PhysicsResidualMixin:
     def _rms(x: torch.Tensor) -> torch.Tensor:
         return torch.sqrt(torch.mean(x.float() * x.float()))
 
+    # Канонический порядок geo-каналов диабатики и их формулы нормировки.
+    DIABATIC_GEO_FIELDS = ("orography", "lat", "lsm")
+
     @staticmethod
     def _load_static_geo(
         path: str | None,
         cut: list[int] | None,
         H: int,
         W: int,
+        fields: list[str] | None = None,
     ) -> torch.Tensor:
-        """Load + crop static geography (orography, |lat|, lsm) as (1, 3, H, W).
+        """Load + crop static geography as (1, S, H, W); S = len(fields).
 
         E9'-geo diabatic inputs: standardized orography, |lat|/90, land-sea mask.
         Cropped to the region window ``cut=[lat0, lat1, lon0, lon1]`` on the
         native constants grid. These are the geographic drivers exp 05 flagged
         as the physics failure modes (mountains, tropics f->0).
+
+        Args:
+            path: constants NetCDF (orography / lsm / lat2d).
+            cut: crop window ``[lat0, lat1, lon0, lon1]`` (default USA).
+            H, W: expected cropped spatial shape (crop validation).
+            fields: subset of :data:`DIABATIC_GEO_FIELDS` to emit; ``None`` =
+                all three (bit-exact legacy). Channels are always in canonical
+                order regardless of the order given (exp25 orography isolation).
+
+        Returns:
+            ``torch.Tensor`` of shape ``(1, len(selected), H, W)``.
         """
         if path is None:
             raise ValueError("use_diabatic_term=True requires diabatic_constants_path")
         if cut is None:
             cut = [75, 107, 164, 228]
+        selected = list(PhysicsResidualMixin.DIABATIC_GEO_FIELDS if fields is None else fields)
+        unknown = set(selected) - set(PhysicsResidualMixin.DIABATIC_GEO_FIELDS)
+        if unknown:
+            raise ValueError(
+                f"diabatic_geo_fields {sorted(unknown)} not in "
+                f"{list(PhysicsResidualMixin.DIABATIC_GEO_FIELDS)}"
+            )
+        if not selected:
+            raise ValueError("diabatic_geo_fields must be non-empty")
         raw = read_constant_fields(path, ["orography", "lsm", "lat2d"], cut)
         orog, lsm, lat2d = raw["orography"], raw["lsm"], raw["lat2d"]
         if orog.shape != (H, W):
             raise ValueError(f"geo crop {orog.shape} != ({H},{W}); check diabatic_cut {cut}")
-        orog_n = standardize_field(orog)
-        abslat_n = np.abs(lat2d) / 90.0
-        geo = np.stack([orog_n, abslat_n, lsm], axis=0)[None]
+        channels = {
+            "orography": standardize_field(orog),
+            "lat": np.abs(lat2d) / 90.0,
+            "lsm": lsm,
+        }
+        # Канонический порядок независимо от порядка в ``fields`` — иначе буфер
+        # зависел бы от того, как поля перечислены в конфиге.
+        keep = [name for name in PhysicsResidualMixin.DIABATIC_GEO_FIELDS if name in selected]
+        geo = np.stack([channels[name] for name in keep], axis=0)[None]
         return torch.from_numpy(geo).float()
 
     def _physics_prior_from_state(self, prev_state: torch.Tensor) -> torch.Tensor:
