@@ -449,9 +449,12 @@ class PDE_kernel(nn.Module):
         # Вертикальная квадратура: буферы M_z/w_int инстанса. Под 'rectangle'
         # равны модуль-глобалям бит-в-бит; под 'trapezoid' — исправленные веса.
         self.vertical_quadrature = vertical_quadrature
+        # Детерминированные веса квадратуры (функция только от vertical_quadrature),
+        # пересчитываются в __init__ → persistent=False: не раздувают чекпоинт и не
+        # ломают strict-load чекпоинтов, обученных кодом до появления этих буферов.
         mz_inst, wint_inst = build_vertical_quadrature(vertical_quadrature)
-        self.register_buffer("M_z_quad", mz_inst)
-        self.register_buffer("w_int", wint_inst)
+        self.register_buffer("M_z_quad", mz_inst, persistent=False)
+        self.register_buffer("w_int", wint_inst, persistent=False)
 
         self.norm = norm
         self.eddy_viscosity = eddy_viscosity
