@@ -11,9 +11,10 @@
 # Полный набор метрик 4 армов exp25 (изоляция маршрута орографии, USA, 12-шаг
 # exp16-обёртка) + парные бутстрап-дельты к baseline d0. Носитель — IAM4VP.
 #
-# Чекпоинты: d0/d2/d3 обучены в exp25, d1 переиспользуется (см. README):
-#   d0,d2,d3 -> ${CKPT_BASE}/exp25-iam4vp-<arm>-usa-s0   (обучены в exp25)
-#   d1       -> abl16_long_ckpt/abl16L-r3-a2-exp13-t12-s0 (готов @500, идентичный конфиг)
+# Чекпоинты: d0/d2 обучены в exp25, d1/d3 переиспользуются (см. README):
+#   d0,d2 -> ${CKPT_BASE}/exp25-iam4vp-<arm>-usa-s0       (обучены в exp25)
+#   d1    -> abl16_long_ckpt/abl16L-r3-a2-exp13-t12-s0     (готов @500, идентичный конфиг)
+#   d3    -> wt_exp24/.../exp24-iam4vp-a2-orog-usa-s1      (готов @500 в exp24, seed 1)
 # Все выходы именуются exp25-iam4vp-<arm>-usa-s0 → единое каноническое имя.
 #
 #   sbatch sh_files/exp25_metrics_eval.sh
@@ -45,10 +46,11 @@ for f in "${MEMMAP}" "${CLIMATOLOGY}" "${THRESHOLDS}"; do
   if [[ ! -f "${f}" ]]; then echo "[exp25-metrics] нет ${f}" >&2; exit 2; fi
 done
 
-# Резолвер каталога чекпоинта арма (d1 переиспользуется из готового abl16-r3).
+# Резолвер каталога чекпоинта арма (d1/d3 переиспользуются из готовых ранов).
 arm_ckpt_dir() {
   case "$1" in
     d1) echo "${HOME}/abl16_long_ckpt/abl16L-r3-a2-exp13-t12-s0" ;;
+    d3) echo "${HOME}/wt_exp24/checkpoints/exp24-iam4vp-a2-orog-usa-s1" ;;
     *)  echo "${CKPT_BASE}/exp25-iam4vp-$1-usa-s0" ;;
   esac
 }
