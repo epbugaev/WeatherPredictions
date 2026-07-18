@@ -57,6 +57,13 @@ def test_canonical_arm_strips_exp21_seed_suffix() -> None:
     assert canonical_arm("exp21L-s0-no-physics-t12-seed0").startswith("exp21L-")
 
 
+def test_canonical_arm_strips_nonzero_seed_suffix() -> None:
+    # exp24 повторяет IAM4VP на seed 1: суффикс ``-s1`` режется как и ``-s0``.
+    assert canonical_arm("exp24-iam4vp-a2-orog-usa-s1") == "exp24-iam4vp-a2-orog-usa"
+    assert canonical_arm("exp24-iam4vp-nophys-static-usa-s0") == "exp24-iam4vp-nophys-static-usa"
+    assert canonical_arm("exp21L-s0-no-physics-t12-seed2") == "exp21L-s0-no-physics"
+
+
 def test_canonical_arm_is_idempotent() -> None:
     for name in ("abl16L-r5-exp15-t12-s0", "exp20-p5-exp15-s0"):
         once = canonical_arm(name)
