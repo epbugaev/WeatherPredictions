@@ -30,12 +30,23 @@ export REPO_ROOT
 source "${REPO_ROOT}/sh_files/_shell_contract.sh" "${REPO_ROOT}/sh_files"
 
 REGION="usa"
+# Сид волны: s0 (первичная) по умолчанию; s1 — повторная волна IAM4VP на proj_1717.
+# Он входит в имя рана и изолирует выходные каталоги, иначе paired_deltas.py
+# (глобит весь RAW_DIR) смешал бы армы разных сидов.
+SEED_TAG="${SEED_TAG:-s0}"
+# s0 сохраняет исторические пути (на них ссылаются готовые heatmap-артефакты);
+# s1+ получают суффикс сида, чтобы каталоги не пересекались.
+if [[ "${SEED_TAG}" == "s0" ]]; then
+  SEED_SUFFIX=""
+else
+  SEED_SUFFIX="_${SEED_TAG}"
+fi
 CKPT_BASE="${CKPT_BASE:-${REPO_ROOT}/checkpoints}"
 MEMMAP_DIR="${MEMMAP_DIR:-${HOME}/era5_memmap}"
-OUT_DIR="${OUT_DIR:-${HOME}/exp24_metrics}"
+OUT_DIR="${OUT_DIR:-${HOME}/exp24_metrics${SEED_SUFFIX}}"
 # Raw по-сэмпльно изолирован: paired_deltas.py глобит весь каталог, поэтому в нём
-# должны лежать только армы одной лестницы.
-RAW_DIR="${RAW_DIR:-${HOME}/exp24_metrics_raw/iam4vp_${REGION}}"
+# должны лежать только армы одной лестницы (одного сида).
+RAW_DIR="${RAW_DIR:-${HOME}/exp24_metrics_raw/iam4vp_${REGION}${SEED_SUFFIX}}"
 CKPT_NAME="${CKPT_NAME:-last.pt}"
 mkdir -p "${OUT_DIR}" "${RAW_DIR}"
 
@@ -52,7 +63,7 @@ done
 # Порядок: контроль nophys-orog первым (он же baseline парного бутстрапа).
 read -r -a ARMS <<<"${EXP24_ARMS:-nophys-orog a2-orog nophys-static a2-static}"
 for arm in "${ARMS[@]}"; do
-  run="exp24-iam4vp-${arm}-${REGION}-s0"
+  run="exp24-iam4vp-${arm}-${REGION}-${SEED_TAG}"
   ckpt="$(ls -t "${CKPT_BASE}/${run}"/*/"${CKPT_NAME}" 2>/dev/null | head -1)"
   if [[ -z "${ckpt}" ]]; then echo "[exp24-metrics] нет чекпоинта ${run} — пропуск" >&2; continue; fi
   echo "[exp24-metrics] ${run} ckpt=${ckpt}"
@@ -69,7 +80,7 @@ done
 
 # Парные дельты к nophys-orog — только если контроль и ≥1 другой арм посчитаны.
 baseline="exp24-iam4vp-nophys-orog-${REGION}"
-if ls "${RAW_DIR}/metrics_${baseline}-s0_per_sample.npz" >/dev/null 2>&1 \
+if ls "${RAW_DIR}/metrics_${baseline}-${SEED_TAG}_per_sample.npz" >/dev/null 2>&1 \
    && [[ "$(ls "${RAW_DIR}"/metrics_*_per_sample.npz 2>/dev/null | wc -l)" -ge 2 ]]; then
   echo "[exp24-metrics] парные дельты к ${baseline}"
   python "${REPO_ROOT}/docs/experiments/16_model_ablation_ladder/metrics/paired_deltas.py" \
