@@ -54,6 +54,12 @@ JOBS: list[tuple[str, str, str, int]] = [
     ("iam4vp", "a2", "static", 1),
     ("iam4vp", "nophys", "orog", 1),
     ("iam4vp", "a2", "orog", 1),
+    # orog-only для PredRNNv2/SimVPv2 — закрывает пробел матрицы (см. exp26 README):
+    # раньше orography-only арм был только у IAM4VP.
+    ("predrnnv2", "nophys", "orog", 0),
+    ("predrnnv2", "a2", "orog", 0),
+    ("simvpv2", "nophys", "orog", 0),
+    ("simvpv2", "a2", "orog", 0),
 ]
 
 

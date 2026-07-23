@@ -48,15 +48,20 @@ REGIONS: dict[str, dict] = {
 }
 
 # Базовые USA-конфиги exp24 (seed 0) — та же матрица, что дала результат exp24.
-# IAM4VP несёт полный A/B (orog / static); SimVPv2 и PredRNNv2 — только static
-# (как в exp24). Порядок стемов — как в configs/exp24/.
+# Все 3 семейства несут полный A/B (orog / static) — orog-only для PredRNNv2/
+# SimVPv2 добавлен расширением (закрывает пробел матрицы, см. артефакт аудита).
+# Порядок стемов — как в configs/exp24/.
 BASE_CONFIGS: list[str] = [
     "configs/exp24/exp24_iam4vp_nophys_orog_usa.yaml",
     "configs/exp24/exp24_iam4vp_a2_orog_usa.yaml",
     "configs/exp24/exp24_iam4vp_nophys_static_usa.yaml",
     "configs/exp24/exp24_iam4vp_a2_static_usa.yaml",
+    "configs/exp24/exp24_predrnnv2_nophys_orog_usa.yaml",
+    "configs/exp24/exp24_predrnnv2_a2_orog_usa.yaml",
     "configs/exp24/exp24_predrnnv2_nophys_static_usa.yaml",
     "configs/exp24/exp24_predrnnv2_a2_static_usa.yaml",
+    "configs/exp24/exp24_simvpv2_nophys_orog_usa.yaml",
+    "configs/exp24/exp24_simvpv2_a2_orog_usa.yaml",
     "configs/exp24/exp24_simvpv2_nophys_static_usa.yaml",
     "configs/exp24/exp24_simvpv2_a2_static_usa.yaml",
 ]

@@ -1,9 +1,14 @@
-"""Генератор 18 региональных конфигов exp22 из 9 базовых USA-конфигов.
+"""Генератор региональных конфигов exp22 из USA-конфигов.
 
-exp22 = 3 семейства × 3 арма (no_physics / A2 exp13 / legacy) × 2 региона
-(France/Europe, North Pacific). Регион меняет РОВНО несколько полей, поэтому
-конфиги не пишутся руками, а генерируются из существующих USA-арм-конфигов
-подстановкой региональных значений (DRY, спек §6):
+exp22 = 3 семейства × 5 армов (no_physics / A2 exp13 / legacy / A2-noQ / +exp14)
+× 2 региона (France/Europe, North Pacific). Изначальная волна несла только 3
+арма (no_physics/A2/legacy); A2-noQ и +exp14 добавлены расширением, чтобы
+покрыть остальную физ-лестницу exp16/20/21 (кроме +exp15 — тот требует
+region-specific климатологии `eq15_clim_summary_<region>_2000.npz`, которой нет
+ни для France, ни для NPac; это отдельная задача подготовки данных, не входит
+в это расширение). Регион меняет РОВНО несколько полей, поэтому конфиги не
+пишутся руками, а генерируются из существующих USA-арм-конфигов подстановкой
+региональных значений (DRY, спек §6):
 
   * ``data.cut`` — окно кропа региона (оба 32×64, спек §3);
   * ``model.params.physics_lat_start_deg`` — широта первого латентного ряда
@@ -52,13 +57,23 @@ BASE_CONFIGS: dict[tuple[str, str], str] = {
     ("iam4vp", "nophys"): "configs/pi_iam4vp_residual_no_physics_usa_v4.yaml",
     ("iam4vp", "a2"): "configs/pi_iam4vp_residual_diabatic_usa_v4.yaml",
     ("iam4vp", "legacy"): "configs/pi_iam4vp_residual_legacy_hybrid_usa_v4.yaml",
+    ("iam4vp", "a2noq"): "configs/pi_iam4vp_residual_no_diabatic_usa_v4.yaml",
+    ("iam4vp", "exp14"): "configs/pi_iam4vp_residual_exp14_usa_v4.yaml",
     ("predrnnv2", "nophys"): "configs/exp20/exp20_p0_no_physics_s0.yaml",
     ("predrnnv2", "a2"): "configs/exp20/exp20_p3_a2_exp13_s0.yaml",
     ("predrnnv2", "legacy"): "configs/exp20/exp20_p1_legacy_hybrid_s0.yaml",
+    ("predrnnv2", "a2noq"): "configs/exp20/exp20_p3a_no_diabatic_s0.yaml",
+    ("predrnnv2", "exp14"): "configs/exp20/exp20_p4_exp14_s0.yaml",
     ("simvpv2", "nophys"): "configs/exp21/exp21_s0_no_physics_s0.yaml",
     ("simvpv2", "a2"): "configs/exp21/exp21_s3_a2_exp13_s0.yaml",
     ("simvpv2", "legacy"): "configs/exp21/exp21_s1_legacy_hybrid_s0.yaml",
+    ("simvpv2", "a2noq"): "configs/exp21/exp21_s3a_no_diabatic_s0.yaml",
+    ("simvpv2", "exp14"): "configs/exp21/exp21_s4_exp14_s0.yaml",
 }
+
+# Новые (family, arm) добавленные этим расширением — используются лончером,
+# чтобы отличить "досчитать существующие" от "запустить с нуля".
+EXTENSION_ARMS = {"a2noq", "exp14"}
 
 # Бюджет эпох — пер-семейный. PredRNNv2 на 150 эпох не влезает в дедлайн аллокации
 # кластера (~27 ч, ресюма нет; ~16 мин/эпоху у физ-арма → 150 эп ≈ 40 ч), поэтому у
