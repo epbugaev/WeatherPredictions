@@ -225,10 +225,21 @@ def render_forest(deltas: np.ndarray, channels: list[str], spec: LadderSpec, dst
     plt.close(fig)
 
 
-def render_levels(deltas: np.ndarray, metric: str, spec: LadderSpec, dst: Path) -> None:
+def render_levels(
+    deltas: np.ndarray,
+    metric: str,
+    spec: LadderSpec,
+    dst: Path,
+    title_prefix: str = "вклад физики",
+) -> None:
     """Хитмап [уровень × шаг] к контролю: строка = арм, столбец = переменная.
 
     Незначимые ячейки (CI накрывает ноль) заштрихованы — по ним нельзя судить.
+
+    Args:
+        title_prefix: ведущая фраза заголовка (по умолчанию «вклад физики» —
+            подходит для армов физ-лестницы; для нефизических сравнений
+            (например, модель против модели) передайте свою фразу).
     """
     label, _ = METRICS[metric]
     clip = METRIC_CLIP[metric]
@@ -266,7 +277,7 @@ def render_levels(deltas: np.ndarray, metric: str, spec: LadderSpec, dst: Path) 
     colorbar = fig.colorbar(image, ax=axes, fraction=0.015, pad=0.01)
     colorbar.set_label(f"выигрыш к {spec.baseline_label}, % ({label})")
     fig.suptitle(
-        f"{label}: вклад физики по [уровень × шаг] относительно {spec.baseline_label} "
+        f"{label}: {title_prefix} по [уровень × шаг] относительно {spec.baseline_label} "
         f"(эпоха {spec.epoch})\n"
         "синее = физика лучше · штриховка = CI накрывает ноль (незначимо)",
         fontsize=12,
