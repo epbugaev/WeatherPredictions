@@ -231,6 +231,7 @@ def render_levels(
     spec: LadderSpec,
     dst: Path,
     title_prefix: str = "вклад физики",
+    better_label: str = "физика",
 ) -> None:
     """Хитмап [уровень × шаг] к контролю: строка = арм, столбец = переменная.
 
@@ -240,6 +241,8 @@ def render_levels(
         title_prefix: ведущая фраза заголовка (по умолчанию «вклад физики» —
             подходит для армов физ-лестницы; для нефизических сравнений
             (например, модель против модели) передайте свою фразу).
+        better_label: подлежащее в подписи «синее = {better_label} лучше»
+            (по умолчанию «физика»).
     """
     label, _ = METRICS[metric]
     clip = METRIC_CLIP[metric]
@@ -279,7 +282,7 @@ def render_levels(
     fig.suptitle(
         f"{label}: {title_prefix} по [уровень × шаг] относительно {spec.baseline_label} "
         f"(эпоха {spec.epoch})\n"
-        "синее = физика лучше · штриховка = CI накрывает ноль (незначимо)",
+        f"синее = {better_label} лучше · штриховка = CI накрывает ноль (незначимо)",
         fontsize=12,
     )
     fig.savefig(dst, bbox_inches="tight")
@@ -287,12 +290,22 @@ def render_levels(
 
 
 def render_arm_metric_heatmap(
-    deltas: np.ndarray, arm: str, metric: str, spec: LadderSpec, dst: Path
+    deltas: np.ndarray,
+    arm: str,
+    metric: str,
+    spec: LadderSpec,
+    dst: Path,
+    better_label: str = "физика",
 ) -> None:
     """Один арм × одна метрика: хитмап [уровень × шаг], панель на переменную.
 
     Числа — в ячейках; **штриховка = CI накрывает ноль** (ячейку читать нельзя).
-    Синее всегда означает «физика лучше контроля», независимо от направления метрики.
+    Синее означает «{better_label} лучше контроля» (по умолчанию «физика»),
+    независимо от направления метрики.
+
+    Args:
+        better_label: подлежащее в подписи «синее = {better_label} лучше»
+            (по умолчанию «физика»).
     """
     label, _ = METRICS[metric]
     clip = METRIC_CLIP[metric]
@@ -341,7 +354,7 @@ def render_arm_metric_heatmap(
     )
     add_caption(
         fig,
-        f"Синее = физика лучше {base}, красное = хуже "
+        f"Синее = {better_label} лучше {base}, красное = хуже "
         "(знак развёрнут под направление метрики).\n"
         "ШТРИХОВКА = 95 % CI накрывает ноль: эффект от нуля не отличим, "
         "ячейку читать нельзя.\n"
