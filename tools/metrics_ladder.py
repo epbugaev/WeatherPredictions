@@ -265,6 +265,18 @@ def render_levels(
                 hatches=["////"],
                 extend="neither",
             )
+            for level_row in range(block.shape[0]):
+                for step_col in range(block.shape[1]):
+                    value = block[level_row, step_col]
+                    ax.text(
+                        step_col,
+                        level_row,
+                        f"{value:+.0f}" if abs(value) >= 0.5 else "·",
+                        ha="center",
+                        va="center",
+                        fontsize=4.2,
+                        color="white" if abs(value) > 0.62 * clip else INK,
+                    )
             if row == 0:
                 ax.set_title(var, fontsize=11)
             if col == 0:
